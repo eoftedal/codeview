@@ -62,7 +62,10 @@ function withoutCursorEvents(action: () => void): void {
 
 function toRange(span: Span): monaco.Range {
   const target = model!
-  return monaco.Range.fromPositions(target.getPositionAt(span.start), target.getPositionAt(span.end))
+  return monaco.Range.fromPositions(
+    target.getPositionAt(span.start),
+    target.getPositionAt(span.end),
+  )
 }
 
 function decoration(
@@ -148,8 +151,9 @@ onMounted(() => {
   // Test hook: the browser suite uses the editor's own coordinate mapping to click an exact
   // character. Dev-only, so it never reaches a production bundle.
   if (import.meta.env.DEV) {
-    ;(window as unknown as { __codeviewEditor?: monaco.editor.IStandaloneCodeEditor }).__codeviewEditor =
-      instance
+    ;(
+      window as unknown as { __codeviewEditor?: monaco.editor.IStandaloneCodeEditor }
+    ).__codeviewEditor = instance
   }
 })
 

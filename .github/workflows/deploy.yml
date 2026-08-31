@@ -19,9 +19,10 @@ jobs:
           node-version: 22 # Vite 8 needs 20.19+ / 22.12+; pinning keeps the runner default from surprising us.
           cache: npm
 
-      - name: Install and Build 🔧 # Unit tests, then the puppeteer suite against a real browser, then the static bundle.
+      - name: Install and Build 🔧 # Formatting, unit tests, the puppeteer suites, then the static bundle.
         run: |
           npm ci
+          npm run format:check
           npm run test
           npm run test:e2e
           npm run build

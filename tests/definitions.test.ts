@@ -72,7 +72,9 @@ describe('functions and classes', () => {
   })
 
   it('clips a multi-line signature to its first line', () => {
-    const def = defAt(`function wide(\n  a: number,\n  b: number,\n) {\n  return a + b\n}\nwid|e(1, 2)`)
+    const def = defAt(
+      `function wide(\n  a: number,\n  b: number,\n) {\n  return a + b\n}\nwid|e(1, 2)`,
+    )
     expect(def?.primaryText).toBe('function wide(')
   })
 

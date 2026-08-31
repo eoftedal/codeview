@@ -7,14 +7,7 @@ export interface Span {
 }
 
 export type DefinitionReason =
-  | 'variable'
-  | 'parameter'
-  | 'function'
-  | 'class'
-  | 'property'
-  | 'import'
-  | 'binding'
-  | 'other'
+  'variable' | 'parameter' | 'function' | 'class' | 'property' | 'import' | 'binding' | 'other'
 
 export interface DefinitionResult {
   /** The declaration itself. */
@@ -237,7 +230,9 @@ export function resolveDefinition(
   if (!definitions || definitions.length === 0) return null
 
   // `new Box()` reports both the class and its constructor; the class is the useful one.
-  const info = definitions.find((d) => d.kind !== ts.ScriptElementKind.constructorImplementationElement) ?? definitions[0]!
+  const info =
+    definitions.find((d) => d.kind !== ts.ScriptElementKind.constructorImplementationElement) ??
+    definitions[0]!
   if (info.fileName !== fileName) return null
 
   const declaration = declarationFor(findTsNodeAtOffset(sf, info.textSpan.start))
