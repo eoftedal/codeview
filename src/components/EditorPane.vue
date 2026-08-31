@@ -7,6 +7,8 @@ import type { DefinitionResult, Span } from '../lib/definitions'
 const props = defineProps<{
   modelValue: string
   language: Language
+  /** Shown above the editor when set — from the `filename` parameter, or an opened file. */
+  fileName: string | null
   /** Range of the selected AST node. */
   selection: Span | null
   definition: DefinitionResult | null
@@ -238,6 +240,7 @@ defineExpose({ revealDefinition })
     @dragleave="dropActive = false"
     @drop.prevent="onDrop"
   >
+    <div v-if="fileName" class="file-name" :title="fileName">{{ fileName }}</div>
     <div ref="host" class="editor" />
     <div v-if="dropActive" class="drop-hint">Drop a .ts, .tsx, .js or .jsx file</div>
   </div>
@@ -247,10 +250,27 @@ defineExpose({ revealDefinition })
 .editor-pane {
   position: relative;
   height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.file-name {
+  flex: 0 0 auto;
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--dim);
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .editor {
-  height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 
 .drop-active .editor {

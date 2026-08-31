@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { decodeShare, encodeShare, parseFragment } from '../src/lib/share'
+import {
+  buildFragment,
+  decodeShare,
+  encodeShare,
+  isFlagSet,
+  parseFragment,
+  parseParams,
+} from '../src/lib/share'
 
 describe('encodeShare / decodeShare', () => {
   it('round-trips a buffer through deflate', async () => {
@@ -68,5 +75,86 @@ describe('parseFragment', () => {
 
   it('does not mistake an equals sign in the value for a separator', () => {
     expect(parseFragment('#src=const%20x%20=%201').get('src')).toBe('const x = 1')
+  })
+})
+
+describe('parseParams', () => {
+  it('reads the query string as well as the fragment', () => {
+    const params = parseParams('?filename=App.tsx', '#src=z.abc')
+    expect(params.get('filename')).toBe('App.tsx')
+    expect(params.get('src')).toBe('z.abc')
+  })
+
+  it('lets the fragment win over the query string', () => {
+    expect(parseParams('?lang=js', '#lang=tsx').get('lang')).toBe('tsx')
+  })
+
+  it('is case-insensitive about keys, since they get typed by hand', () => {
+    expect(parseParams('?HideHeader=1', '').get('hideheader')).toBe('1')
+    expect(parseParams('', '#FileName=a.ts').get('filename')).toBe('a.ts')
+  })
+
+  it('keeps values exactly as written', () => {
+    expect(parseParams('?filename=My%20File.TS', '').get('filename')).toBe('My File.TS')
+  })
+
+  it('copes with an empty location', () => {
+    expect(parseParams('', '').size).toBe(0)
+  })
+})
+
+describe('isFlagSet', () => {
+  it('is on when the key is present with no value', () => {
+    expect(isFlagSet(parseParams('?hideHeader', ''), 'hideHeader')).toBe(true)
+  })
+
+  it('is on for the usual truthy spellings', () => {
+    for (const value of ['true', '1', 'yes', 'on', 'anything']) {
+      expect(isFlagSet(parseParams(`?hideHeader=${value}`, ''), 'hideHeader')).toBe(true)
+    }
+  })
+
+  it('is off when explicitly disabled', () => {
+    for (const value of ['false', '0', 'no', 'off', 'FALSE', ' 0 ']) {
+      expect(isFlagSet(parseParams(`?hideHeader=${value}`, ''), 'hideHeader')).toBe(false)
+    }
+  })
+
+  it('is off when absent', () => {
+    expect(isFlagSet(parseParams('?src=x', ''), 'hideHeader')).toBe(false)
+  })
+})
+
+describe('buildFragment', () => {
+  it('writes the keys a share link carries', () => {
+    expect(buildFragment({ src: 'z.abc', lang: 'tsx', filename: 'App.tsx' })).toBe(
+      '#src=z.abc&lang=tsx&filename=App.tsx',
+    )
+  })
+
+  it('drops empty and absent values', () => {
+    expect(buildFragment({ src: 'z.abc', lang: 'ts', filename: null })).toBe('#src=z.abc&lang=ts')
+    expect(buildFragment({ src: 'z.abc', filename: '' })).toBe('#src=z.abc')
+    expect(buildFragment({ filename: undefined })).toBe('')
+  })
+
+  it('leaves a base64url payload untouched', () => {
+    const payload = 'z.abcDEF123-_'
+    expect(buildFragment({ src: payload })).toBe(`#src=${payload}`)
+  })
+
+  it('round-trips a filename that needs escaping', () => {
+    for (const name of [
+      'src/services/Connection.ts',
+      'my file.ts',
+      'a&b.ts',
+      'hash#tag.ts',
+      'plus+one.ts',
+      'grüß.ts',
+    ]) {
+      const fragment = buildFragment({ src: 'z.abc', lang: 'ts', filename: name })
+      expect(parseFragment(fragment).get('filename'), name).toBe(name)
+      expect(parseFragment(fragment).get('src'), name).toBe('z.abc')
+    }
   })
 })

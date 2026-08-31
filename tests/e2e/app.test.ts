@@ -282,6 +282,109 @@ describe('share links', () => {
   })
 })
 
+describe('embedding parameters', () => {
+  async function open(query: string) {
+    const fresh = await browser.newPage()
+    await fresh.setViewport({ width: 1400, height: 1000 })
+    await fresh.goto(`${URL}${query}`, { waitUntil: 'networkidle0' })
+    await fresh.waitForSelector('.view-line')
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    return fresh
+  }
+
+  it('shows a filename above the editor', async () => {
+    const fresh = await open('?filename=App.tsx')
+    try {
+      expect(await fresh.$eval('.file-name', (el) => el.textContent?.trim())).toBe('App.tsx')
+      // The extension picks the language when no lang is given.
+      expect(
+        await fresh.$$eval('.languages button.active', (nodes) =>
+          nodes.map((node) => node.textContent?.trim()),
+        ),
+      ).toEqual(['TSX'])
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('shows no filename bar when the parameter is absent', async () => {
+    const fresh = await open('')
+    try {
+      expect(await fresh.$('.file-name')).toBeNull()
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('hides the header but keeps both panes working', async () => {
+    const fresh = await open('?hideHeader')
+    try {
+      expect(await fresh.$('.app-bar')).toBeNull()
+      expect(await fresh.$$eval('.row', (nodes) => nodes.length)).toBeGreaterThan(3)
+      expect(await fresh.$$eval('.view-line', (nodes) => nodes.length)).toBeGreaterThan(10)
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('keeps the filename when the header is hidden', async () => {
+    const fresh = await open('?hideHeader=1&filename=embedded.ts')
+    try {
+      expect(await fresh.$('.app-bar')).toBeNull()
+      expect(await fresh.$eval('.file-name', (el) => el.textContent?.trim())).toBe('embedded.ts')
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('carries the filename through Copy link', async () => {
+    const fresh = await open('?filename=src/App.tsx')
+    try {
+      await fresh.evaluate(() => {
+        const button = [...document.querySelectorAll('.actions > button')].find(
+          (candidate) => candidate.textContent?.trim() === 'Copy link',
+        )
+        ;(button as HTMLElement).click()
+      })
+      await new Promise((resolve) => setTimeout(resolve, 700))
+
+      const hash = await fresh.evaluate(() => location.hash)
+      expect(hash).toContain('filename=src%2FApp.tsx')
+      expect(hash).toContain('lang=tsx')
+
+      const recipient = await open(hash)
+      try {
+        expect(await recipient.$eval('.file-name', (el) => el.textContent?.trim())).toBe(
+          'src/App.tsx',
+        )
+      } finally {
+        await recipient.close()
+      }
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('takes the parameters from the fragment too', async () => {
+    const fresh = await open('#hideHeader&filename=fragment.jsx')
+    try {
+      expect(await fresh.$('.app-bar')).toBeNull()
+      expect(await fresh.$eval('.file-name', (el) => el.textContent?.trim())).toBe('fragment.jsx')
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('leaves the header alone when the flag is switched off', async () => {
+    const fresh = await open('?hideHeader=false')
+    try {
+      expect(await fresh.$('.app-bar')).not.toBeNull()
+    } finally {
+      await fresh.close()
+    }
+  })
+})
+
 describe('runtime health', () => {
   it('reports no TypeScript errors on the sample', async () => {
     // Monaco keys its worker off the URI extension; an extensionless one flags valid TS as broken.

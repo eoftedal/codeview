@@ -1,7 +1,7 @@
 import { ref, watch } from 'vue'
 import type { Language } from '../lib/analyzer'
 import { SAMPLE } from '../lib/sample'
-import { decodeShare, encodeShare, parseFragment } from '../lib/share'
+import { buildFragment, decodeShare, encodeShare, isFlagSet, parseParams } from '../lib/share'
 
 const STORAGE_KEY = 'codeview:buffer'
 const MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -50,19 +50,30 @@ function readStored(): Stored | null {
  */
 export function useBuffer() {
   const stored = readStored()
+  const params = parseParams(location.search, location.hash)
+
+  const named = params.get('filename')?.trim() || null
+  const requested = params.get('lang')
+
   const text = ref(stored?.text ?? SAMPLE)
-  const language = ref<Language>(stored?.language ?? 'ts')
-  const fileName = ref('main')
+  const fileName = ref<string | null>(named)
   const notice = ref<string | null>(null)
 
-  const params = parseFragment(location.hash)
+  // An explicit ?lang wins; failing that a filename's extension speaks for itself.
+  const language = ref<Language>(
+    (requested && isLanguage(requested) ? requested : null) ??
+      (named ? languageForFile(named) : null) ??
+      stored?.language ??
+      'ts',
+  )
+
+  /** Chrome the embedding page would rather not show. */
+  const hideHeader = isFlagSet(params, 'hideHeader')
+
   const shared = params.get('src')
   if (shared) {
-    const sharedLanguage = params.get('lang')
     void decodeShare(shared).then((decoded) => {
-      if (decoded === null) return
-      text.value = decoded
-      if (sharedLanguage && isLanguage(sharedLanguage)) language.value = sharedLanguage
+      if (decoded !== null) text.value = decoded
     })
   }
 
@@ -93,16 +104,22 @@ export function useBuffer() {
     }
     text.value = await file.text()
     language.value = detected
-    fileName.value = file.name.replace(/\.[^.]+$/, '')
+    fileName.value = file.name
     notice.value = null
   }
 
   /** Build a share link and put it on the clipboard. Only ever on an explicit request — writing
    *  the hash on every keystroke would flood browser history. */
   async function copyShareLink(): Promise<boolean> {
-    const payload = await encodeShare(text.value)
-    const url = `${location.origin}${location.pathname}#src=${payload}&lang=${language.value}`
-    history.replaceState(null, '', `#src=${payload}&lang=${language.value}`)
+    // The filename rides along: a link that dropped it would arrive without the one bit of
+    // context saying which file the reader is looking at.
+    const fragment = buildFragment({
+      src: await encodeShare(text.value),
+      lang: language.value,
+      filename: fileName.value,
+    })
+    const url = `${location.origin}${location.pathname}${fragment}`
+    history.replaceState(null, '', fragment)
     try {
       await navigator.clipboard.writeText(url)
       notice.value = 'Share link copied to the clipboard.'
@@ -116,10 +133,10 @@ export function useBuffer() {
   function reset(): void {
     text.value = SAMPLE
     language.value = 'ts'
-    fileName.value = 'main'
+    fileName.value = named
     notice.value = null
     history.replaceState(null, '', location.pathname)
   }
 
-  return { text, language, fileName, notice, openFile, copyShareLink, reset }
+  return { text, language, fileName, hideHeader, notice, openFile, copyShareLink, reset }
 }

@@ -22,19 +22,22 @@ async function pipe(bytes: Uint8Array, transform: TransformStream): Promise<Uint
 /**
  * Parsed by hand rather than with `URLSearchParams`, which decodes `+` as a space — that would
  * quietly corrupt a hand-written `#src=a+b`.
+ *
+ * Keys are lower-cased: these get typed by hand, and `hideHeader` should not fail over its capital
+ * H. Values are left exactly as written.
  */
 export function parseFragment(hash: string): Map<string, string> {
   const params = new Map<string, string>()
-  for (const part of hash.replace(/^#/, '').split('&')) {
+  for (const part of hash.replace(/^[#?]/, '').split('&')) {
     if (!part) continue
     const equals = part.indexOf('=')
     const key = equals < 0 ? part : part.slice(0, equals)
     const value = equals < 0 ? '' : part.slice(equals + 1)
     try {
-      params.set(decodeURIComponent(key), decodeURIComponent(value))
+      params.set(decodeURIComponent(key).toLowerCase(), decodeURIComponent(value))
     } catch {
       // A malformed %-escape is more useful kept raw than dropped.
-      params.set(key, value)
+      params.set(key.toLowerCase(), value)
     }
   }
   return params
@@ -73,4 +76,34 @@ export async function decodeShare(payload: string): Promise<string | null> {
     }
   }
   return payload
+}
+
+/** Query string and fragment together, the fragment winning where both name the same key. */
+export function parseParams(search: string, hash: string): Map<string, string> {
+  const params = parseFragment(search)
+  for (const [key, value] of parseFragment(hash)) params.set(key, value)
+  return params
+}
+
+const FALSY = new Set(['false', '0', 'no', 'off'])
+
+/**
+ * A flag is on when present, so `#hideHeader` needs no value — but an explicit `=false` or `=0`
+ * turns it off, which is what someone templating a URL will expect.
+ */
+export function isFlagSet(params: Map<string, string>, key: string): boolean {
+  const value = params.get(key.toLowerCase())
+  return value !== undefined && !FALSY.has(value.trim().toLowerCase())
+}
+
+/**
+ * Build a share fragment. Values are percent-encoded to match `parseFragment` — notably not with
+ * `URLSearchParams`, which would write a space as `+` that the parser then hands back literally.
+ * Empty entries are dropped so a link never carries `filename=`.
+ */
+export function buildFragment(entries: Record<string, string | null | undefined>): string {
+  const parts = Object.entries(entries)
+    .filter(([, value]) => value !== null && value !== undefined && value !== '')
+    .map(([key, value]) => `${key}=${encodeURIComponent(value as string)}`)
+  return parts.length ? `#${parts.join('&')}` : ''
 }

@@ -40,6 +40,23 @@ The fragment is parsed without `URLSearchParams`, which decodes `+` as a space a
 quietly corrupt hand-written source. A prefixed payload that fails to decode is treated as
 literal too — source starting with `z.` is likelier than a corrupt link.
 
+## Parameters
+
+Read from the query string and the fragment alike, the fragment winning where both name a
+key. Key names are case-insensitive, since these get typed by hand.
+
+| Parameter    | Effect                                                                                                         |
+| ------------ | -------------------------------------------------------------------------------------------------------------- |
+| `src`        | the buffer — `z.`/`r.` payload, or literal source                                                              |
+| `lang`       | `ts`, `tsx`, `js` or `jsx`                                                                                     |
+| `filename`   | shown above the editor; its extension picks the language when `lang` is absent. **Copy link** carries it along |
+| `hideHeader` | hides the title bar, language switcher and buttons, for embedding                                              |
+
+`hideHeader` needs no value, though `=false`/`=0`/`=no`/`=off` turns it off. It leaves the
+filename bar alone, so an embed can still say which file it is showing:
+
+    ?hideHeader&filename=src/services/Connection.ts
+
 ## What gets highlighted
 
 | Under the cursor            | Highlighted                                                     |

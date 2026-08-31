@@ -10,7 +10,7 @@ import type { DefinitionResult, Span } from './lib/definitions'
 
 const SPLIT_KEY = 'codeview:split'
 
-const { text, language, notice, openFile, copyShareLink, reset } = useBuffer()
+const { text, language, fileName, hideHeader, notice, openFile, copyShareLink, reset } = useBuffer()
 
 const showTokens = ref(false)
 const analysis = useAnalysis(text, language, showTokens)
@@ -96,7 +96,7 @@ function onFilePicked(event: Event): void {
 
 <template>
   <div class="app">
-    <header class="app-bar">
+    <header v-if="!hideHeader" class="app-bar">
       <h1>codeview</h1>
       <p class="tagline">cursor ↔ AST, with definitions</p>
 
@@ -133,6 +133,7 @@ function onFilePicked(event: Event): void {
             ref="editorPane"
             v-model="text"
             :language="language"
+            :file-name="fileName"
             :selection="selectionSpan"
             :definition="definition"
             :hover="hoverSpan"
