@@ -1,6 +1,7 @@
 import { ref, watch } from 'vue'
 import type { Language } from '../lib/analyzer'
 import { SAMPLE } from '../lib/sample'
+import { decodeShare, encodeShare, parseFragment } from '../lib/share'
 
 const STORAGE_KEY = 'codeview:buffer'
 const MAX_FILE_BYTES = 2 * 1024 * 1024
@@ -24,42 +25,6 @@ function isLanguage(value: string): value is Language {
 
 export function languageForFile(name: string): Language | null {
   return EXTENSIONS[name.split('.').pop()?.toLowerCase() ?? ''] ?? null
-}
-
-function toBase64Url(bytes: Uint8Array): string {
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-function fromBase64Url(value: string): Uint8Array {
-  const binary = atob(value.replace(/-/g, '+').replace(/_/g, '/'))
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0))
-}
-
-async function pipe(bytes: Uint8Array, transform: TransformStream): Promise<Uint8Array> {
-  const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(transform)
-  return new Uint8Array(await new Response(stream).arrayBuffer())
-}
-
-/** `z.` marks a deflated payload, `r.` a raw one, so old links keep working either way. */
-async function encodeShare(text: string): Promise<string> {
-  const bytes = new TextEncoder().encode(text)
-  if (typeof CompressionStream === 'undefined') return `r.${toBase64Url(bytes)}`
-  return `z.${toBase64Url(await pipe(bytes, new CompressionStream('deflate-raw')))}`
-}
-
-async function decodeShare(payload: string): Promise<string | null> {
-  try {
-    const bytes = fromBase64Url(payload.slice(2))
-    if (payload.startsWith('r.')) return new TextDecoder().decode(bytes)
-    if (payload.startsWith('z.') && typeof DecompressionStream !== 'undefined') {
-      return new TextDecoder().decode(await pipe(bytes, new DecompressionStream('deflate-raw')))
-    }
-  } catch {
-    // A hand-edited or truncated link just falls back to whatever was stored.
-  }
-  return null
 }
 
 interface Stored {
@@ -90,7 +55,7 @@ export function useBuffer() {
   const fileName = ref('main')
   const notice = ref<string | null>(null)
 
-  const params = new URLSearchParams(location.hash.slice(1))
+  const params = parseFragment(location.hash)
   const shared = params.get('src')
   if (shared) {
     const sharedLanguage = params.get('lang')

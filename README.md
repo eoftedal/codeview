@@ -27,8 +27,18 @@ and publishes it to https://eoftedal.github.io/codeview/ — see
 `.github/workflows/deploy.yml`.
 
 Paste or type into the editor, open a local file (button or drag-and-drop), or share a
-buffer with **Copy link**, which deflates it into the URL fragment. The buffer is kept in
-`localStorage` between visits.
+buffer with **Copy link**. The buffer is kept in `localStorage` between visits.
+
+A share link carries the whole buffer in the URL fragment, which browsers never send to
+the server — so shared code stays between the people holding the link. **Copy link** writes
+`#src=z.<payload>`: raw DEFLATE (via `CompressionStream`, no dependency), then base64url.
+Anything without a `z.` prefix is read literally, so a link can also be written by hand:
+
+    #src=const%20answer%20%3D%2042&lang=ts
+
+The fragment is parsed without `URLSearchParams`, which decodes `+` as a space and would
+quietly corrupt hand-written source. A prefixed payload that fails to decode is treated as
+literal too — source starting with `z.` is likelier than a corrupt link.
 
 ## What gets highlighted
 
@@ -90,6 +100,7 @@ tint and an underline land on the code.
 src/lib/analyzer.ts        in-memory LanguageService, TS node lookup  (pure, tested)
 src/lib/astTree.ts         AST → flat node list, offset lookups       (pure, tested)
 src/lib/definitions.ts     the definition rules                       (pure, tested)
+src/lib/share.ts           share-link encoding, fragment parsing       (pure, tested)
 src/lib/monacoSetup.ts     Monaco theme and compiler options
 src/lib/sample.ts          seed buffer, exercises every rule
 src/composables/useAnalysis.ts  debounced parse, held in a shallowRef

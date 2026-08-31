@@ -232,6 +232,56 @@ describe('language switching', () => {
   })
 })
 
+describe('share links', () => {
+  /** A fresh page so the suite's own editor state is left alone. */
+  async function loadInNewPage(hash: string) {
+    const fresh = await browser.newPage()
+    await fresh.setViewport({ width: 1400, height: 1000 })
+    await fresh.goto(`${URL}${hash}`, { waitUntil: 'networkidle0' })
+    await fresh.waitForSelector('.view-line')
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const source = await fresh.$$eval('.view-line', (nodes) =>
+      nodes.map((node) => (node.textContent ?? '').replace(/\u00a0/g, ' ')).join('\n'),
+    )
+    const kinds = await fresh.$$eval('.kind', (nodes) => nodes.map((node) => node.textContent))
+    return { fresh, source, kinds }
+  }
+
+  it('loads a hand-written #src= fragment as plain source', async () => {
+    const { fresh, source, kinds } = await loadInNewPage('#src=const%20answer%20%3D%2042&lang=ts')
+    try {
+      expect(source).toContain('const answer = 42')
+      expect(kinds).toContain('VariableStatement')
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('round-trips the buffer through Copy link', async () => {
+    // Clipboard access is denied in headless Chrome; the app catches that and still writes the
+    // fragment, which is the part being tested here.
+    await page.evaluate(() => {
+      // '.actions button' would also match the language buttons nested in .languages.
+      const button = [...document.querySelectorAll('.actions > button')].find(
+        (candidate) => candidate.textContent?.trim() === 'Copy link',
+      )
+      ;(button as HTMLElement).click()
+    })
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const hash = await page.evaluate(() => location.hash)
+    expect(hash).toMatch(/^#src=z\./)
+
+    const { fresh, source } = await loadInNewPage(hash)
+    try {
+      expect(source).toContain('import { formatAddress }')
+      expect(source).toContain('const greeting = ')
+    } finally {
+      await fresh.close()
+      await page.evaluate(() => history.replaceState(null, '', location.pathname))
+    }
+  })
+})
+
 describe('runtime health', () => {
   it('reports no TypeScript errors on the sample', async () => {
     // Monaco keys its worker off the URI extension; an extensionless one flags valid TS as broken.
