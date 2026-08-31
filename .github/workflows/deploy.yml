@@ -1,0 +1,32 @@
+name: Build and Deploy
+on:
+  push:
+    branches:
+      - main
+permissions:
+  contents: write
+jobs:
+  build-and-deploy:
+    concurrency: ci-${{ github.ref }} # Recommended if you intend to make multiple deployments in quick succession.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 🛎️
+        uses: actions/checkout@v4
+
+      - name: Set up Node ⚙️
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22 # Vite 8 needs 20.19+ / 22.12+; pinning keeps the runner default from surprising us.
+          cache: npm
+
+      - name: Install and Build 🔧 # Unit tests, then the puppeteer suite against a real browser, then the static bundle.
+        run: |
+          npm ci
+          npm run test
+          npm run test:e2e
+          npm run build
+
+      - name: Deploy 🚀
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: dist # The folder the action should deploy.

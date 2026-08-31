@@ -1,0 +1,53 @@
+:root {
+  --bg: #0b0f16;
+  --panel: #10151f;
+  --border: #1e2534;
+  --text: #d7dce5;
+  --dim: #7d8799;
+  --accent: #7aa2f7;
+  --gold: #e0af68;
+  --row-hover: #ffffff0a;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+/* Monaco renders its decorations outside any component's scope, so these live in global CSS. */
+.cv-selected {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-radius: 2px;
+  outline: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.cv-def {
+  background: color-mix(in srgb, var(--gold) 20%, transparent);
+  border-bottom: 2px solid var(--gold);
+}
+
+.cv-def-weak {
+  background: color-mix(in srgb, var(--gold) 7%, transparent);
+  border-radius: 2px;
+}
+
+.cv-hover {
+  background: #ffffff12;
+  border-radius: 2px;
+}
