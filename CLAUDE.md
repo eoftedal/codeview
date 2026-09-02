@@ -76,8 +76,23 @@ must never be made reactive. `astTree.ts` copies each parse into a flat plain-ob
 the tree and the Monaco editor instance live in `shallowRef`s. Tree rows get shared state via
 `provide`/`inject` (`src/components/astContext.ts`), not prop drilling.
 
+**The chat tab is a third question with a third cost.** `src/lib/chat.ts` reaches for Chrome's
+on-device `LanguageModel` global and nothing else — no key, no fetch, no fallback provider; if the
+global is missing the pane says so and stops. `useChat` lives in `App.vue`, not in `ChatPane.vue`,
+because the pane unmounts on every tab switch and a conversation must not. The system prompt (role,
+the source/sink definitions, the line-numbered buffer) is built once per session, so the code it
+carries is a snapshot — edits raise a `stale` hint rather than silently rebuilding the session,
+which would discard the conversation. The availability probe waits for the tab to be opened.
+
+Answers are Markdown, rendered by `markdown.ts` → `MarkdownText.vue` → `MarkdownSpans.vue` as
+real elements — never `v-html`, which is what keeps model output from becoming markup. The parser's
+odd-looking rules are deliberate: an unterminated fence is code (a streaming answer is always
+mid-block), emphasis is `*`-only (`_` would italicise `snake_case`), and only `http(s)` targets
+become links.
+
 **Pure vs. impure.** `src/lib/{analyzer,astTree,definitions,flow,share}.ts` are pure and unit-tested
 over fixture strings; everything else is browser-bound and covered only by the e2e suites.
+`chat.ts` is the mixed case: `buildSystemPrompt`/`numberLines` are pure, `languageModel()` is not.
 
 ## Things that will bite
 

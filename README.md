@@ -168,6 +168,34 @@ A trace runs only when asked, and is dropped as soon as the buffer changes — e
 offset into text that has since moved. Unlike the definition highlight, which is one lookup per
 cursor move, a trace costs a reference query per parameter it walks through.
 
+## Asking a model
+
+The third tab is a chat about the buffer, answered by **the browser's own model** — Chrome's
+on-device `LanguageModel` (the Prompt API). That is the only kind of model this app can use:
+there is no backend, and the promise everywhere else is that pasted code never leaves the
+machine. Where the API is missing the tab says only that no language model is available in
+this browser, and does nothing else.
+
+The system prompt makes the model a security engineer reading the code as a SAST tool would —
+taint flowing from **sources** (request fields, environment, files, anything the code does not
+control) to **sinks** (queries, shell commands, `eval`, paths, DOM writes) — and carries the
+whole buffer, line-numbered, so answers can cite lines. The buffer is clipped at 12 000
+characters, and the clip is stated in the prompt: a model shown half a file should know it.
+
+Answers come back as Markdown, so they are rendered rather than shown with their asterisks on.
+`src/lib/markdown.ts` parses the handful of constructs an answer actually uses — fenced code,
+headings, bullet and numbered lists, quotes, inline code, emphasis, links — into a block list
+that the pane draws with ordinary elements. No `v-html`, so nothing a model writes can become
+markup, and no parser dependency. An unterminated fence is code, because a streaming answer is
+always mid-block; emphasis is `*`-only, because `snake_case` names in a code answer are more
+common than underscore italics; and a link is only a link when it is `http(s)`.
+
+A session is created on the first question and reused for follow-ups, which is what makes it a
+conversation — so the code in its system prompt is a **snapshot**. Editing the buffer mid-chat
+does not rewrite it; the pane says the code has changed and offers a new chat, since silently
+rebuilding the session would throw the conversation away. Availability is not probed until the
+tab is first opened.
+
 ## How the panes stay in sync
 
 The cursor **offset** is the single source of truth. Node ids are only stable within one
@@ -191,16 +219,21 @@ src/lib/astTree.ts         AST → flat node list, offset lookups       (pure, t
 src/lib/definitions.ts     the definition rules                       (pure, tested)
 src/lib/flow.ts            the backward provenance walk               (pure, tested)
 src/lib/share.ts           share-link encoding, fragment parsing       (pure, tested)
+src/lib/chat.ts            Prompt API access, the security system prompt
+src/lib/markdown.ts        the answer renderer's block parser           (pure, tested)
 src/lib/monacoSetup.ts     Monaco theme and compiler options
 src/lib/sample.ts          seed buffer, exercises every rule
 src/composables/useAnalysis.ts  debounced parse, held in a shallowRef
 src/composables/useBuffer.ts    sample / localStorage / share link / file open
+src/composables/useChat.ts      on-device model session, streamed answers
 src/App.vue                shared selection state, wires the panes and the tabs
 src/components/EditorPane.vue   Monaco, decorations, cursor events, file drop
 src/components/AstPane.vue      tree root, filter, breadcrumb, definition line
 src/components/AstNodeRow.vue   recursive row
 src/components/TracePane.vue    trace root, summary, external-source jump
 src/components/TraceRow.vue     recursive row
+src/components/ChatPane.vue     conversation, composer, model status
+src/components/MarkdownText.vue  answer blocks; MarkdownSpans.vue, inline
 src/components/SplitPane.vue    draggable divider
 ```
 

@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef, watch } from 'vue'
 import AstPane from './components/AstPane.vue'
+import ChatPane from './components/ChatPane.vue'
 import EditorPane from './components/EditorPane.vue'
 import SplitPane from './components/SplitPane.vue'
 import TracePane from './components/TracePane.vue'
 import { useAnalysis } from './composables/useAnalysis'
 import { useBuffer } from './composables/useBuffer'
+import { useChat } from './composables/useChat'
 import { findNodeAtOffset } from './lib/astTree'
 import type { DefinitionResult, Span } from './lib/definitions'
 import { isExternalOrigin, type FlowTrace } from './lib/flow'
@@ -32,11 +34,19 @@ const revealToken = ref(0)
 /** Set when a trace row asks for a scroll, so the reveal lands on that exact step. */
 const revealSpan = ref<Span | null>(null)
 
-const activeTab = ref<'ast' | 'trace'>('ast')
+const activeTab = ref<'ast' | 'trace' | 'chat'>('ast')
 // Shallow: the graph is replaced wholesale and must never be deeply proxied, like the AST.
 const trace = shallowRef<FlowTrace | null>(null)
 /** A span the trace pane is pointing at, which wins over the AST row under the pointer. */
 const tracedHover = ref<Span | null>(null)
+
+/** Held here, not in the pane: the pane unmounts whenever another tab is shown, and a
+ *  conversation should survive a glance at the tree. */
+const chat = useChat(text, language, fileName)
+
+watch(activeTab, (tab) => {
+  if (tab === 'chat') chat.probe()
+})
 
 const editorPane = ref<InstanceType<typeof EditorPane>>()
 
@@ -197,6 +207,9 @@ function onFilePicked(event: Event): void {
                   {{ trace.externalCount }}
                 </span>
               </button>
+              <button :class="{ active: activeTab === 'chat' }" @click="activeTab = 'chat'">
+                Chat
+              </button>
             </nav>
 
             <AstPane
@@ -217,6 +230,18 @@ function onFilePicked(event: Event): void {
               @run="runTrace()"
               @select="onSelectTraceStep"
               @hover="tracedHover = $event"
+            />
+            <ChatPane
+              v-else-if="activeTab === 'chat'"
+              :status="chat.status.value"
+              :progress="chat.progress.value"
+              :messages="chat.messages.value"
+              :pending="chat.pending.value"
+              :busy="chat.busy.value"
+              :stale="chat.stale.value"
+              @ask="chat.ask($event)"
+              @stop="chat.stop()"
+              @new-chat="chat.newChat()"
             />
           </div>
         </template>
