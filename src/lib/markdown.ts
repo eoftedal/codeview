@@ -25,11 +25,19 @@ export interface ListItem {
 
 export type Block =
   | { kind: 'paragraph'; spans: Inline[] }
+  | { kind: 'think'; text: string }
   | { kind: 'heading'; level: number; spans: Inline[] }
   | { kind: 'code'; language: string | null; text: string }
   | { kind: 'list'; ordered: boolean; start: number; items: ListItem[] }
   | { kind: 'quote'; spans: Inline[] }
   | { kind: 'rule' }
+
+/**
+ * A reasoning model's thinking block. It reaches us two ways: a model left to think out loud, and
+ * the *empty* block WebLLM prefills to stop one thinking — that second kind is pure protocol and
+ * has no business on screen at all. Anything real is kept, but folded away.
+ */
+const THINK = /<think>([\s\S]*?)(?:<\/think>|$)/
 
 const FENCE = /^\s{0,3}(`{3,}|~{3,})\s*([\w+#-]*)\s*$/
 const HEADING = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/
@@ -77,6 +85,19 @@ function isBlockStart(line: string): boolean {
 }
 
 export function parseMarkdown(source: string): Block[] {
+  const think = THINK.exec(source)
+  if (think) {
+    const before = source.slice(0, think.index)
+    const after = source.slice(think.index + think[0].length)
+    const thought = think[1]!.trim()
+    return [
+      ...parseMarkdown(before),
+      // An empty block is the suppression marker, not something the model said: drop it whole.
+      ...(thought ? [{ kind: 'think' as const, text: thought }] : []),
+      ...parseMarkdown(after),
+    ]
+  }
+
   const lines = source.split('\n')
   const blocks: Block[] = []
   let index = 0

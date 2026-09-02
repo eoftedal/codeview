@@ -1,9 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
+import type { ModelChoice } from '../lib/chat'
 import type { ChatMessage, ChatStatus } from '../composables/useChat'
 
 const props = defineProps<{
+  /** Models this browser can run. Empty means none can, and the pane says only that. */
+  models: ModelChoice[]
+  model: string
+  choice: ModelChoice | null
+  thinking: boolean
   status: ChatStatus
   progress: number
   messages: ChatMessage[]
@@ -14,6 +20,8 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  'update:model': [string]
+  'update:thinking': [boolean]
   ask: [string]
   stop: []
   newChat: []
@@ -29,15 +37,20 @@ const draft = ref('')
 const body = ref<HTMLElement>()
 
 const statusLabel = computed(() => {
+  const size = props.choice?.size
   switch (props.status) {
     case 'checking':
-      return 'looking for an on-device model…'
+      return 'checking this model…'
+    case 'unavailable':
+      return 'this model will not load here'
     case 'downloadable':
-      return 'model downloads on the first question'
+      return size && size !== 'no download'
+        ? `${size} downloads on the first question, then it is cached`
+        : 'ready on the first question'
     case 'downloading':
       return `downloading the model… ${Math.round(props.progress * 100)}%`
     default:
-      return props.busy ? 'thinking…' : 'on-device model ready'
+      return props.busy ? 'thinking…' : 'ready — running on this machine'
   }
 })
 
@@ -68,17 +81,42 @@ watch(
 
 <template>
   <section class="chat-pane">
-    <p v-if="status === 'unavailable'" class="unsupported">
+    <p v-if="models.length === 0" class="unsupported">
       No language model is available in this browser.
     </p>
 
     <template v-else>
       <header>
         <div class="toolbar">
+          <select
+            class="model"
+            :value="model"
+            :title="choice?.note"
+            @change="emit('update:model', ($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="option in models" :key="option.id" :value="option.id">
+              {{ option.label }} · {{ option.size }}
+            </option>
+          </select>
+          <label
+            v-if="choice?.thinking"
+            class="reason"
+            title="Let the model reason before it answers. Slower, and the reasoning is kept out of the way."
+          >
+            <input
+              type="checkbox"
+              :checked="thinking"
+              @change="emit('update:thinking', ($event.target as HTMLInputElement).checked)"
+            />
+            think
+          </label>
           <button class="new" :disabled="messages.length === 0 && !busy" @click="emit('newChat')">
             New chat
           </button>
           <button v-if="busy" @click="emit('stop')">Stop</button>
+        </div>
+        <div v-if="status === 'downloading'" class="bar">
+          <span :style="{ width: `${Math.round(progress * 100)}%` }" />
         </div>
         <div class="status">
           <span class="muted">{{ statusLabel }}</span>
@@ -98,6 +136,8 @@ watch(
           Ask about the code in the editor. The whole buffer goes to the model with a system prompt
           that makes it a security engineer reasoning about <strong>sources</strong> and
           <strong>sinks</strong>.
+          <br />
+          <span v-if="choice">{{ choice.note }}</span>
           <span class="suggestions">
             <button v-for="prompt in PROMPTS" :key="prompt" @click="send(prompt)">
               {{ prompt }}
@@ -133,7 +173,7 @@ watch(
         <button type="submit" class="send" :disabled="busy || !draft.trim()">Ask</button>
       </form>
 
-      <footer>Runs on the browser’s built-in model — the code never leaves this machine.</footer>
+      <footer>Runs on this machine — weights come down, the code never goes up.</footer>
     </template>
   </section>
 </template>
@@ -193,6 +233,57 @@ button:disabled {
 .new {
   color: var(--text);
   border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.model {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 5px 7px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 60%;
+}
+
+.model:hover {
+  border-color: var(--accent);
+}
+
+.reason {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--dim);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.reason:hover {
+  color: var(--text);
+}
+
+.reason input {
+  accent-color: var(--accent);
+  margin: 0;
+  cursor: pointer;
+}
+
+/* Weights are big enough that a bare percentage reads as a stall. */
+.bar {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease-out;
 }
 
 .status {

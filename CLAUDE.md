@@ -76,9 +76,28 @@ must never be made reactive. `astTree.ts` copies each parse into a flat plain-ob
 the tree and the Monaco editor instance live in `shallowRef`s. Tree rows get shared state via
 `provide`/`inject` (`src/components/astContext.ts`), not prop drilling.
 
-**The chat tab is a third question with a third cost.** `src/lib/chat.ts` reaches for Chrome's
-on-device `LanguageModel` global and nothing else — no key, no fetch, no fallback provider; if the
-global is missing the pane says so and stops. `useChat` lives in `App.vue`, not in `ChatPane.vue`,
+**The chat tab is a third question with a third cost.** `src/lib/chat.ts` is a provider contract,
+not a client: `providers/{builtin,webllm,transformers}.ts` implement `availability` / `load`, and nothing above
+them knows which model is answering. **Two lifetimes, and conflating them is the bug that keeps
+coming back**: a `ModelEngine` owns the loaded weights and outlives conversations, while a
+`ChatSession` is a system prompt and its turns. `newChat` drops the session and keeps the engine —
+destroying the engine per conversation means reloading the model onto the GPU on every "New chat". No key, no
+server, no hosted fallback — every model runs on the reader's machine.
+
+Both WebGPU libraries are **dynamically imported inside workers** (`worker: { format: 'es' }`,
+`optimizeDeps.exclude`), so they land in their own chunks and the main bundle is unchanged; check
+that with a build before believing an edit. A GPU **adapter** is a fact about the browser, not the
+model — Chrome exposes `navigator.gpu` on machines that hand back nothing — so `useChat.probe`
+settles it once and drops every downloadable model when there is none. That is what leaves the pane
+with the bare "no language model" message rather than a picker full of things that cannot run.
+`enable_thinking` is sent only for models flagged `thinking`, and its value is per _question_, not
+per session — it rides `AskOptions`, because `extra_body` is a request field. WebLLM turns thinking
+off by prefilling an empty `<think>` block, which would corrupt a model that has none. ONNX quantisation is the model's call, not the worker's: a repo's `transformers_js_config` names
+what its weights were validated at, and forcing `q4f16` on a model that asks for `q4` (GLM-Edge)
+fails. Anything fp16 on WebGPU is suspect for small models — the same reason Gemma 3 is absent.
+
+The thinking prefill comes back in the answer, so `markdown.ts` parses `<think>` as a block kind: empty means protocol and is
+dropped, non-empty is folded into a `<details>`, and an unterminated one is thinking-in-progress. `useChat` lives in `App.vue`, not in `ChatPane.vue`,
 because the pane unmounts on every tab switch and a conversation must not. The system prompt (role,
 the source/sink definitions, the line-numbered buffer) is built once per session, so the code it
 carries is a snapshot — edits raise a `stale` hint rather than silently rebuilding the session,

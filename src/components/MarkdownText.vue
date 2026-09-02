@@ -17,6 +17,11 @@ const blocks = computed(() => parseMarkdown(props.text))
     <template v-for="(block, index) in blocks" :key="index">
       <pre v-if="block.kind === 'code'" class="code"><code>{{ block.text }}</code></pre>
 
+      <details v-else-if="block.kind === 'think'" class="think">
+        <summary>thinking</summary>
+        <p>{{ block.text }}</p>
+      </details>
+
       <component :is="`h${block.level}`" v-else-if="block.kind === 'heading'">
         <MarkdownSpans :spans="block.spans" />
       </component>
@@ -118,8 +123,30 @@ hr {
   border-top: 1px solid var(--border);
 }
 
-/* The caret rides the end of the last block, so it stays on the text rather than below it. */
-.streaming > :last-child::after {
+/* Reasoning is folded away: it is how the answer was reached, not the answer. */
+.think {
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.think summary {
+  cursor: pointer;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+
+.think p {
+  margin: 6px 0 0;
+  white-space: pre-line;
+}
+
+/* A thinking block stays collapsed while it fills, so the caret goes on the summary — otherwise
+   a model that reasons for a while looks like a model that has stopped. */
+.streaming > details.think:last-child > summary::after,
+.streaming > :last-child:not(.think)::after {
   content: '';
   display: inline-block;
   width: 6px;

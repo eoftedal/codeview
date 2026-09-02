@@ -233,12 +233,18 @@ function onFilePicked(event: Event): void {
             />
             <ChatPane
               v-else-if="activeTab === 'chat'"
+              :models="chat.models.value"
+              :model="chat.model.value"
+              :choice="chat.choice.value"
+              :thinking="chat.thinking.value"
               :status="chat.status.value"
               :progress="chat.progress.value"
               :messages="chat.messages.value"
               :pending="chat.pending.value"
               :busy="chat.busy.value"
               :stale="chat.stale.value"
+              @update:model="chat.model.value = $event"
+              @update:thinking="chat.thinking.value = $event"
               @ask="chat.ask($event)"
               @stop="chat.stop()"
               @new-chat="chat.newChat()"

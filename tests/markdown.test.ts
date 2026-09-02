@@ -3,7 +3,7 @@ import { parseInline, parseMarkdown, type Block } from '../src/lib/markdown'
 
 /** The rendered text of a block, with the markers the parser consumed put back. */
 function text(block: Block): string {
-  if (block.kind === 'code') return block.text
+  if (block.kind === 'code' || block.kind === 'think') return block.text
   if (block.kind === 'rule') return '---'
   const spans = block.kind === 'list' ? block.items.flatMap((item) => item.spans) : block.spans
   return spans.map((span) => span.text).join('')
@@ -44,6 +44,30 @@ describe('inline spans', () => {
     expect(parseInline('[x](javascript:alert(1))')).toEqual([
       { kind: 'text', text: '[x](javascript:alert(1))' },
     ])
+  })
+})
+
+describe('a reasoning model’s thinking', () => {
+  it('drops the empty block that suppression prefills', () => {
+    const blocks = parseMarkdown('<think>\n\n</think>\n\nThe sink is on line 21.')
+    expect(blocks).toHaveLength(1)
+    expect(text(blocks[0]!)).toBe('The sink is on line 21.')
+  })
+
+  it('keeps a real one, folded away from the answer', () => {
+    const blocks = parseMarkdown('<think>Let me check line 10.</think>\n\nIt is unsafe.')
+    expect(blocks.map((block) => block.kind)).toEqual(['think', 'paragraph'])
+    expect(text(blocks[0]!)).toBe('Let me check line 10.')
+  })
+
+  it('treats an unterminated block as thinking, since streaming arrives mid-thought', () => {
+    const blocks = parseMarkdown('<think>Still working through the')
+    expect(blocks).toEqual([{ kind: 'think', text: 'Still working through the' }])
+  })
+
+  it('leaves the surrounding answer parsed as usual', () => {
+    const blocks = parseMarkdown('Before.\n\n<think>x</think>\n\n- a bullet')
+    expect(blocks.map((block) => block.kind)).toEqual(['paragraph', 'think', 'list'])
   })
 })
 

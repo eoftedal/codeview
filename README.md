@@ -11,7 +11,8 @@ declaration a name actually resolves to, not the first thing with a matching nam
 **trace** and it goes further, walking that value back through assignments, return values and
 call-site arguments until it reaches a constant, an import, or something the file cannot see.
 
-Vue 3 + TypeScript, no backend — the code you paste never leaves the browser.
+Vue 3 + TypeScript, no backend — the code you paste never leaves the browser. (The optional
+chat models are downloaded _to_ the browser; nothing is ever uploaded.)
 
 ## Running it
 
@@ -170,10 +171,34 @@ cursor move, a trace costs a reference query per parameter it walks through.
 
 ## Asking a model
 
-The third tab is a chat about the buffer, answered by **the browser's own model** — Chrome's
-on-device `LanguageModel` (the Prompt API). That is the only kind of model this app can use:
-there is no backend, and the promise everywhere else is that pasted code never leaves the
-machine. Where the API is missing the tab says only that no language model is available in
+The third tab is a chat about the buffer, answered by a model running **on your own machine**.
+There is no backend, and the promise everywhere else holds: weights come down, the code never
+goes up.
+
+Three backends sit behind one interface (`src/lib/chat.ts`), and the picker lists only what this
+browser can actually run:
+
+| Model                        | Runtime                               | Size                |
+| ---------------------------- | ------------------------------------- | ------------------- |
+| Browser built-in             | Chrome's `LanguageModel` (Prompt API) | nothing to download |
+| Qwen2.5-Coder 1.5B / 3B / 7B | WebLLM over WebGPU                    | 1.6 / 2.5 / 5.1 GB  |
+| Qwen3.5 2B / 4B              | WebLLM over WebGPU                    | 2.2 / 3.9 GB        |
+| Qwen2.5-Coder 1.5B (ONNX)    | Transformers.js over WebGPU           | ~1.2 GB             |
+
+The browser's own model is the default wherever it exists — nothing to download, and no wait.
+The rest fetch their weights once from the Hugging Face CDN and the browser caches them; the
+first question after picking one pays for the download, and the progress bar says so. Both
+WebGPU runtimes are loaded lazily, so a reader who never picks one never downloads either
+library. Gemma 2 rather than Gemma 3 is deliberate: Gemma 3 overflows fp16 on WebGPU
+([onnxruntime#26732](https://github.com/microsoft/onnxruntime/issues/26732), open), and GLM-Edge
+is the only GLM published small enough to run in a browser at all. The Qwen3.5 models are
+reasoning models whose thinking block is suppressed, since an answer should be the answer — and where one arrives anyway it is folded away rather than shown.
+
+Starting a new chat keeps the model loaded: only the conversation and its system prompt are
+replaced. Changing model is what unloads one.
+
+Where the browser has neither a built-in model nor a working GPU adapter — `navigator.gpu` can
+exist and still hand back nothing — the tab says only that no language model is available in
 this browser, and does nothing else.
 
 The system prompt makes the model a security engineer reading the code as a SAST tool would —
@@ -191,7 +216,9 @@ always mid-block; emphasis is `*`-only, because `snake_case` names in a code ans
 common than underscore italics; and a link is only a link when it is `http(s)`.
 
 A session is created on the first question and reused for follow-ups, which is what makes it a
-conversation — so the code in its system prompt is a **snapshot**. Editing the buffer mid-chat
+conversation — so the code in its system prompt is a **snapshot**. Changing model starts a new
+one: different weights, a different context budget and a different system prompt, and carrying
+the turns across would misrepresent who said them. Editing the buffer mid-chat
 does not rewrite it; the pane says the code has changed and offers a new chat, since silently
 rebuilding the session would throw the conversation away. Availability is not probed until the
 tab is first opened.
@@ -219,20 +246,21 @@ src/lib/astTree.ts         AST → flat node list, offset lookups       (pure, t
 src/lib/definitions.ts     the definition rules                       (pure, tested)
 src/lib/flow.ts            the backward provenance walk               (pure, tested)
 src/lib/share.ts           share-link encoding, fragment parsing       (pure, tested)
-src/lib/chat.ts            Prompt API access, the security system prompt
+src/lib/chat.ts            the provider contract, model catalogue, system prompt
 src/lib/markdown.ts        the answer renderer's block parser           (pure, tested)
 src/lib/monacoSetup.ts     Monaco theme and compiler options
 src/lib/sample.ts          seed buffer, exercises every rule
 src/composables/useAnalysis.ts  debounced parse, held in a shallowRef
 src/composables/useBuffer.ts    sample / localStorage / share link / file open
-src/composables/useChat.ts      on-device model session, streamed answers
+src/composables/useChat.ts      model choice, session, streamed answers
 src/App.vue                shared selection state, wires the panes and the tabs
 src/components/EditorPane.vue   Monaco, decorations, cursor events, file drop
 src/components/AstPane.vue      tree root, filter, breadcrumb, definition line
 src/components/AstNodeRow.vue   recursive row
 src/components/TracePane.vue    trace root, summary, external-source jump
 src/components/TraceRow.vue     recursive row
-src/components/ChatPane.vue     conversation, composer, model status
+src/components/ChatPane.vue     conversation, composer, model picker
+src/lib/providers/*.ts     built-in / WebLLM / Transformers.js adapters
 src/components/MarkdownText.vue  answer blocks; MarkdownSpans.vue, inline
 src/components/SplitPane.vue    draggable divider
 ```

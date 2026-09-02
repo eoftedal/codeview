@@ -470,6 +470,123 @@ describe('flow trace', () => {
   })
 })
 
+describe('the chat pane picks a model honestly', () => {
+  /** A page with whatever models we say the browser has. The chat pane settles this once, on the
+   *  first look at the tab, so each case needs its own page rather than a reload. */
+  async function chatPageWith(setup: () => void) {
+    const fresh = await browser.newPage()
+    await fresh.evaluateOnNewDocument(setup)
+    await fresh.goto(URL, { waitUntil: 'networkidle0' })
+    await fresh.waitForSelector('.row')
+    const tabs = await fresh.$$('.tabs button')
+    await tabs[2]!.click()
+    await fresh.waitForSelector('.chat-pane')
+    // The GPU probe is async, and what the pane offers depends on how it lands.
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    return fresh
+  }
+
+  it('says only that nothing is available when the browser can run neither', async () => {
+    const fresh = await chatPageWith(() => {
+      delete (window as unknown as { LanguageModel?: unknown }).LanguageModel
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => null },
+        configurable: true,
+      })
+    })
+    try {
+      expect(await fresh.$eval('.chat-pane', (el) => el.textContent?.trim())).toBe(
+        'No language model is available in this browser.',
+      )
+      expect(await fresh.$('.model')).toBeNull()
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('drops the downloadable models when WebGPU hands back no adapter', async () => {
+    const fresh = await chatPageWith(function () {
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async () => ({
+          promptStreaming: () => new ReadableStream({ start: (c) => c.close() }),
+          destroy: () => {},
+        }),
+      }
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => null },
+        configurable: true,
+      })
+    })
+    try {
+      const options = await fresh.$$eval('.model option', (nodes) =>
+        nodes.map((node) => node.textContent?.trim()),
+      )
+      expect(options).toEqual(['Browser built-in · no download'])
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('offers the whole catalogue on a GPU, with the browser’s own model as the default', async () => {
+    const fresh = await chatPageWith(function () {
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async () => ({
+          promptStreaming: () => new ReadableStream({ start: (c) => c.close() }),
+          destroy: () => {},
+        }),
+      }
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+    })
+    try {
+      const options = await fresh.$$eval('.model option', (nodes) =>
+        nodes.map((node) => node.textContent?.trim()),
+      )
+      expect(options[0]).toBe('Browser built-in · no download')
+      expect(options).toContain('Qwen2.5-Coder 1.5B · ~1.6 GB')
+      expect(options).toContain('Qwen3.5 4B · ~3.9 GB')
+      // The one with nothing to download is what a first visit lands on.
+      expect(await fresh.$eval('.model', (el) => (el as HTMLSelectElement).value)).toBe('builtin')
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('offers thinking only on a model that has it, and off by default', async () => {
+    const fresh = await chatPageWith(function () {
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async () => ({
+          promptStreaming: () => new ReadableStream({ start: (c) => c.close() }),
+          destroy: () => {},
+        }),
+      }
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+    })
+    try {
+      // The browser's own model has no thinking mode, so there is nothing to offer.
+      expect(await fresh.$('.reason')).toBeNull()
+
+      // Selecting only changes the choice; the weights are not fetched until a question is asked.
+      await fresh.select('.model', 'qwen3.5-2b')
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      expect(await fresh.$('.reason')).not.toBeNull()
+      expect(await fresh.$eval('.reason input', (el) => (el as HTMLInputElement).checked)).toBe(
+        false,
+      )
+    } finally {
+      await fresh.close()
+    }
+  })
+})
+
 describe('runtime health', () => {
   it('reports no TypeScript errors on the sample', async () => {
     // Monaco keys its worker off the URI extension; an extensionless one flags valid TS as broken.

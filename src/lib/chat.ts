@@ -1,45 +1,205 @@
 /**
- * The chat pane's access to a language model, plus the prompt that turns one into a reviewer of
+ * The chat pane's contract with a language model, plus the prompt that turns one into a reviewer of
  * the current buffer.
  *
- * The model is the browser's own — Chrome's on-device `LanguageModel` (the Prompt API) — which is
- * the only kind this app can use: there is no backend, and the promise everywhere else is that
- * pasted code never leaves the machine. Where the API is missing the pane says so and stops.
+ * Every model runs on the reader's own machine — the browser's built-in one, or weights fetched
+ * once and cached and then executed on the GPU. There is no backend, and the promise everywhere
+ * else in this app is that pasted code never leaves the machine: weights come down, the buffer
+ * never goes up. Where nothing is usable the pane says so and stops.
+ *
+ * The provider implementations live in `providers/`; this file is the seam they share.
  */
 
 import type { Language } from './analyzer'
 
-/** Chrome's own wording for whether the model can answer: `downloadable` still creates, after a
+/** Chrome's own wording, reused for every provider: `downloadable` still creates, after a
  *  download; only `unavailable` is a dead end. */
 export type Availability = 'unavailable' | 'downloadable' | 'downloading' | 'available'
 
-export interface LanguageModelSession {
-  promptStreaming(input: string, options?: { signal?: AbortSignal }): ReadableStream<string>
+/**
+ * Two lifetimes, deliberately separated.
+ *
+ * Loading a model is the expensive half — a download, then weights onto the GPU and shaders
+ * compiled — and it belongs to the *model*. A conversation is the cheap half: a system prompt and
+ * a list of turns. Starting a new chat must not touch the first one, or every "New chat" would sit
+ * through the model loading again.
+ */
+
+export interface AskOptions {
+  signal?: AbortSignal
+  /** Let a reasoning model think before answering. Ignored by models without a thinking mode. */
+  thinking?: boolean
+}
+
+/** One conversation. Providers keep the turns; the pane only ever sees deltas. */
+export interface ChatSession {
+  /** Deltas, not snapshots — the pane accumulates them. */
+  promptStreaming(input: string, options?: AskOptions): ReadableStream<string>
+  /** Ends this conversation. The model stays loaded. */
   destroy(): void
 }
 
-export interface LanguageModelCreateOptions {
-  initialPrompts?: { role: 'system' | 'user' | 'assistant'; content: string }[]
-  signal?: AbortSignal
-  monitor?: (monitor: EventTarget) => void
+/** A loaded model, outliving the conversations held with it. */
+export interface ModelEngine {
+  /** Begin a conversation. Cheap for the downloadable models — the weights are already up. */
+  chat(system: string): Promise<ChatSession>
+  /** Unloads the model itself. Only worth doing when the choice of model changes. */
+  destroy(): void
 }
 
-export interface LanguageModelApi {
+export interface LoadOptions {
+  /** The provider's own model id. The built-in model has none: the browser picks. */
+  model?: string
+  /** Weight download progress, 0–1. Never called for a model that is already cached. */
+  onProgress?: (loaded: number) => void
+  /** Whether this model *has* a thinking mode. Whether to use it is decided per question — but
+   *  it can only be asked of a model that has one: suppression works by prefilling an empty
+   *  block, which would corrupt a model without. */
+  thinking?: boolean
+  /** ONNX quantisation, when the model asks for something other than the default. */
+  dtype?: Quantisation
+}
+
+export interface Provider {
   availability(): Promise<Availability>
-  create(options?: LanguageModelCreateOptions): Promise<LanguageModelSession>
+  load(options: LoadOptions): Promise<ModelEngine>
 }
 
-/** The global, or null in a browser that has no Prompt API. */
-export function languageModel(): LanguageModelApi | null {
-  return (globalThis as { LanguageModel?: LanguageModelApi }).LanguageModel ?? null
+export type ProviderId = 'builtin' | 'webllm' | 'transformers'
+
+/** The ONNX builds worth offering: 4-bit weights, with fp16 or fp32 compute. */
+export type Quantisation = 'q4f16' | 'q4'
+
+export interface ModelChoice {
+  /** Our id: what the picker stores and `localStorage` remembers. */
+  id: string
+  provider: ProviderId
+  label: string
+  /** Rough memory the model needs, for the picker. Empty for the browser's own. */
+  size: string
+  /** How much of the buffer fits alongside a conversation in this model's context. */
+  maxCodeChars: number
+  /** The provider's own model id, where it has one. */
+  model?: string
+  /** A reasoning model: it can be asked to think first, and the pane offers the choice. */
+  thinking?: boolean
+  /** ONNX quantisation, where the repo asks for something other than the `q4f16` default. Not a
+   *  free choice: a repo's `transformers_js_config` names what its weights were validated at, and
+   *  fp16 compute is where small models go numerically wrong on WebGPU. */
+  dtype?: Quantisation
+  note: string
 }
 
 /**
- * An on-device model has a small input quota — a few thousand tokens for the whole conversation,
- * system prompt included — so a large buffer is clipped rather than sent and rejected. The clip is
- * stated in the prompt: a model answering about half a file should know it is looking at half.
+ * The models on offer. Deliberately a short list: every entry is a promise that it works, and a
+ * picker full of near-identical weights helps nobody.
+ *
+ * `size` figures come from WebLLM's own `vram_required_MB`, or for the ONNX entries from the
+ * q4f16 weight size, which is all those repos state. All are approximate, and deliberately so: we
+ * raise the context window past the default those figures were measured at, which grows the KV
+ * cache along with it. Built-in first, so it stays the default wherever it exists.
  */
-export const MAX_CODE_CHARS = 12_000
+export const MODELS: readonly ModelChoice[] = [
+  {
+    id: 'builtin',
+    provider: 'builtin',
+    label: 'Browser built-in',
+    size: 'no download',
+    // Gemini Nano's context is 9216 tokens, shared with the answer.
+    maxCodeChars: 12_000,
+    note: 'Chrome’s own on-device model. Nothing to download, weakest at multi-step reasoning.',
+  },
+  {
+    id: 'qwen-coder-1.5b',
+    provider: 'webllm',
+    label: 'Qwen2.5-Coder 1.5B',
+    size: '~1.6 GB',
+    maxCodeChars: 14_000,
+    model: 'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC',
+    note: 'Code-trained weights. Runs on most integrated GPUs.',
+  },
+  {
+    id: 'gemma-2-2b',
+    provider: 'webllm',
+    label: 'Gemma 2 2B',
+    size: '~1.9 GB',
+    maxCodeChars: 14_000,
+    model: 'gemma-2-2b-it-q4f16_1-MLC',
+    note: 'Google’s, and the safe Gemma here — Gemma 3 overflows fp16 on WebGPU.',
+  },
+  {
+    id: 'qwen3.5-2b',
+    provider: 'webllm',
+    label: 'Qwen3.5 2B',
+    size: '~2.2 GB',
+    maxCodeChars: 14_000,
+    model: 'Qwen3.5-2B-q4f16_1-MLC',
+    thinking: true,
+    note: 'Newer and general-purpose rather than code-trained. Can reason before answering.',
+  },
+  {
+    id: 'qwen-coder-3b',
+    provider: 'webllm',
+    label: 'Qwen2.5-Coder 3B',
+    size: '~2.5 GB',
+    maxCodeChars: 14_000,
+    model: 'Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC',
+    note: 'Better at following a value across functions.',
+  },
+  {
+    id: 'qwen3.5-4b',
+    provider: 'webllm',
+    label: 'Qwen3.5 4B',
+    size: '~3.9 GB',
+    maxCodeChars: 14_000,
+    model: 'Qwen3.5-4B-q4f16_1-MLC',
+    thinking: true,
+    note: 'The strongest reasoning per gigabyte here. Can reason before answering.',
+  },
+  {
+    id: 'qwen-coder-7b',
+    provider: 'webllm',
+    label: 'Qwen2.5-Coder 7B',
+    size: '~5.1 GB',
+    maxCodeChars: 14_000,
+    model: 'Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC',
+    note: 'Strongest here, and needs a discrete or Apple-silicon GPU.',
+  },
+  {
+    id: 'qwen3.5-9b',
+    provider: 'webllm',
+    label: 'Qwen3.5 9B',
+    size: '~6.4 GB',
+    maxCodeChars: 14_000,
+    model: 'Qwen3.5-9B-q4f16_1-MLC',
+    thinking: true,
+    note: 'The largest on offer. Wants a discrete GPU with memory to spare.',
+  },
+  {
+    id: 'qwen-coder-1.5b-onnx',
+    provider: 'transformers',
+    label: 'Qwen2.5-Coder 1.5B (ONNX)',
+    size: '~1.2 GB',
+    maxCodeChars: 14_000,
+    model: 'onnx-community/Qwen2.5-Coder-1.5B-Instruct',
+    note: 'The same weights through Transformers.js rather than WebLLM.',
+  },
+  {
+    id: 'glm-edge-1.5b',
+    provider: 'transformers',
+    label: 'GLM-Edge 1.5B',
+    size: '~1.3 GB',
+    maxCodeChars: 14_000,
+    model: 'onnx-community/glm-edge-1.5b-chat-ONNX',
+    // Its own repo asks for q4 rather than the q4f16 everything else here runs at.
+    dtype: 'q4',
+    note: 'The only GLM small enough to run here. General-purpose, and slower: it runs at q4.',
+  },
+]
+
+export function modelById(id: string): ModelChoice | null {
+  return MODELS.find((choice) => choice.id === id) ?? null
+}
 
 const FENCE: Record<Language, string> = {
   ts: 'typescript',
@@ -59,6 +219,13 @@ export interface CodeContext {
   code: string
   language: Language
   fileName: string | null
+  /**
+   * The buffer budget for the model being asked. Every model here has a small context — a few
+   * thousand tokens for the whole conversation, system prompt included — so a large buffer is
+   * clipped rather than sent and rejected. The clip is stated in the prompt: a model answering
+   * about half a file should know it is looking at half.
+   */
+  maxCodeChars: number
 }
 
 const ROLE = `You are a senior security engineer and an expert in static code analysis. You read code the way a reviewer does: one path at a time, precisely, and you only claim what the code in front of you actually shows.
@@ -87,15 +254,15 @@ You are looking at a single file, shown below with line numbers. You cannot open
  * created with this once, so the code it carries is a snapshot — the pane says as much when the
  * buffer moves on.
  */
-export function buildSystemPrompt({ code, language, fileName }: CodeContext): string {
-  const clipped = code.length > MAX_CODE_CHARS
-  const body = clipped ? code.slice(0, MAX_CODE_CHARS) : code
+export function buildSystemPrompt({ code, language, fileName, maxCodeChars }: CodeContext): string {
+  const clipped = code.length > maxCodeChars
+  const body = clipped ? code.slice(0, maxCodeChars) : code
   const name = fileName ?? `main.${language}`
 
   return [
     ROLE,
     '',
-    `The file under review is \`${name}\`${clipped ? ', truncated after the first ' + MAX_CODE_CHARS + ' characters — the rest is not shown to you' : ''}:`,
+    `The file under review is \`${name}\`${clipped ? `, truncated after the first ${maxCodeChars} characters — the rest is not shown to you` : ''}:`,
     '',
     '```' + FENCE[language],
     numberLines(body),
