@@ -187,7 +187,6 @@ provide(astContextKey, {
   height: 100%;
   min-height: 0;
   background: var(--panel);
-  border-left: 1px solid var(--border);
 }
 
 header {

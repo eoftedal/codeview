@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { monaco, monacoLanguageId, setupMonaco } from '../lib/monacoSetup'
 import type { Language } from '../lib/analyzer'
 import type { DefinitionResult, Span } from '../lib/definitions'
+import type { FlowSpan } from '../lib/flow'
 
 const props = defineProps<{
   modelValue: string
@@ -14,13 +15,19 @@ const props = defineProps<{
   definition: DefinitionResult | null
   /** Range of the AST row under the pointer. */
   hover: Span | null
-  /** Bumped by the parent when the selection should scroll into view. */
+  /** Every step of the active trace. */
+  flow: FlowSpan[]
+  /** Bumped by the parent when something should scroll into view. */
   revealToken: number
+  /** What `revealToken` should scroll to; falls back to the selection when null. */
+  revealSpan: Span | null
 }>()
 
 const emit = defineEmits<{
   'update:modelValue': [string]
   cursor: [number]
+  /** Alt+T or the context menu: trace the value at this offset back to its sources. */
+  trace: [number]
   openFile: [File]
 }>()
 
@@ -33,6 +40,7 @@ let model: monaco.editor.ITextModel | undefined
 let selectionDecorations: monaco.editor.IEditorDecorationsCollection | undefined
 let definitionDecorations: monaco.editor.IEditorDecorationsCollection | undefined
 let hoverDecorations: monaco.editor.IEditorDecorationsCollection | undefined
+let flowDecorations: monaco.editor.IEditorDecorationsCollection | undefined
 
 const EXTENSION: Record<Language, string> = { ts: 'ts', tsx: 'tsx', js: 'js', jsx: 'jsx' }
 
@@ -117,6 +125,17 @@ function applyHover(): void {
   hoverDecorations.set(props.hover ? [decoration(props.hover, 'cv-hover')] : [])
 }
 
+function applyFlow(): void {
+  if (!model || !flowDecorations) return
+  flowDecorations.set(
+    props.flow.map((step) =>
+      step.external
+        ? decoration(step.span, 'cv-flow-external', '#f7768e')
+        : decoration(step.span, 'cv-flow', '#9ece6a'),
+    ),
+  )
+}
+
 onMounted(() => {
   model = createModelFor(props.language, props.modelValue)
 
@@ -138,6 +157,8 @@ onMounted(() => {
   })
   editor.value = instance
 
+  // First, so the trace tint sits underneath the selection and definition highlights.
+  flowDecorations = instance.createDecorationsCollection()
   selectionDecorations = instance.createDecorationsCollection()
   definitionDecorations = instance.createDecorationsCollection()
   hoverDecorations = instance.createDecorationsCollection()
@@ -146,6 +167,23 @@ onMounted(() => {
   instance.onDidChangeCursorPosition((event) => {
     if (suppressCursorEvents) return
     emit('cursor', model!.getOffsetAt(event.position))
+  })
+
+  /**
+   * A real editor action rather than a click gesture. Monaco already owns both click modifiers —
+   * alt adds a cursor and ctrl/cmd goes to a definition, and `multiCursorModifier` only swaps which
+   * is which — so an alt-click would fight the peek widget instead of tracing.
+   */
+  instance.addAction({
+    id: 'codeview.trace',
+    label: 'Trace value to its sources',
+    contextMenuGroupId: 'navigation',
+    contextMenuOrder: 1.5,
+    keybindings: [monaco.KeyMod.Alt | monaco.KeyCode.KeyT],
+    run: (target) => {
+      const position = target.getPosition()
+      if (position) emit('trace', model!.getOffsetAt(position))
+    },
   })
 
   emit('cursor', 0)
@@ -192,19 +230,22 @@ watch(
     applySelection()
     applyDefinition()
     applyHover()
+    applyFlow()
   },
 )
 
 watch(() => props.selection, applySelection)
 watch(() => props.definition, applyDefinition)
 watch(() => props.hover, applyHover)
+watch(() => props.flow, applyFlow)
 
 watch(
   () => props.revealToken,
   () => {
     const instance = editor.value
-    if (!instance || !model || !props.selection) return
-    const range = toRange(props.selection)
+    const target = props.revealSpan ?? props.selection
+    if (!instance || !model || !target) return
+    const range = toRange(target)
     withoutCursorEvents(() => {
       instance.setSelection(range)
       instance.revealRangeInCenterIfOutsideViewport(range, monaco.editor.ScrollType.Smooth)

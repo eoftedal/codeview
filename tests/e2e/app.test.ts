@@ -385,6 +385,91 @@ describe('embedding parameters', () => {
   })
 })
 
+describe('flow trace', () => {
+  const traceRows = () =>
+    page.$$eval('.trace-pane .row', (nodes) =>
+      nodes.map((n) => (n.textContent ?? '').replace(/\s+/g, ' ').trim()),
+    )
+
+  const openTraceTab = async () => {
+    const tabs = await page.$$('.tabs button')
+    await tabs[1]!.click()
+    await page.waitForSelector('.trace-pane')
+  }
+
+  it('walks a value back through an imported call to its sources', async () => {
+    // `address` is built from formatAddress(host, port ?? defaults.port) — an imported function,
+    // so the result originates outside the buffer while the arguments still trace back inside it.
+    await clickAt('address = formatAddress', 2)
+    await openTraceTab()
+    await page.click('.trace-pane .run')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    const rows = await traceRows()
+    expect(rows[0]).toContain('variable `address`')
+    expect(rows.join(' ')).toContain('formatAddress(host, port')
+    // The import is a terminal the walk cannot see past.
+    expect(rows.some((row) => row.includes('another module'))).toBe(true)
+    // ...but the arguments still reach the object literal `host` was destructured from.
+    expect(rows.some((row) => row.includes("'localhost'"))).toBe(true)
+  })
+
+  it('marks external origins in the editor and counts them on the tab', async () => {
+    expect((await decorated('cv-flow-external')).length).toBeGreaterThan(0)
+    expect((await decorated('cv-flow')).length).toBeGreaterThan(0)
+    const badge = await page.$eval('.tabs .badge', (el) => el.textContent?.trim())
+    expect(Number(badge)).toBeGreaterThan(0)
+  })
+
+  it('selects a step when its row is clicked', async () => {
+    const rows = await page.$$('.trace-pane .row')
+    await rows[1]!.click()
+    expect(await page.$eval('.trace-pane .row.selected', (el) => el.textContent)).toBeTruthy()
+  })
+
+  it('ends at a constant when nothing external feeds the value', async () => {
+    await clickAt('const greeting', 8)
+    await page.click('.trace-pane .run')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    const rows = await traceRows()
+    expect(rows[0]).toContain('variable `greeting`')
+    expect(rows.some((row) => row.includes('defined here'))).toBe(true)
+    expect(await page.$('.tabs .badge')).toBeNull()
+  })
+
+  it('traces from the editor keybinding, leaving Monaco’s own gestures alone', async () => {
+    const tabs = await page.$$('.tabs button')
+    await tabs[0]!.click()
+
+    // Occurrence 1: the sample mentions `config.retries` in a comment first.
+    await clickAt('config.retries', 9, 1)
+    await page.keyboard.down('Alt')
+    await page.keyboard.press('KeyT')
+    await page.keyboard.up('Alt')
+    await page.waitForSelector('.trace-pane')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+
+    const rows = await traceRows()
+    expect(rows[0]).toContain('`retries`')
+    // A click modifier would have opened Monaco's definition peek over the editor instead.
+    expect(await page.$('.monaco-editor .peekview-widget')).toBeNull()
+  })
+
+  it('drops the trace when the buffer changes, since every span has shifted', async () => {
+    await page.click('.trace-pane .run')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    expect((await traceRows()).length).toBeGreaterThan(0)
+
+    await clickAt('const greeting', 0)
+    await page.keyboard.type('\n')
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    expect(await traceRows()).toEqual([])
+    expect(await page.$eval('.trace-pane .empty', (el) => el.textContent)).toContain('Trace')
+  })
+})
+
 describe('runtime health', () => {
   it('reports no TypeScript errors on the sample', async () => {
     // Monaco keys its worker off the URI extension; an extensionless one flags valid TS as broken.

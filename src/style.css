@@ -7,6 +7,8 @@
   --accent: #7aa2f7;
   --gold: #e0af68;
   --row-hover: #ffffff0a;
+  --flow: #9ece6a;
+  --danger: #f7768e;
 
   color-scheme: dark;
 }
@@ -55,4 +57,15 @@ body {
 .cv-hover {
   background: #ffffff12;
   border-radius: 2px;
+}
+
+/* Flow trace: every step in the path, with external origins picked out. */
+.cv-flow {
+  background: color-mix(in srgb, var(--flow) 13%, transparent);
+  border-radius: 2px;
+}
+
+.cv-flow-external {
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  border-bottom: 2px solid var(--danger);
 }

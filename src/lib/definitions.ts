@@ -176,6 +176,26 @@ function spanForDeclaration(
   return { primary: { start: decl.getStart(sf), end: decl.getEnd() }, reason: 'other' }
 }
 
+export interface DeclarationView {
+  span: Span
+  reason: DefinitionReason
+  /** e.g. "parameter `req`" — the same wording the definition header uses. */
+  label: string
+}
+
+/**
+ * How a declaration should be presented: the range worth highlighting and what to call it. Shared
+ * so a trace ending at a declaration names it exactly the way the definition header would.
+ */
+export function describeDeclaration(
+  decl: ts.Node,
+  sf: ts.SourceFile,
+  name: string,
+): DeclarationView {
+  const { primary, reason } = spanForDeclaration(decl, sf)
+  return { span: primary, reason, label: `${reason} \`${name}\`` }
+}
+
 function asIdentifier(node: ts.Node): ts.Node | null {
   return ts.isIdentifier(node) || ts.isPrivateIdentifier(node) ? node : null
 }
@@ -203,16 +223,37 @@ function identifierAt(sf: ts.SourceFile, offset: number): ts.Node | null {
   return null
 }
 
-export function resolveDefinition(
+export interface DeclarationHit {
+  /** The declaration itself — the whole thing, not just the name TS pointed at. */
+  declaration: ts.Node
+  /** The name TypeScript resolved, for labelling. */
+  name: string
+  /**
+   * True when the property had no declaration of its own and the object expression answered
+   * instead. The declaration then describes a *different* expression — `req` rather than
+   * `req.params.id` — which callers walking a chain need to know so they can show the hop.
+   */
+  viaObject: boolean
+}
+
+/**
+ * The declaration an offset resolves to, or null when nothing in this buffer declares it.
+ *
+ * Shared by the definition highlight and the flow walker, so the caret rule and the property
+ * fallback live in exactly one place. A null here is meaningful rather than a failure: with `noLib`
+ * and `noResolve` nothing outside the buffer resolves, so an unresolvable name *is* an external one.
+ */
+export function declarationAt(
   service: ts.LanguageService,
   sf: ts.SourceFile,
   fileName: string,
   offset: number,
-): DefinitionResult | null {
+): DeclarationHit | null {
   const identifier = identifierAt(sf, offset)
   if (!identifier) return null
 
   let definitions = service.getDefinitionAtPosition(fileName, identifier.getStart(sf))
+  let viaObject = false
 
   // A property on a value TS can't type (an untyped JS parameter, say) has no definition of its
   // own. Fall back to where the object came from — which, for a parameter, is the parameter.
@@ -226,6 +267,7 @@ export function resolveDefinition(
       fileName,
       identifier.parent.expression.getStart(sf),
     )
+    viaObject = true
   }
   if (!definitions || definitions.length === 0) return null
 
@@ -235,14 +277,29 @@ export function resolveDefinition(
     definitions[0]!
   if (info.fileName !== fileName) return null
 
-  const declaration = declarationFor(findTsNodeAtOffset(sf, info.textSpan.start))
-  const { primary, secondary, reason } = spanForDeclaration(declaration, sf)
+  return {
+    declaration: declarationFor(findTsNodeAtOffset(sf, info.textSpan.start)),
+    name: info.name,
+    viaObject,
+  }
+}
+
+export function resolveDefinition(
+  service: ts.LanguageService,
+  sf: ts.SourceFile,
+  fileName: string,
+  offset: number,
+): DefinitionResult | null {
+  const hit = declarationAt(service, sf, fileName, offset)
+  if (!hit) return null
+
+  const { primary, secondary, reason } = spanForDeclaration(hit.declaration, sf)
 
   return {
     primary,
     secondary,
     reason,
-    label: `${reason} \`${info.name}\``,
+    label: `${reason} \`${hit.name}\``,
     line: sf.getLineAndCharacterOfPosition(primary.start).line + 1,
   }
 }

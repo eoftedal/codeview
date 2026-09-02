@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
 import AstPane from './components/AstPane.vue'
 import EditorPane from './components/EditorPane.vue'
 import SplitPane from './components/SplitPane.vue'
+import TracePane from './components/TracePane.vue'
 import { useAnalysis } from './composables/useAnalysis'
 import { useBuffer } from './composables/useBuffer'
 import { findNodeAtOffset } from './lib/astTree'
 import type { DefinitionResult, Span } from './lib/definitions'
+import { isExternalOrigin, type FlowTrace } from './lib/flow'
 
 const SPLIT_KEY = 'codeview:split'
 
@@ -27,6 +29,14 @@ const origin = ref<'editor' | 'tree'>('editor')
 const definition = ref<DefinitionResult | null>(null)
 const hoveredId = ref<number | null>(null)
 const revealToken = ref(0)
+/** Set when a trace row asks for a scroll, so the reveal lands on that exact step. */
+const revealSpan = ref<Span | null>(null)
+
+const activeTab = ref<'ast' | 'trace'>('ast')
+// Shallow: the graph is replaced wholesale and must never be deeply proxied, like the AST.
+const trace = shallowRef<FlowTrace | null>(null)
+/** A span the trace pane is pointing at, which wins over the AST row under the pointer. */
+const tracedHover = ref<Span | null>(null)
 
 const editorPane = ref<InstanceType<typeof EditorPane>>()
 
@@ -41,7 +51,14 @@ function spanOf(id: number | null): Span | null {
 }
 
 const selectionSpan = computed(() => spanOf(selectedId.value))
-const hoverSpan = computed(() => spanOf(hoveredId.value))
+const hoverSpan = computed(() => tracedHover.value ?? spanOf(hoveredId.value))
+
+const flowSpans = computed(() =>
+  (trace.value?.nodes ?? []).map((node) => ({
+    span: node.span,
+    external: isExternalOrigin(node.origin),
+  })),
+)
 
 function refreshDefinition(): void {
   definition.value = analysis.resolve(cursorOffset.value)
@@ -64,6 +81,25 @@ function onSelectNode(id: number): void {
   selectedId.value = id
   cursorOffset.value = node.start
   refreshDefinition()
+  revealSpan.value = null
+  revealToken.value++
+}
+
+/** Walking a value back to its sources costs many reference queries, so it only ever runs here —
+ *  on an explicit request, never on cursor movement the way the definition highlight does. */
+function runTrace(offset: number = cursorOffset.value): void {
+  cursorOffset.value = offset
+  trace.value = analysis.trace(offset)
+  activeTab.value = 'trace'
+}
+
+function onSelectTraceStep(span: Span): void {
+  const tree = analysis.tree.value
+  origin.value = 'tree'
+  cursorOffset.value = span.start
+  selectedId.value = tree ? findNodeAtOffset(tree, span.start) : null
+  refreshDefinition()
+  revealSpan.value = span
   revealToken.value++
 }
 
@@ -76,6 +112,10 @@ watch(analysis.revision, () => {
     selectedId.value = findNodeAtOffset(tree, cursorOffset.value)
   }
   refreshDefinition()
+  // Every span in a trace is an offset into the text that just changed, so it cannot survive an
+  // edit. Re-walking on each parse would cost far more than the definition lookup beside it.
+  trace.value = null
+  tracedHover.value = null
 })
 
 const languages = [
@@ -137,23 +177,48 @@ function onFilePicked(event: Event): void {
             :selection="selectionSpan"
             :definition="definition"
             :hover="hoverSpan"
+            :flow="flowSpans"
             :reveal-token="revealToken"
+            :reveal-span="revealSpan"
             @cursor="onCursor"
+            @trace="runTrace"
             @open-file="openFile"
           />
         </template>
         <template #right>
-          <AstPane
-            v-if="analysis.tree.value"
-            v-model:show-tokens="showTokens"
-            :tree="analysis.tree.value"
-            :selected-id="selectedId"
-            :definition="definition"
-            :origin="origin"
-            @select="onSelectNode"
-            @hover="hoveredId = $event"
-            @reveal-definition="editorPane?.revealDefinition()"
-          />
+          <div class="right-pane">
+            <nav class="tabs">
+              <button :class="{ active: activeTab === 'ast' }" @click="activeTab = 'ast'">
+                AST
+              </button>
+              <button :class="{ active: activeTab === 'trace' }" @click="activeTab = 'trace'">
+                Trace
+                <span v-if="trace && trace.externalCount" class="badge">
+                  {{ trace.externalCount }}
+                </span>
+              </button>
+            </nav>
+
+            <AstPane
+              v-if="activeTab === 'ast' && analysis.tree.value"
+              v-model:show-tokens="showTokens"
+              :tree="analysis.tree.value"
+              :selected-id="selectedId"
+              :definition="definition"
+              :origin="origin"
+              @select="onSelectNode"
+              @hover="hoveredId = $event"
+              @reveal-definition="editorPane?.revealDefinition()"
+            />
+            <TracePane
+              v-else-if="activeTab === 'trace'"
+              :trace="trace"
+              :target="definition?.label ?? null"
+              @run="runTrace()"
+              @select="onSelectTraceStep"
+              @hover="tracedHover = $event"
+            />
+          </div>
         </template>
       </SplitPane>
     </main>
@@ -261,6 +326,66 @@ button:hover {
 }
 
 main {
+  flex: 1;
+  min-height: 0;
+}
+
+.right-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+}
+
+.tabs {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tabs button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 6px 6px 0 0;
+  background: none;
+  color: var(--dim);
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  position: relative;
+  top: 1px;
+}
+
+.tabs button:hover {
+  color: var(--text);
+  border-color: transparent;
+}
+
+.tabs button.active {
+  color: var(--text);
+  background: var(--bg);
+  border-color: var(--border);
+}
+
+.badge {
+  font-size: 10px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--danger) 26%, transparent);
+  color: var(--danger);
+  text-align: center;
+}
+
+.right-pane > :not(.tabs) {
   flex: 1;
   min-height: 0;
 }
