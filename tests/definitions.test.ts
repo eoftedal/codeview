@@ -3,14 +3,24 @@ import { createAnalyzer } from '../src/lib/analyzer'
 import { resolveDefinition, type DefinitionResult } from '../src/lib/definitions'
 import type { Language } from '../src/lib/analyzer'
 
-/** Resolve at the offset marked by `|` in the fixture, returning the highlighted substrings. */
-function defAt(source: string, language: Language = 'ts') {
+/**
+ * Resolve at the offset marked by `|` in the fixture, returning the highlighted substrings.
+ * `others` are further open files, which resolution can now reach across.
+ */
+function defAt(
+  source: string,
+  language: Language = 'ts',
+  others: { name: string; text: string }[] = [],
+) {
   const offset = source.indexOf('|')
   expect(offset, 'fixture must contain a | cursor marker').toBeGreaterThan(-1)
   const text = source.replace('|', '')
 
   const analyzer = createAnalyzer()
-  analyzer.update(text, language)
+  analyzer.update([
+    { name: `main.${language}`, text, language },
+    ...others.map((file) => ({ ...file, language })),
+  ])
   const result = resolveDefinition(
     analyzer.service(),
     analyzer.sourceFile(),
@@ -142,6 +152,23 @@ describe('imports', () => {
     expect(def?.reason).toBe('import')
     expect(def?.primaryText).toBe(`import * as utils from './utils'`)
   })
+
+  it('still answers with the import when the module is another open file', () => {
+    // The editor shows one file, so the import is the only range it can point at — but the
+    // declaration is reachable now, and the header says where it is.
+    const def = defAt(`import { helper } from './lib'\nhelp|er()`, 'ts', [
+      { name: 'lib.ts', text: `export function helper() {\n  return 1\n}\n` },
+    ])
+    expect(def?.reason).toBe('import')
+    expect(def?.primaryText).toBe(`import { helper } from './lib'`)
+    expect(def?.definedIn).toBe('lib.ts')
+  })
+
+  it('says nothing about another file when the module is not open', () => {
+    const def = defAt(`import { helper } from './lib'\nhelp|er()`)
+    expect(def?.reason).toBe('import')
+    expect(def?.definedIn).toBeUndefined()
+  })
 })
 
 describe('no definition', () => {
@@ -151,5 +178,105 @@ describe('no definition', () => {
 
   it('returns null for a global with no lib loaded', () => {
     expect(defAt(`conso|le.log(1)`)).toBeNull()
+  })
+})
+
+describe('module resolution between open files', () => {
+  /** Where the name under `|` is declared, or null when the import led nowhere. */
+  function resolvesTo(
+    main: { name: string; text: string },
+    other: { name: string; text: string },
+  ): string | null {
+    const language = (main.name.endsWith('.js') ? 'js' : 'ts') as Language
+    const analyzer = createAnalyzer()
+    analyzer.update([
+      { name: main.name, text: main.text.replace('|', ''), language },
+      {
+        name: other.name,
+        text: other.text,
+        language: other.name.endsWith('.js') ? 'js' : other.name.endsWith('.tsx') ? 'tsx' : 'ts',
+      },
+    ])
+    const def = resolveDefinition(
+      analyzer.service(),
+      analyzer.sourceFile(),
+      analyzer.fileName(),
+      main.text.indexOf('|'),
+    )
+    return def?.definedIn ?? null
+  }
+
+  const IMPORT = `import Database from './db'\nnew Data|base()\n`
+  const DEFAULT_EXPORT = 'export default class Database {}\n'
+
+  it('finds an extensionless import, whatever the file it names is called', () => {
+    // `import Database from './db'` has to find db.ts or db.js — nobody writes the extension.
+    expect(
+      resolvesTo({ name: 'main.ts', text: IMPORT }, { name: 'db.ts', text: DEFAULT_EXPORT }),
+    ).toBe('db.ts')
+    expect(
+      resolvesTo({ name: 'main.ts', text: IMPORT }, { name: 'db.js', text: DEFAULT_EXPORT }),
+    ).toBe('db.js')
+    expect(
+      resolvesTo(
+        { name: 'main.js', text: `import Database from "./db";\nnew Data|base();\n` },
+        { name: 'db.js', text: DEFAULT_EXPORT },
+      ),
+    ).toBe('db.js')
+  })
+
+  const NAMED = `import { helper } from './lib'\nhelp|er()\n`
+  const HELPER = 'export function helper() {}\n'
+
+  it('follows a path into a folder, and a folder to its index', () => {
+    expect(
+      resolvesTo(
+        { name: 'main.ts', text: `import { helper } from './lib/db'\nhelp|er()\n` },
+        {
+          name: 'lib/db.ts',
+          text: HELPER,
+        },
+      ),
+    ).toBe('lib/db.ts')
+    expect(
+      resolvesTo({ name: 'main.ts', text: NAMED }, { name: 'lib/index.ts', text: HELPER }),
+    ).toBe('lib/index.ts')
+    // Relative to the importer, not to the root.
+    expect(
+      resolvesTo(
+        { name: 'src/main.ts', text: `import { helper } from './db'\nhelp|er()\n` },
+        {
+          name: 'src/db.ts',
+          text: HELPER,
+        },
+      ),
+    ).toBe('src/db.ts')
+  })
+
+  it('accepts the extension when it is written, including a .js that means .ts', () => {
+    expect(
+      resolvesTo(
+        { name: 'main.ts', text: `import { helper } from './db.ts'\nhelp|er()\n` },
+        {
+          name: 'db.ts',
+          text: HELPER,
+        },
+      ),
+    ).toBe('db.ts')
+    expect(
+      resolvesTo(
+        { name: 'main.ts', text: `import { helper } from './db.js'\nhelp|er()\n` },
+        {
+          name: 'db.ts',
+          text: HELPER,
+        },
+      ),
+    ).toBe('db.ts')
+  })
+
+  it('resolves nothing for a module no tab holds', () => {
+    expect(
+      resolvesTo({ name: 'main.ts', text: IMPORT }, { name: 'other.ts', text: HELPER }),
+    ).toBeNull()
   })
 })

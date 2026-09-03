@@ -1,6 +1,5 @@
 import type { InjectionKey, Ref } from 'vue'
-import type { Span } from '../lib/definitions'
-import type { FlowTrace } from '../lib/flow'
+import type { FlowTarget, FlowTrace } from '../lib/flow'
 
 /**
  * Shared state for the recursive trace rows. Injected rather than prop-drilled, and held as refs so
@@ -8,11 +7,13 @@ import type { FlowTrace } from '../lib/flow'
  */
 export interface TraceContext {
   trace: Ref<FlowTrace>
+  /** The tab on screen, so a row can say when its step is somewhere else. */
+  activeFile: Ref<string>
   expanded: Ref<Set<number>>
   selectedId: Ref<number | null>
   toggle: (id: number) => void
   select: (id: number) => void
-  hover: (span: Span | null) => void
+  hover: (target: FlowTarget | null) => void
 }
 
 export const traceContextKey: InjectionKey<TraceContext> = Symbol('traceContext')

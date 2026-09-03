@@ -166,8 +166,10 @@ provide(astContextKey, {
         <button v-if="definition" class="definition" @click="emit('revealDefinition')">
           <span class="dot" />
           defined as {{ definition.label }} · line {{ definition.line }}
+          <!-- The declaration itself is in another tab; the highlight can only reach the import. -->
+          <span v-if="definition.definedIn" class="in-file"> → {{ definition.definedIn }} </span>
         </button>
-        <span v-else class="definition muted">no definition in this file</span>
+        <span v-else class="definition muted">no definition in the open files</span>
       </div>
     </header>
 
@@ -298,6 +300,10 @@ button:hover {
   white-space: nowrap;
   color: var(--gold);
   flex: 0 0 auto;
+}
+
+.in-file {
+  color: var(--accent);
 }
 
 .definition:hover {

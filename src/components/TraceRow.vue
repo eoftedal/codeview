@@ -12,6 +12,8 @@ const props = defineProps<{
 const ctx = inject(traceContextKey)!
 
 const node = computed(() => ctx.trace.value.nodes[props.id]!)
+/** A step in another tab: the line number alone would point at the wrong file. */
+const elsewhere = computed(() => node.value.file !== ctx.activeFile.value)
 const isOpen = computed(() => ctx.expanded.value.has(props.id))
 const isSelected = computed(() => ctx.selectedId.value === props.id)
 const external = computed(() => isExternalOrigin(node.value.origin))
@@ -20,7 +22,7 @@ const external = computed(() => isExternalOrigin(node.value.origin))
 const ORIGIN_TEXT: Record<FlowOrigin, string> = {
   literal: 'defined here',
   import: 'another module',
-  external: 'outside this file',
+  external: 'outside',
   entry: 'uncalled here',
   callback: 'caller supplies',
   cycle: 'seen above',
@@ -36,7 +38,7 @@ const ORIGIN_TEXT: Record<FlowOrigin, string> = {
       :data-trace-id="id"
       :style="{ paddingLeft: `${depth * 14 + 6}px` }"
       @click="ctx.select(id)"
-      @mouseenter="ctx.hover(node.span)"
+      @mouseenter="ctx.hover({ span: node.span, file: node.file })"
       @mouseleave="ctx.hover(null)"
     >
       <button
@@ -52,7 +54,9 @@ const ORIGIN_TEXT: Record<FlowOrigin, string> = {
       <span class="label">{{ node.label }}</span>
       <code class="excerpt">{{ node.excerpt }}</code>
       <span v-if="node.origin" class="origin">{{ ORIGIN_TEXT[node.origin] }}</span>
-      <span class="line">{{ node.line }}</span>
+      <span class="line" :class="{ elsewhere }">
+        <span v-if="elsewhere" class="file">{{ node.file }}:</span>{{ node.line }}
+      </span>
     </div>
 
     <template v-if="isOpen">
@@ -153,5 +157,14 @@ const ORIGIN_TEXT: Record<FlowOrigin, string> = {
   color: var(--dim);
   font-size: 11px;
   opacity: 0.55;
+}
+
+/* A step in another tab earns full contrast: it is the part of the path you cannot see. */
+.line.elsewhere {
+  opacity: 1;
+}
+
+.file {
+  color: var(--accent);
 }
 </style>

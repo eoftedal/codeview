@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, ref, shallowRef, watch } from 'vue'
 import AstPane from './components/AstPane.vue'
 import ChatPane from './components/ChatPane.vue'
 import EditorPane from './components/EditorPane.vue'
@@ -11,7 +11,7 @@ import { useBuffer } from './composables/useBuffer'
 import { useChat } from './composables/useChat'
 import { findNodeAtOffset } from './lib/astTree'
 import type { DefinitionResult, Span } from './lib/definitions'
-import { isExternalOrigin, type FlowTrace } from './lib/flow'
+import { isExternalOrigin, type FlowTarget, type FlowTrace } from './lib/flow'
 
 const SPLIT_KEY = 'codeview:split'
 
@@ -21,6 +21,7 @@ const {
   fileIds,
   text,
   language,
+  fileName,
   hideHeader,
   notice,
   selectFile,
@@ -33,7 +34,9 @@ const {
 } = useBuffer()
 
 const showTokens = ref(false)
-const analysis = useAnalysis(text, language, showTokens)
+// Every open file is analysed together, so an import between tabs resolves; the tree is still the
+// active one's alone.
+const analysis = useAnalysis(files, fileName, showTokens)
 
 /**
  * The cursor offset is the single source of truth for what is selected: node ids are only stable
@@ -53,8 +56,8 @@ const revealSpan = ref<Span | null>(null)
 const activeTab = ref<'ast' | 'trace' | 'chat'>('ast')
 // Shallow: the graph is replaced wholesale and must never be deeply proxied, like the AST.
 const trace = shallowRef<FlowTrace | null>(null)
-/** A span the trace pane is pointing at, which wins over the AST row under the pointer. */
-const tracedHover = ref<Span | null>(null)
+/** A step the trace pane is pointing at, which wins over the AST row under the pointer. */
+const tracedHover = ref<FlowTarget | null>(null)
 
 /** Held here, not in the pane: the pane unmounts whenever another tab is shown, and a
  *  conversation should survive a glance at the tree. */
@@ -77,13 +80,22 @@ function spanOf(id: number | null): Span | null {
 }
 
 const selectionSpan = computed(() => spanOf(selectedId.value))
-const hoverSpan = computed(() => tracedHover.value ?? spanOf(hoveredId.value))
+
+// A trace step's span is an offset into *its* file, so anything the editor draws has to be filtered
+// to the tab on screen — a step in another file has no range here at all.
+const hoverSpan = computed(() => {
+  const traced = tracedHover.value
+  if (traced) return traced.file === fileName.value ? traced.span : null
+  return spanOf(hoveredId.value)
+})
 
 const flowSpans = computed(() =>
-  (trace.value?.nodes ?? []).map((node) => ({
-    span: node.span,
-    external: isExternalOrigin(node.origin),
-  })),
+  (trace.value?.nodes ?? [])
+    .filter((node) => node.file === fileName.value)
+    .map((node) => ({
+      span: node.span,
+      external: isExternalOrigin(node.origin),
+    })),
 )
 
 function refreshDefinition(): void {
@@ -119,13 +131,31 @@ function runTrace(offset: number = cursorOffset.value): void {
   activeTab.value = 'trace'
 }
 
-function onSelectTraceStep(span: Span): void {
+function onSelectTraceStep(target: FlowTarget): void {
+  if (target.file !== fileName.value) {
+    const open = files.value.find((file) => file.name === target.file)
+    if (!open) return
+    selectFile(open.id)
+    // The editor switches buffers on the next flush and announces its own cursor as it lands, so
+    // aim after it. The tree is still the old file's until the parse catches up, which is why the
+    // selection is left to be re-derived from the offset rather than guessed at now.
+    void nextTick(() => {
+      origin.value = 'editor'
+      cursorOffset.value = target.span.start
+      selectedId.value = null
+      definition.value = null
+      revealSpan.value = target.span
+      revealToken.value++
+    })
+    return
+  }
+
   const tree = analysis.tree.value
   origin.value = 'tree'
-  cursorOffset.value = span.start
-  selectedId.value = tree ? findNodeAtOffset(tree, span.start) : null
+  cursorOffset.value = target.span.start
+  selectedId.value = tree ? findNodeAtOffset(tree, target.span.start) : null
   refreshDefinition()
-  revealSpan.value = span
+  revealSpan.value = target.span
   revealToken.value++
 }
 
@@ -138,8 +168,12 @@ watch(analysis.revision, () => {
     selectedId.value = findNodeAtOffset(tree, cursorOffset.value)
   }
   refreshDefinition()
-  // Every span in a trace is an offset into the text that just changed, so it cannot survive an
-  // edit. Re-walking on each parse would cost far more than the definition lookup beside it.
+})
+
+// A trace's spans are offsets into text that has just changed, so they cannot survive an edit —
+// but they do survive a tab switch, which reparses without moving a character. Losing the trace on
+// every switch would make a cross-file one impossible to follow.
+watch(analysis.contentRevision, () => {
   trace.value = null
   tracedHover.value = null
 })
@@ -257,6 +291,7 @@ function onFilePicked(event: Event): void {
               v-else-if="activeTab === 'trace'"
               :trace="trace"
               :target="definition?.label ?? null"
+              :active-file="fileName"
               @run="runTrace()"
               @select="onSelectTraceStep"
               @hover="tracedHover = $event"

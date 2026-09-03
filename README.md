@@ -34,9 +34,10 @@ buffer with **Copy link**. The open files are kept in `localStorage` between vis
 
 Several files can be open at once, on a tab strip above the editor: **+** adds a blank one,
 **✕** closes one, and right-clicking a tab offers **Rename**, which also switches the
-language when the new extension calls for a different one. Only the active tab is ever
-analysed — the strip switches which buffer the tree, the definitions and the trace are
-about, it does not resolve names between files. Closing the last tab is not offered, since
+language when the new extension calls for a different one. The tree and the editor show the
+active tab, but **all of them are analysed together**: a tab's name is its module path, so
+an import from one tab to another resolves and a trace follows it across. Two tabs may not
+share a name, or an import would be ambiguous. Closing the last tab is not offered, since
 there is always a buffer. A share link carries the file you are looking at, not the strip.
 
 A share link carries the whole buffer in the URL fragment, which browsers never send to
@@ -105,10 +106,15 @@ work in `src/lib/definitions.ts` is mapping its answer onto a range worth highli
   where clicking a word usually leaves it — is one past the identifier it belongs to. Both
   lookups look one character left when the caret isn't inside a token.
 
-The analyzer runs with `noLib` and `noResolve`: nothing resolves into the standard library
-or into another file, because a definition outside the buffer has no range to highlight
-anyway. Imported names stop at their import statement, which is the honest answer for a
-single-buffer view.
+The analyzer runs with `noLib`, so nothing resolves into the standard library. It does
+resolve **between the open tabs**: a tab's name is its module path, so `import { x } from
+'./db'` finds the tab called `db.ts`, `db.js`, `lib/db.ts` or `lib/index.ts`, exactly as a
+bundler would — no extension needed. An import of anything that is not open (`express`,
+`node:fs`) still resolves to nothing.
+
+The editor shows one file, so a declaration in another tab has no range to highlight: an
+imported name still answers with its import statement, and the header adds → `db.ts` to say
+which tab holds the real declaration.
 
 ## Tracing a value back to its sources
 
@@ -123,20 +129,27 @@ you otherwise make by hand, scrolling to find who calls this thing.
 
 The walk ends where it honestly can:
 
-| Terminal            | Meaning                                                       |
-| ------------------- | ------------------------------------------------------------- |
-| `defined here`      | a constant, a function, or an object built on the spot        |
-| `another module`    | an import — the declaration is in a file this view cannot see |
-| `outside this file` | a name with no declaration at all — a global, say             |
-| `uncalled here`     | a parameter of a function nothing in the buffer calls         |
-| `caller supplies`   | a parameter of a function handed to something else to invoke  |
-| `seen above`        | a cycle — the same declaration is already expanded further up |
+| Terminal          | Meaning                                                       |
+| ----------------- | ------------------------------------------------------------- |
+| `defined here`    | a constant, a function, or an object built on the spot        |
+| `another module`  | an import of something no tab holds — `express`, `node:fs`    |
+| `outside`         | a name with no declaration at all — a global, say             |
+| `uncalled here`   | a parameter of a function nothing open calls                  |
+| `caller supplies` | a parameter of a function handed to something else to invoke  |
+| `seen above`      | a cycle — the same declaration is already expanded further up |
 
-`noLib` does the interesting work here. Because nothing resolves into the standard library or
-another file, **a name with no definition is by construction external to the buffer** — so
-`process.env.TOKEN` and `document.location` fall out as sources with no list of dangerous globals to
-maintain. An unresolvable call keeps its arguments and its receiver as children, so
-`untrusted.trim()` still leads back to `untrusted` rather than dead-ending on an unknown method.
+**The walk crosses files.** An import between tabs resolves, so the trace follows a value into the
+callee's body wherever it lives — and back out again, because find-all-references crosses an import
+too, so a parameter still reaches the argument at every call site including the ones in other tabs.
+Each step is labelled with the file it is in (`store.ts:6`), the summary says how many files the
+path touched, and clicking a step in another tab opens it. The editor only decorates the steps in
+the tab on screen: a span is an offset into one file and means nothing in another.
+
+`noLib` does the interesting work at the end. Because nothing resolves into the standard library,
+**a name with no definition is by construction external** — so `process.env.TOKEN` and
+`document.location` fall out as sources with no list of dangerous globals to maintain. An
+unresolvable call keeps its arguments and its receiver as children, so `untrusted.trim()` still
+leads back to `untrusted` rather than dead-ending on an unknown method.
 
 The same cut runs through property chains, and it is why the walk does not stop at the first thing
 it cannot type. In an express handler, `Request` never resolves, so `req.params.id` has no
@@ -259,7 +272,7 @@ tint and an underline land on the code.
 ## Layout
 
 ```
-src/lib/analyzer.ts        in-memory LanguageService, TS node lookup  (pure, tested)
+src/lib/analyzer.ts        LanguageService over the open files        (pure, tested)
 src/lib/astTree.ts         AST → flat node list, offset lookups       (pure, tested)
 src/lib/definitions.ts     the definition rules                       (pure, tested)
 src/lib/flow.ts            the backward provenance walk               (pure, tested)
@@ -305,5 +318,6 @@ disagree about workers (see below).
 - The main chunk is around 2 MB gzipped, most of it the TypeScript compiler, and Monaco's
   worker carries a second copy in a lazily-loaded chunk. Fine for a developer tool; it's
   the first thing to attack if load time ever matters.
-- Monaco reports diagnostics from its own worker, with "cannot find module" suppressed —
-  in a single-buffer viewer an import can never resolve, so the squiggle says nothing.
+- Monaco reports diagnostics from its own worker, with "cannot find module" suppressed. Its
+  models are keyed by file id rather than by name, so it never resolves between tabs even
+  though our own analyzer does; the squiggle would say nothing true.

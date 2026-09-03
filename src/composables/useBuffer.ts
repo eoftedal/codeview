@@ -204,6 +204,13 @@ export function useBuffer() {
     const name = raw.trim()
     const file = files.value.find((open) => open.id === id)
     if (!file || !name || name === file.name) return
+    // Names are how the files find each other: `./db` resolves by name, so two tabs answering to
+    // one would make an import ambiguous. Refuse rather than silently shadow.
+    if (files.value.some((open) => open.id !== id && open.name === name)) {
+      notice.value = `There is already a tab called ${name}.`
+      return
+    }
+    notice.value = null
     file.name = name
     // The new extension picks the language, the same way an opened file's does.
     const detected = languageForFile(name)

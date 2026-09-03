@@ -2,14 +2,24 @@ import { describe, expect, it } from 'vitest'
 import { createAnalyzer, type Language } from '../src/lib/analyzer'
 import { traceOrigins, type FlowTrace } from '../src/lib/flow'
 
+/** Further open files a fixture can import from, keyed by name. */
+type OtherFiles = Record<string, string>
+
 /** Trace at the offset marked by `|`. Fixtures must not use `||`, which would move the marker. */
-function traceAt(source: string, language: Language = 'ts'): FlowTrace | null {
+function traceAt(
+  source: string,
+  language: Language = 'ts',
+  others: OtherFiles = {},
+): FlowTrace | null {
   const offset = source.indexOf('|')
   expect(offset, 'fixture must contain a | cursor marker').toBeGreaterThan(-1)
   const text = source.replace('|', '')
 
   const analyzer = createAnalyzer()
-  analyzer.update(text, language)
+  analyzer.update([
+    { name: `main.${language}`, text, language },
+    ...Object.entries(others).map(([name, body]) => ({ name, text: body, language })),
+  ])
   return traceOrigins(analyzer.service(), analyzer.sourceFile(), analyzer.fileName(), offset)
 }
 
@@ -17,16 +27,27 @@ function traceAt(source: string, language: Language = 'ts'): FlowTrace | null {
 function render(source: string, language: Language = 'ts'): string[] {
   const trace = traceAt(source, language)
   if (!trace) return ['<no trace>']
+  return lines(trace)
+}
 
-  const lines: string[] = []
+/** Same, with every step's file in front of it — for the traces that leave the first file. */
+function renderAcross(source: string, others: OtherFiles): string[] {
+  const trace = traceAt(source, 'ts', others)
+  if (!trace) return ['<no trace>']
+  return lines(trace, true)
+}
+
+function lines(trace: FlowTrace, withFiles = false): string[] {
+  const out: string[] = []
   const walk = (id: number, depth: number): void => {
     const node = trace.nodes[id]!
     const origin = node.origin ? ` [${node.origin}]` : ''
-    lines.push(`${'  '.repeat(depth)}${node.label}: ${node.excerpt}${origin}`)
+    const where = withFiles ? `${node.file} ` : ''
+    out.push(`${'  '.repeat(depth)}${where}${node.label}: ${node.excerpt}${origin}`)
     for (const child of node.children) walk(child, depth + 1)
   }
   walk(trace.root, 0)
-  return lines
+  return out
 }
 
 describe('intraprocedural flow', () => {
@@ -353,5 +374,82 @@ describe('guards', () => {
 describe('no trace', () => {
   it('returns null where nothing resolves', () => {
     expect(traceAt('const a = 1\n   |')).toBeNull()
+  })
+})
+
+describe('across files', () => {
+  // The shape this exists for: a request field in one tab reaching a query built in another.
+  const DB = `import { open } from 'better-sqlite3'
+
+const db = open('shop.db')
+
+export function getProduct(productId) {
+  const query = \`SELECT * FROM Products WHERE id = \${productId}\`
+  return db.prepare(query).get()
+}
+`
+
+  it('walks a value out of one file, through an imported callee, and back to the request', () => {
+    expect(
+      renderAcross(
+        `import { getProduct } from './db'
+
+app.get('/product/:id', (req) => {
+  const row = getProduct(req.params.id)
+  return row|
+})
+`,
+        { 'db.ts': DB },
+      ),
+    ).toEqual([
+      'main.ts variable `row`: const row = getProduct(req.params.id)',
+      '  main.ts initialised from: getProduct(req.params.id)',
+      '    db.ts returned by `getProduct`: db.prepare(query).get() [external]',
+      '      db.ts flows into the call: db.prepare(query) [external]',
+      '        db.ts flows into the call: db',
+      "          db.ts initialised from: open('shop.db') [import]",
+      '        db.ts flows into the call: query',
+      '          db.ts initialised from: `SELECT * FROM Products WHERE id = ${productId}`',
+      '            db.ts contributes: productId',
+      // Back out of db.ts to the call site: the parameter's argument is in the other file.
+      '              main.ts passed to `getProduct`: req.params.id',
+      '                main.ts `.id` read from: req.params',
+      '                  main.ts `.params` read from: req',
+      '                    main.ts parameter `req`: req [callback]',
+    ])
+  })
+
+  it('crosses an import that resolves, and ends at the constant behind it', () => {
+    expect(
+      renderAcross(`import { secret } from './config'\nconst token = secret\ntoken|\n`, {
+        'config.ts': `export const secret = 'hunter2'\n`,
+      }),
+    ).toEqual([
+      'main.ts variable `token`: const token = secret',
+      '  main.ts initialised from: secret',
+      // The hop into config.ts is the file column, not a row of its own: an identifier and the
+      // declaration it resolves to are one step, the same as within a file.
+      "    config.ts initialised from: 'hunter2' [literal]",
+    ])
+  })
+
+  it('still stops at an import of something no tab holds', () => {
+    expect(
+      renderAcross(`import { secret } from 'dotenv'\nconst token = secret\ntoken|\n`, {
+        'config.ts': `export const secret = 'hunter2'\n`,
+      }),
+    ).toEqual([
+      'main.ts variable `token`: const token = secret',
+      '  main.ts initialised from: secret',
+      "    main.ts import `secret`: import { secret } from 'dotenv' [import]",
+    ])
+  })
+
+  it('counts an origin in another file as external all the same', () => {
+    const trace = traceAt(`import { readIt } from './io'\nconst body = readIt()\nbody|\n`, 'ts', {
+      'io.ts': `export function readIt() {\n  return process.env.BODY\n}\n`,
+    })
+    expect(trace?.externalCount).toBe(1)
+    expect(trace?.nodes.map((node) => node.file)).toEqual(['main.ts', 'main.ts', 'io.ts'])
   })
 })

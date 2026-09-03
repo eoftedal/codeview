@@ -4,7 +4,7 @@ import { buildTree, findNodeAtOffset, pathToRoot, type AstTree } from '../src/li
 
 function treeFor(text: string, showTokens = false): AstTree {
   const analyzer = createAnalyzer()
-  analyzer.update(text, 'ts')
+  analyzer.update([{ name: 'main.ts', text, language: 'ts' }])
   return buildTree(analyzer.sourceFile(), { showTokens })
 }
 

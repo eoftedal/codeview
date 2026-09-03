@@ -1,5 +1,5 @@
 import ts from 'typescript'
-import { findTsNodeAtOffset } from './analyzer'
+import { fileLabel, findTsNodeAtOffset } from './analyzer'
 
 export interface Span {
   start: number
@@ -19,6 +19,12 @@ export interface DefinitionResult {
   label: string
   /** 1-based, for the header's "line N". */
   line: number
+  /**
+   * Set when the name is declared in another open file. The spans above then describe the import
+   * that brought it here — the only thing this editor can highlight — and this says where the
+   * declaration itself is.
+   */
+  definedIn?: string
 }
 
 /** Trim trailing whitespace so a clipped signature doesn't highlight the gap before the brace. */
@@ -196,6 +202,17 @@ export function describeDeclaration(
   return { span: primary, reason, label: `${reason} \`${name}\`` }
 }
 
+/** The parts of an import statement, any of which can be what a name resolves to. */
+export function isImportPart(node: ts.Node): boolean {
+  return (
+    ts.isImportSpecifier(node) ||
+    ts.isImportClause(node) ||
+    ts.isNamespaceImport(node) ||
+    ts.isImportDeclaration(node) ||
+    ts.isImportEqualsDeclaration(node)
+  )
+}
+
 function asIdentifier(node: ts.Node): ts.Node | null {
   return ts.isIdentifier(node) || ts.isPrivateIdentifier(node) ? node : null
 }
@@ -234,14 +251,32 @@ export interface DeclarationHit {
    * `req.params.id` — which callers walking a chain need to know so they can show the hop.
    */
   viaObject: boolean
+  /**
+   * When the declaration is in another file, the import that brings the name into the queried one.
+   * The trace crosses the import and keeps walking; the editor highlight cannot, so it stops here.
+   */
+  local: ts.Node | null
+}
+
+/** The import in `sf` that `identifier` is an alias for — its own local declaration. */
+function localImportFor(
+  program: ts.Program,
+  sf: ts.SourceFile,
+  identifier: ts.Node,
+): ts.Node | null {
+  const symbol = program.getTypeChecker().getSymbolAtLocation(identifier)
+  return (
+    symbol?.declarations?.find((decl) => decl.getSourceFile() === sf && isImportPart(decl)) ?? null
+  )
 }
 
 /**
- * The declaration an offset resolves to, or null when nothing in this buffer declares it.
+ * The declaration an offset resolves to — in this file or in another open one — or null when
+ * nothing open declares it.
  *
  * Shared by the definition highlight and the flow walker, so the caret rule and the property
  * fallback live in exactly one place. A null here is meaningful rather than a failure: with `noLib`
- * and `noResolve` nothing outside the buffer resolves, so an unresolvable name *is* an external one.
+ * and nothing but the open tabs on disk, an unresolvable name *is* an external one.
  */
 export function declarationAt(
   service: ts.LanguageService,
@@ -275,15 +310,26 @@ export function declarationAt(
   const info =
     definitions.find((d) => d.kind !== ts.ScriptElementKind.constructorImplementationElement) ??
     definitions[0]!
-  if (info.fileName !== fileName) return null
+
+  const program = service.getProgram()
+  const target = info.fileName === fileName ? sf : program?.getSourceFile(info.fileName)
+  if (!target) return null
 
   return {
-    declaration: declarationFor(findTsNodeAtOffset(sf, info.textSpan.start)),
+    declaration: declarationFor(findTsNodeAtOffset(target, info.textSpan.start)),
     name: info.name,
     viaObject,
+    local: target === sf || !program ? null : localImportFor(program, sf, identifier),
   }
 }
 
+/**
+ * The definition to highlight for the offset, always inside `sf`.
+ *
+ * One file is on screen, so a declaration in another one is reported through the import that
+ * brought the name here — which is the answer this tool has always given for an imported name —
+ * with `definedIn` saying where it actually lives now that the trace can go there.
+ */
 export function resolveDefinition(
   service: ts.LanguageService,
   sf: ts.SourceFile,
@@ -293,7 +339,12 @@ export function resolveDefinition(
   const hit = declarationAt(service, sf, fileName, offset)
   if (!hit) return null
 
-  const { primary, secondary, reason } = spanForDeclaration(hit.declaration, sf)
+  const elsewhere = hit.declaration.getSourceFile() !== sf
+  const decl = elsewhere ? hit.local : hit.declaration
+  // Declared in another file with nothing local standing for it: no range on screen to point at.
+  if (!decl) return null
+
+  const { primary, secondary, reason } = spanForDeclaration(decl, sf)
 
   return {
     primary,
@@ -301,5 +352,6 @@ export function resolveDefinition(
     reason,
     label: `${reason} \`${hit.name}\``,
     line: sf.getLineAndCharacterOfPosition(primary.start).line + 1,
+    definedIn: elsewhere ? fileLabel(hit.declaration.getSourceFile().fileName) : undefined,
   }
 }

@@ -28,27 +28,32 @@ Monaco wiring or the build config must pass `test:e2e` locally, not just `test`.
 
 ## Architecture
 
-A single-buffer AST viewer: Monaco on the left, the TypeScript AST on the right, kept in sync, with
-the definition of whatever is under the cursor highlighted. No backend, no multi-file resolution.
+An AST viewer over the open files: Monaco on the left, the TypeScript AST on the right, kept in
+sync, with the definition of whatever is under the cursor highlighted. No backend.
 
-**Several files can be open, but only one is ever analysed.** The tab strip
-(`FileTabs.vue`, `src/lib/files.ts`) switches which buffer the analyzer, the definitions and the
-trace are about; it does not make anything multi-file. `useBuffer` holds `files` plus an active id
-and exposes `text`/`language`/`fileName` as writable views onto the active one, which is why
-`useAnalysis`, `useChat` and the panes below it still see exactly one buffer and needed no change.
-Resist the pull to resolve imports across tabs: `noResolve` is what makes the trace's terminal
-condition principled (see below), and cross-file resolution would take that away.
+**Every open file is in the program; only the active one is on screen.** The tab strip
+(`FileTabs.vue`, `src/lib/files.ts`) chooses which file the editor and the tree show. `useBuffer`
+holds `files` plus an active id and exposes `text`/`language`/`fileName` as writable views onto the
+active one. The analyzer, though, is given _all_ of them: a tab's name is its module path
+(`pathFor` → `/db.ts`), so `import { x } from './db'` between two tabs resolves, and the trace
+walks along it. What is emphatically _not_ multi-file is the **view**: one buffer in the editor,
+one AST, one set of decorations. A span is an offset into a particular file and means nothing
+anywhere else — which is why `FlowNode` carries `file`, and why `App.vue` filters trace spans to
+the active tab before handing them to Monaco.
 
 **Two independent TypeScript setups exist, and conflating them causes confusion.**
 
-1. `src/lib/analyzer.ts` — our own `ts.LanguageService` over one in-memory file, running `noLib` +
-   `noResolve`. This is what produces the AST and answers `getDefinitionAtPosition`. Everything the
-   app actually shows comes from here.
+1. `src/lib/analyzer.ts` — our own `ts.LanguageService` over the open files, running `noLib` and
+   resolving imports between them. This is what produces the AST and answers
+   `getDefinitionAtPosition`. Everything the app actually shows comes from here.
 2. `src/lib/monacoSetup.ts` — Monaco's own bundled TS worker, which only powers editor niceties
-   (hover, completion, squiggles). Its compiler options are separate and deliberately different.
+   (hover, completion, squiggles). Its compiler options are separate and deliberately different,
+   and it knows nothing about the other tabs: its models are keyed by file id, not by name, so it
+   never resolves between them. Cross-tab imports are our analyzer's business alone.
 
-Because of `noLib`/`noResolve`, a definition outside the buffer has no range to highlight, so
-imported names resolve to their import statement. That is the intended answer, not a gap to fix.
+A definition in a file that is not on screen has no range the editor can highlight, so an imported
+name still resolves to its import statement — with `definedIn` saying which tab holds the real
+declaration. That is the intended answer, not a gap to fix.
 
 **Data flow.** `useBuffer` decides where the open files come from (a link, which describes exactly
 one file → localStorage, which restores the whole strip → the sample) and owns
@@ -57,8 +62,9 @@ a `revision` counter. `App.vue` owns the shared selection state and wires the tw
 
 **Two questions, two costs.** `resolveDefinition` is one definition lookup and runs on every cursor
 move. `traceOrigins` (`src/lib/flow.ts`) walks a value backwards through assignments, returns and
-call-site arguments, costing a `getReferencesAtPosition` per parameter it crosses — so it runs only
-on explicit request and is cleared on every re-parse. Do not wire it to cursor movement. Both share
+call-site arguments — now across files, since references and definitions both cross an import —
+costing a `getReferencesAtPosition` per parameter it crosses, so it runs only on explicit request
+and is cleared whenever a file's text changes. Do not wire it to cursor movement. Both share
 `declarationAt` in `definitions.ts`, which is the single home of the caret rule and the property
 fallback; use it for any new offset→declaration lookup rather than calling
 `getDefinitionAtPosition` directly.
@@ -71,8 +77,26 @@ declaration's span, so a trace starts and ends at a declaration. Changing either
 every `tests/flow.test.ts` fixture asserts.
 
 **`noLib` is load-bearing twice over.** It keeps the bundle small, and it makes the trace's terminal
-condition principled: nothing outside the buffer resolves, so a name with no definition _is_ an
-external source. There is deliberately no list of interesting globals.
+condition principled: nothing outside the open files resolves, so a name with no definition _is_ an
+external source. There is deliberately no list of interesting globals. `noResolve` used to do the
+same job for imports and is now **off** on purpose — an import of another tab resolves and the walk
+follows it, while an import of anything not open (`express`, `node:fs`) still resolves to nothing
+and terminates the branch exactly as before. Turning `noLib` on again would be the way to break
+this; do not.
+
+**Cross-file spans, in three places.** (1) `declarationAt` may answer with a declaration in another
+file; it also returns `local`, the import that brought the name into the queried one, because the
+editor can only highlight what is on screen — that is how "an imported name resolves to its import
+statement" survives, now with `definedIn` naming where it really lives. (2) Every `walk.sf` in
+`flow.ts` is gone: each node reads its own `getSourceFile()`, and the cycle map is keyed
+`file:offset`, since two tabs share every offset. (3) `useAnalysis` exposes both `revision` (any
+parse) and `contentRevision` (a file's text actually changed). The trace is dropped on the second
+only — switching tabs reparses without moving a character, and dropping the trace there would make
+a cross-file one impossible to follow, since following it _is_ switching tabs.
+
+**Tab names are module paths.** `./db` finds the tab called `db.ts`, `db.js`, `lib/db.ts` or
+`lib/index.ts` — TypeScript's bundler resolution, given a host whose files are the open tabs. Two
+tabs may therefore not share a name (`renameFile` refuses), or an import would be ambiguous.
 
 **The cursor offset is the single source of truth for selection.** `AstNode.id` is a pre-order index
 that is only stable within one parse, so after every re-parse `App.vue` re-derives the selection from
@@ -110,9 +134,9 @@ dropped, non-empty is folded into a `<details>`, and an unterminated one is thin
 because the pane unmounts on every tab switch and a conversation must not. The system prompt (role,
 the source/sink definitions, then **every open file**, line-numbered) is built once per session, so
 the code it carries is a snapshot — edits raise a `stale` hint rather than silently rebuilding the
-session, which would discard the conversation. The chat is the one part that is not single-buffer:
-the analyzer sees the active tab, the model sees them all, because a taint flow usually leaves the
-file it starts in. `maxCodeChars` is the budget for all of them together, spent in the order given
+session, which would discard the conversation. The model is given every open file for the same reason the trace
+crosses them: a taint flow usually leaves the file it starts in. What it is _not_ given is which
+one is on screen beyond the ordering, so answers cite a file with every line number. `maxCodeChars` is the budget for all of them together, spent in the order given
 — which is why `promptFiles` puts the file on screen first — and files that do not fit are named
 rather than dropped silently. Staleness is measured in **tab order**, so switching tabs (which only
 reorders the prompt) does not cost a conversation, while an edit, a rename or a close does. The availability probe waits for the tab to be opened.
@@ -123,8 +147,9 @@ odd-looking rules are deliberate: an unterminated fence is code (a streaming ans
 mid-block), emphasis is `*`-only (`_` would italicise `snake_case`), and only `http(s)` targets
 become links.
 
-**Pure vs. impure.** `src/lib/{analyzer,astTree,definitions,files,flow,share}.ts` are pure and unit-tested
-over fixture strings; everything else is browser-bound and covered only by the e2e suites.
+**Pure vs. impure.** `src/lib/{analyzer,astTree,definitions,files,flow,share}.ts` are pure and
+unit-tested over fixture strings — the analyzer's fixtures are now _sets_ of files, which is how
+cross-file resolution and cross-file traces are tested; everything else is browser-bound and covered only by the e2e suites.
 `chat.ts` is the mixed case: `buildSystemPrompt`/`numberLines` are pure, `languageModel()` is not.
 
 ## Things that will bite

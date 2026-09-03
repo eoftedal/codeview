@@ -18,8 +18,13 @@ const pageErrors: string[] = []
  * own coordinate mapping turns the offset into screen coordinates, so this stays accurate whatever
  * the font metrics are — unlike hunting through the rendered token spans.
  */
-async function clickAt(needle: string, offsetInNeedle = 0, occurrence = 0): Promise<void> {
-  const point = await page.evaluate(
+async function clickAt(
+  needle: string,
+  offsetInNeedle = 0,
+  occurrence = 0,
+  target: Page = page,
+): Promise<void> {
+  const point = await target.evaluate(
     ({ needle, offsetInNeedle, occurrence }) => {
       const editor = (window as unknown as { __codeviewEditor?: any }).__codeviewEditor
       if (!editor) return null
@@ -44,7 +49,7 @@ async function clickAt(needle: string, offsetInNeedle = 0, occurrence = 0): Prom
     { needle, offsetInNeedle, occurrence },
   )
   expect(point, `"${needle}" #${occurrence} should be reachable in the editor`).not.toBeNull()
-  await page.mouse.click(point!.x, point!.y)
+  await target.mouse.click(point!.x, point!.y)
   await new Promise((resolve) => setTimeout(resolve, 150))
 }
 
@@ -56,8 +61,8 @@ const selectedRow = () =>
 
 /** Text under each decoration class, read back out of the editor DOM. Monaco renders runs of
  *  spaces as non-breaking spaces, so normalise before comparing. */
-const decorated = (className: string) =>
-  page.$$eval(`.${className}`, (nodes) =>
+const decorated = (className: string, target: Page = page) =>
+  target.$$eval(`.${className}`, (nodes) =>
     nodes.map((n) => (n.textContent ?? '').replace(/\u00a0/g, ' ')),
   )
 
@@ -762,6 +767,94 @@ describe('file tabs', () => {
       expect(source).toContain('const beta = <p>hi</p>')
     } finally {
       await fresh.close()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('a trace that leaves the file', () => {
+  const HANDLER = `import { getProduct } from './store'
+
+app.get('/product/:id', (req) => {
+  const row = getProduct(req.params.id)
+  return row
+})
+`
+  const STORE = `export function getProduct(productId) {
+  const query = \`SELECT * FROM Products WHERE id = \${productId}\`
+  return run(query)
+}
+`
+
+  const traceRows = (target: Page) =>
+    target.$$eval('.trace-pane .row', (nodes) =>
+      nodes.map((node) => (node.textContent ?? '').replace(/\s+/g, ' ').trim()),
+    )
+
+  it('walks into the imported tab, labels the steps, and opens the tab on a click', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeview-'))
+    const context = await browser.createBrowserContext()
+    const fresh = await context.newPage()
+    try {
+      await fresh.setViewport({ width: 1500, height: 1000 })
+      await fresh.goto(URL, { waitUntil: 'networkidle0' })
+      await fresh.waitForSelector('.view-line')
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      const store = join(directory, 'store.ts')
+      const handler = join(directory, 'handler.ts')
+      writeFileSync(store, STORE)
+      writeFileSync(handler, HANDLER)
+      const input = (await fresh.$('input[type=file]'))!
+      // handler.ts last, so it is the tab on screen.
+      await input.uploadFile(store, handler)
+      await new Promise((resolve) => setTimeout(resolve, 900))
+      expect(await fresh.$eval('.tab.active .file-name', (el) => el.textContent?.trim())).toBe(
+        'handler.ts',
+      )
+
+      await clickAt('return row', 8, 0, fresh)
+      await fresh.keyboard.down('Alt')
+      await fresh.keyboard.press('KeyT')
+      await fresh.keyboard.up('Alt')
+      await fresh.waitForSelector('.trace-pane')
+      await new Promise((resolve) => setTimeout(resolve, 250))
+
+      const rows = await traceRows(fresh)
+      // The query is built in the other tab, and the walk reached it.
+      expect(rows.join(' ')).toContain('SELECT * FROM Products')
+      // ...then came back out of it, to the request field at the call site.
+      expect(rows.join(' ')).toContain('req.params')
+      expect(rows.some((row) => row.includes('store.ts:'))).toBe(true)
+      expect(await fresh.$eval('.trace-pane .across', (el) => el.textContent?.trim())).toBe(
+        '2 files',
+      )
+
+      // Only the steps in the tab on screen are decorated: a span means nothing in another file.
+      // Monaco splits a decorated range across token spans, so compare the joined text.
+      const flow = (await decorated('cv-flow', fresh)).join('')
+      expect(flow).toContain('req.params.id')
+      expect(flow).not.toContain('SELECT')
+
+      const clicked = await fresh.evaluate(() => {
+        const row = [...document.querySelectorAll('.trace-pane .row')].find((node) =>
+          (node.textContent ?? '').includes('SELECT * FROM Products'),
+        )
+        if (!row) return false
+        ;(row as HTMLElement).click()
+        return true
+      })
+      expect(clicked).toBe(true)
+      await new Promise((resolve) => setTimeout(resolve, 700))
+
+      // The step's own tab is opened, and the trace survives the switch — nothing was edited.
+      expect(await fresh.$eval('.tab.active .file-name', (el) => el.textContent?.trim())).toBe(
+        'store.ts',
+      )
+      expect((await traceRows(fresh)).length).toBeGreaterThan(0)
+      expect((await decorated('cv-flow', fresh)).join('')).toContain('SELECT')
+    } finally {
+      await context.close()
       rmSync(directory, { recursive: true, force: true })
     }
   })

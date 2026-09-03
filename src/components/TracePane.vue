@@ -2,19 +2,21 @@
 import { computed, provide, ref, watch } from 'vue'
 import TraceRow from './TraceRow.vue'
 import { traceContextKey } from './traceContext'
-import type { Span } from '../lib/definitions'
-import { isExternalOrigin, type FlowTrace } from '../lib/flow'
+import { isExternalOrigin, type FlowTarget, type FlowTrace } from '../lib/flow'
 
 const props = defineProps<{
   trace: FlowTrace | null
   /** Label of the value the trace starts from, for the run button's wording. */
   target: string | null
+  /** The tab on screen. A step in another file is labelled with its own, and selecting it opens
+   *  that tab. */
+  activeFile: string
 }>()
 
 const emit = defineEmits<{
   run: []
-  select: [Span]
-  hover: [Span | null]
+  select: [FlowTarget]
+  hover: [FlowTarget | null]
 }>()
 
 const expanded = ref<Set<number>>(new Set())
@@ -35,8 +37,12 @@ const summary = computed(() => {
   if (!trace) return null
   const steps = trace.nodes.length
   const external = trace.externalCount
+  const files = new Set(trace.nodes.map((node) => node.file)).size
   return {
     steps: `${steps} ${steps === 1 ? 'step' : 'steps'}`,
+    // Worth saying out loud: a path that leaves the file on screen is the one you most want to
+    // know about, and half of it is not visible in the editor.
+    files: files > 1 ? `${files} files` : null,
     external: `${external} external ${external === 1 ? 'source' : 'sources'}`,
     hasExternal: external > 0,
     truncated: trace.truncated,
@@ -53,7 +59,7 @@ function select(id: number): void {
   const node = props.trace?.nodes[id]
   if (!node) return
   selectedId.value = id
-  emit('select', node.span)
+  emit('select', { span: node.span, file: node.file })
 }
 
 function expandAll(): void {
@@ -73,11 +79,12 @@ function revealFirstExternal(): void {
 provide(traceContextKey, {
   // Guarded by v-if in the template: rows only render when a trace exists.
   trace: computed(() => props.trace!),
+  activeFile: computed(() => props.activeFile),
   expanded,
   selectedId,
   toggle,
   select,
-  hover: (span) => emit('hover', span),
+  hover: (target) => emit('hover', target),
 })
 </script>
 
@@ -97,12 +104,16 @@ provide(traceContextKey, {
       <div class="status">
         <span v-if="summary" class="counts">
           {{ summary.steps }}
+          <template v-if="summary.files">
+            <span class="sep">·</span>
+            <span class="across">{{ summary.files }}</span>
+          </template>
           <span class="sep">·</span>
           <button
             v-if="summary.hasExternal"
             class="external"
             @click="revealFirstExternal"
-            title="Jump to the first origin outside this file"
+            title="Jump to the first origin outside the open files"
           >
             <span class="dot" />
             {{ summary.external }}
@@ -121,8 +132,9 @@ provide(traceContextKey, {
         Put the cursor on a value and press <strong>Trace</strong> — or <kbd>Alt</kbd>+<kbd>T</kbd>
         in the editor.
         <br />
-        Every assignment, return value and call-site argument is followed back until the value
-        reaches a constant, an import, or something this file cannot see.
+        Every assignment, return value and call-site argument is followed back — across the open
+        files, wherever an import leads — until the value reaches a constant or something no open
+        file can see.
       </p>
     </div>
 
@@ -203,6 +215,10 @@ button:hover {
 
 .sep {
   color: var(--border);
+}
+
+.across {
+  color: var(--accent);
 }
 
 .external {

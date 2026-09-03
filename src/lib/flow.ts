@@ -1,6 +1,12 @@
 import ts from 'typescript'
-import { findTsNodeAtOffset } from './analyzer'
-import { declarationAt, describeDeclaration, resolveDefinition, type Span } from './definitions'
+import { fileLabel, findTsNodeAtOffset } from './analyzer'
+import {
+  declarationAt,
+  describeDeclaration,
+  isImportPart,
+  resolveDefinition,
+  type Span,
+} from './definitions'
 
 /**
  * Backward provenance: given a value, where could it have come from?
@@ -10,8 +16,12 @@ import { declarationAt, describeDeclaration, resolveDefinition, type Span } from
  * and no alias analysis. It over-approximates, and where it cannot follow a value it says so
  * (`external`) rather than pretending the chain ended.
  *
- * The `noLib`/`noResolve` analyzer (see lib/analyzer.ts) makes the terminal condition principled
- * rather than heuristic: nothing outside the buffer resolves, so a name with no definition *is* an
+ * The walk crosses files. Every open tab is in the program, so an import of another tab resolves
+ * and the walk follows it — into the callee's body, and back out through its call sites, wherever
+ * they are. Each step records the file it is in, since a line number alone no longer says where.
+ *
+ * The `noLib` analyzer (see lib/analyzer.ts) keeps the terminal condition principled rather than
+ * heuristic: nothing outside the open files resolves, so a name with no definition *is* an
  * external one. No hardcoded list of interesting globals is needed.
  */
 
@@ -29,7 +39,7 @@ export type FlowStep =
 /**
  * How a branch of the walk ended.
  *
- * `literal` means the value originates inside this buffer — a constant, a function, a freshly
+ * `literal` means the value originates inside the open files — a constant, a function, a freshly
  * constructed object. The others all mean it entered from somewhere we cannot see.
  */
 export type FlowOrigin =
@@ -38,6 +48,8 @@ export type FlowOrigin =
 export interface FlowNode {
   id: number
   span: Span
+  /** The tab this step is in — spans are offsets into that file, not into the active one. */
+  file: string
   /** 1-based, matching the definition header's "line N". */
   line: number
   /** The edge that reached this node; null on the root. */
@@ -58,7 +70,7 @@ export interface FlowNode {
 export interface FlowTrace {
   nodes: FlowNode[]
   root: number
-  /** Terminals that came from outside the buffer — imports, globals, uncalled parameters. */
+  /** Terminals that came from outside the open files — imports, globals, uncalled parameters. */
   externalCount: number
   /** True when the walk hit its node or depth budget rather than finishing. */
   truncated: boolean
@@ -85,20 +97,33 @@ export interface FlowSpan {
   external: boolean
 }
 
+/** A step's location: which file, and where in it. Spans mean nothing without the file now. */
+export interface FlowTarget {
+  span: Span
+  file: string
+}
+
 interface Walk {
   service: ts.LanguageService
-  sf: ts.SourceFile
-  fileName: string
+  program: ts.Program
   nodes: FlowNode[]
-  /** Declaration start offset → the node that expanded it, so cycles and diamonds terminate. */
-  expanded: Map<number, number>
+  /** `file:offset` of a declaration → the node that expanded it, so cycles and diamonds
+   *  terminate. Keyed by file as well as offset: two tabs share every offset. */
+  expanded: Map<string, number>
   truncated: boolean
 }
 
 /* ------------------------------------------------------------------ small helpers */
 
-function spanOf(node: ts.Node, sf: ts.SourceFile): Span {
+function spanOf(node: ts.Node): Span {
+  const sf = node.getSourceFile()
   return { start: node.getStart(sf), end: node.getEnd() }
+}
+
+/** Identity of a declaration across the whole program. */
+function keyOf(node: ts.Node): string {
+  const sf = node.getSourceFile()
+  return `${sf.fileName}:${node.getStart(sf)}`
 }
 
 function excerptOf(sf: ts.SourceFile, span: Span): string {
@@ -106,14 +131,21 @@ function excerptOf(sf: ts.SourceFile, span: Span): string {
   return text.length > EXCERPT_LIMIT ? `${text.slice(0, EXCERPT_LIMIT)}…` : text
 }
 
-function addNode(walk: Walk, span: Span, step: FlowStep | null, label: string): FlowNode {
+function addNode(
+  walk: Walk,
+  sf: ts.SourceFile,
+  span: Span,
+  step: FlowStep | null,
+  label: string,
+): FlowNode {
   const node: FlowNode = {
     id: walk.nodes.length,
     span,
-    line: walk.sf.getLineAndCharacterOfPosition(span.start).line + 1,
+    file: fileLabel(sf.fileName),
+    line: sf.getLineAndCharacterOfPosition(span.start).line + 1,
     step,
     label,
-    excerpt: excerptOf(walk.sf, span),
+    excerpt: excerptOf(sf, span),
     children: [],
   }
   walk.nodes.push(node)
@@ -149,16 +181,6 @@ function isConstant(expr: ts.Expression): boolean {
     expr.kind === ts.SyntaxKind.FalseKeyword ||
     expr.kind === ts.SyntaxKind.NullKeyword ||
     (ts.isIdentifier(expr) && expr.text === 'undefined')
-  )
-}
-
-function isImportPart(node: ts.Node): boolean {
-  return (
-    ts.isImportSpecifier(node) ||
-    ts.isImportClause(node) ||
-    ts.isNamespaceImport(node) ||
-    ts.isImportDeclaration(node) ||
-    ts.isImportEqualsDeclaration(node)
   )
 }
 
@@ -279,14 +301,19 @@ function writesFor(walk: Walk, decl: ts.VariableDeclaration): ts.Expression[] {
   if (list.flags & ts.NodeFlags.Const) return []
   if (!ts.isIdentifier(decl.name)) return []
 
-  const declared = decl.name.getStart(walk.sf)
-  const refs = walk.service.getReferencesAtPosition(walk.fileName, declared) ?? []
+  const sf = decl.getSourceFile()
+  const declared = decl.name.getStart(sf)
+  // References come back from the whole program, so an exported `let` written from another tab is
+  // found the same way one written here is.
+  const refs = walk.service.getReferencesAtPosition(sf.fileName, declared) ?? []
   const out: ts.Expression[] = []
   for (const ref of refs) {
-    if (ref.fileName !== walk.fileName || !ref.isWriteAccess) continue
-    if (ref.textSpan.start === declared) continue // the declaration itself
+    if (!ref.isWriteAccess) continue
+    const refSf = walk.program.getSourceFile(ref.fileName)
+    if (!refSf) continue
+    if (refSf === sf && ref.textSpan.start === declared) continue // the declaration itself
 
-    const node = findTsNodeAtOffset(walk.sf, ref.textSpan.start)
+    const node = findTsNodeAtOffset(refSf, ref.textSpan.start)
     const parent = node.parent
     if (
       parent &&
@@ -319,21 +346,25 @@ function argumentsFor(walk: Walk, param: ts.ParameterDeclaration): ArgumentSourc
   const name = calleeName(fn)
   if (!name || index < 0) return []
 
-  const refs = walk.service.getReferencesAtPosition(walk.fileName, name.getStart(walk.sf)) ?? []
+  const sf = fn.getSourceFile()
+  // The interesting call sites of an exported function are in the files that import it, and
+  // find-all-references crosses the import for us.
+  const refs = walk.service.getReferencesAtPosition(sf.fileName, name.getStart(sf)) ?? []
   const sources: ArgumentSource[] = []
-  const seen = new Set<number>()
+  const seen = new Set<string>()
 
   const take = (expr: ts.Expression): void => {
-    const start = expr.getStart(walk.sf)
     // The default initializer is one node however many call sites omit the argument.
-    if (seen.has(start)) return
-    seen.add(start)
+    const key = keyOf(expr)
+    if (seen.has(key)) return
+    seen.add(key)
     sources.push({ expr, callee: name.text })
   }
 
   for (const ref of refs) {
-    if (ref.fileName !== walk.fileName) continue
-    const call = callAt(walk.sf, ref.textSpan.start)
+    const refSf = walk.program.getSourceFile(ref.fileName)
+    if (!refSf) continue
+    const call = callAt(refSf, ref.textSpan.start)
     if (!call) continue
 
     const args = call.arguments ?? ([] as unknown as ts.NodeArray<ts.Expression>)
@@ -375,7 +406,7 @@ function traceValue(
   label: string,
   depth: number,
 ): number {
-  const node = addNode(walk, spanOf(expr, walk.sf), step, label)
+  const node = addNode(walk, expr.getSourceFile(), spanOf(expr), step, label)
   expand(walk, node, expr, depth)
   return node.id
 }
@@ -406,7 +437,8 @@ function expand(walk: Walk, node: FlowNode, expression: ts.Expression, depth: nu
   }
 
   if (ts.isIdentifier(expr) || ts.isPropertyAccessExpression(expr)) {
-    const hit = declarationAt(walk.service, walk.sf, walk.fileName, lookupPosition(expr, walk.sf))
+    const sf = expr.getSourceFile()
+    const hit = declarationAt(walk.service, sf, sf.fileName, lookupPosition(expr, sf))
     if (!hit) {
       node.origin = 'external'
       return
@@ -455,16 +487,19 @@ function expandCall(
   call: ts.CallExpression | ts.NewExpression,
   depth: number,
 ): void {
+  const sf = call.getSourceFile()
   const target = ts.isPropertyAccessExpression(call.expression)
     ? call.expression.name
     : call.expression
   const hit = ts.isIdentifier(target)
-    ? declarationAt(walk.service, walk.sf, walk.fileName, target.getStart(walk.sf))
+    ? declarationAt(walk.service, sf, sf.fileName, target.getStart(sf))
     : null
 
+  // An import that still resolves to nothing is an import of something not open here; one that
+  // resolves lands on the callee itself, in whichever tab that is, and the walk goes on.
   if (!hit || isImportPart(hit.declaration)) {
-    // The implementation is not in this buffer, so the result originates outside it — but what was
-    // fed in still matters, so keep walking the receiver and the arguments underneath.
+    // The implementation is not among the open files, so the result originates outside them — but
+    // what was fed in still matters, so keep walking the receiver and the arguments underneath.
     node.origin = hit ? 'import' : 'external'
     expandOpaqueCall(walk, node, call, depth)
     return
@@ -490,7 +525,7 @@ function expandCall(
     return
   }
 
-  const key = fn.getStart(walk.sf)
+  const key = keyOf(fn)
   const seen = walk.expanded.get(key)
   if (seen !== undefined) {
     node.origin = 'cycle'
@@ -544,12 +579,17 @@ function terminateAtDeclaration(
   name: string,
   origin: FlowOrigin,
 ): void {
-  const view = describeDeclaration(decl, walk.sf, name)
-  if (view.span.start === node.span.start && view.span.end === node.span.end) {
+  const sf = decl.getSourceFile()
+  const view = describeDeclaration(decl, sf, name)
+  if (
+    view.span.start === node.span.start &&
+    view.span.end === node.span.end &&
+    fileLabel(sf.fileName) === node.file
+  ) {
     node.origin = origin
     return
   }
-  const child = addNode(walk, view.span, 'declaration', view.label)
+  const child = addNode(walk, sf, view.span, 'declaration', view.label)
   child.origin = origin
   node.children.push(child.id)
 }
@@ -561,7 +601,7 @@ function expandDeclaration(
   name: string,
   depth: number,
 ): void {
-  const key = decl.getStart(walk.sf)
+  const key = keyOf(decl)
   const seen = walk.expanded.get(key)
   if (seen !== undefined) {
     node.origin = 'cycle'
@@ -594,7 +634,7 @@ function expandDeclaration(
     for (const write of writesFor(walk, decl)) {
       node.children.push(traceValue(walk, write, 'assignment', `reassigned`, depth + 1))
     }
-    // Declared but never given a value in this buffer.
+    // Declared but never given a value anywhere open.
     if (node.children.length === 0) terminateAtDeclaration(walk, node, decl, name, 'external')
     return
   }
@@ -653,7 +693,8 @@ function expandBindingElement(
   // far better than re-tracing the whole object. Verified against the compiler: `kind=property`.
   const wanted = element.propertyName ?? element.name
   if (ts.isIdentifier(wanted)) {
-    const hit = declarationAt(walk.service, walk.sf, walk.fileName, wanted.getStart(walk.sf))
+    const sf = element.getSourceFile()
+    const hit = declarationAt(walk.service, sf, sf.fileName, wanted.getStart(sf))
     if (hit && hit.declaration !== element) {
       expandDeclaration(walk, node, hit.declaration, hit.name, depth)
       return
@@ -709,8 +750,9 @@ function expandBindingElement(
 /* ------------------------------------------------------------------ entry point */
 
 /**
- * Trace the value at `offset` back to its sources. Null when nothing at the offset resolves to a
- * declaration in this buffer — the same condition under which there is no definition to highlight.
+ * Trace the value at `offset` in `sf` back to its sources, following it into the other open files
+ * wherever an import leads. Null when nothing at the offset resolves to a declaration — the same
+ * condition under which there is no definition to highlight.
  */
 export function traceOrigins(
   service: ts.LanguageService,
@@ -718,20 +760,22 @@ export function traceOrigins(
   fileName: string,
   offset: number,
 ): FlowTrace | null {
+  const program = service.getProgram()
   const definition = resolveDefinition(service, sf, fileName, offset)
   const hit = declarationAt(service, sf, fileName, offset)
-  if (!definition || !hit) return null
+  if (!program || !definition || !hit) return null
 
   const walk: Walk = {
     service,
-    sf,
-    fileName,
+    program,
     nodes: [],
     expanded: new Map(),
     truncated: false,
   }
 
-  const root = addNode(walk, definition.primary, null, definition.label)
+  // The root is always in the file being looked at: `resolveDefinition` reports an imported name
+  // through its import statement, and the expansion below crosses it.
+  const root = addNode(walk, sf, definition.primary, null, definition.label)
   expandDeclaration(walk, root, hit.declaration, hit.name, 0)
 
   return {
