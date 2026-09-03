@@ -6,12 +6,21 @@ import {
   languageForFile,
   neighbourId,
   sampleName,
+  uniqueName,
   untitledName,
   withLanguage,
   type CodeFile,
 } from '../lib/files'
 import { SAMPLE } from '../lib/sample'
-import { buildFragment, decodeShare, encodeShare, isFlagSet, parseParams } from '../lib/share'
+import {
+  buildFragment,
+  decodeShare,
+  encodeShare,
+  isFlagSet,
+  parseFiles,
+  parseParams,
+  serializeFiles,
+} from '../lib/share'
 
 const STORAGE_KEY = 'codeview:files'
 /** What a session before the tab strip left behind: a single buffer. */
@@ -81,6 +90,9 @@ export function useBuffer() {
   // `?? null`, because a missing key comes back as `undefined` — and `undefined !== null` would
   // make every plain visit look like a link and quietly drop the restored tabs.
   const shared = params.get('src') ?? null
+  /** A whole strip in one payload; `src` is the one-file form of the same thing. */
+  const bundled = params.get('files') ?? null
+  const wantedActive = params.get('active')?.trim() || null
   /** Chrome the embedding page would rather not show. */
   const hideHeader = isFlagSet(params, 'hideHeader')
 
@@ -91,7 +103,7 @@ export function useBuffer() {
 
   // A link naming a file describes that file and nothing else: restoring the reader's own tabs
   // around it would be noise. Without any of these, the last session comes back whole.
-  const fromParams = shared !== null || named !== null || params.has('lang')
+  const fromParams = shared !== null || bundled !== null || named !== null || params.has('lang')
 
   // An explicit ?lang wins; failing that a filename's extension speaks for itself.
   const linkLanguage: Language =
@@ -146,7 +158,32 @@ export function useBuffer() {
   const activeFileId = computed(() => active.value.id)
   const fileIds = computed(() => files.value.map((file) => file.id))
 
-  if (shared) {
+  if (bundled) {
+    // The payload carries the names, so the tabs it opens are the ones the sender had.
+    void decodeShare(bundled).then((decoded) => {
+      if (decoded === null) return
+      const parsed = parseFiles(decoded)
+      if (parsed.length === 0) return
+
+      const opened: CodeFile[] = []
+      for (const file of parsed) {
+        // An entry with no header is a payload written as plain source: name it the way a link
+        // with a bare `src` would be named.
+        const name = uniqueName(
+          file.name || named || sampleName(linkLanguage),
+          opened.map((open) => open.name),
+        )
+        opened.push({
+          id: createId(),
+          name,
+          text: file.text,
+          language: languageForFile(name) ?? linkLanguage,
+        })
+      }
+      files.value = opened
+      activeId.value = (opened.find((file) => file.name === wantedActive) ?? opened[0]!).id
+    })
+  } else if (shared) {
     void decodeShare(shared).then((decoded) => {
       if (decoded !== null) text.value = decoded
     })
@@ -258,22 +295,28 @@ export function useBuffer() {
   /** Build a share link and put it on the clipboard. Only ever on an explicit request — writing
    *  the hash on every keystroke would flood browser history. */
   async function copyShareLink(): Promise<boolean> {
-    // One file to a link, the one on screen: the fragment carries source, and every other tab
-    // would multiply the length of a URL that already has to fit in an address bar. The filename
-    // rides along, since it is the one bit of context saying which file the reader is looking at.
-    const fragment = buildFragment({
-      src: await encodeShare(text.value),
-      lang: language.value,
-      filename: fileName.value,
-    })
+    // Every tab goes into the link, deflated as one payload: a set of files that import each other
+    // is only worth reading together, and one stream over all of them is far shorter than a
+    // payload apiece. A lone file keeps the older, plainer `src` form — same link as ever, and
+    // shorter for the common case.
+    const single = files.value.length === 1
+    const fragment = single
+      ? buildFragment({
+          src: await encodeShare(text.value),
+          lang: language.value,
+          filename: fileName.value,
+        })
+      : buildFragment({
+          files: await encodeShare(serializeFiles(files.value)),
+          active: fileName.value,
+        })
     const url = `${location.origin}${location.pathname}${fragment}`
     history.replaceState(null, '', fragment)
     try {
       await navigator.clipboard.writeText(url)
-      notice.value =
-        files.value.length > 1
-          ? 'Share link copied — it carries the file you were looking at.'
-          : 'Share link copied to the clipboard.'
+      notice.value = single
+        ? 'Share link copied to the clipboard.'
+        : `Share link copied — all ${files.value.length} files.`
       return true
     } catch {
       notice.value = 'Share link is in the address bar — copy it from there.'

@@ -68,6 +68,24 @@ export function untitledName(taken: Iterable<string>, language: Language): strin
   }
 }
 
+/**
+ * A name no open tab has yet: `db.ts` becomes `db-2.ts`, then `db-3.ts`. Only a hand-written link
+ * can produce a clash — the app refuses a duplicate rename — but two tabs answering to one module
+ * path would make an import ambiguous, so the collision is resolved rather than tolerated.
+ */
+export function uniqueName(name: string, taken: Iterable<string>): string {
+  const names = new Set([...taken].map((existing) => existing.toLowerCase()))
+  if (!names.has(name.toLowerCase())) return name
+
+  const { dot } = extensionOf(name)
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const suffix = dot > 0 ? name.slice(dot) : ''
+  for (let n = 2; ; n++) {
+    const candidate = `${stem}-${n}${suffix}`
+    if (!names.has(candidate.toLowerCase())) return candidate
+  }
+}
+
 /** Which tab takes over when `id` is closed: the one to its right, failing that the one to its
  *  left. Null only when `id` was the last file open, which the caller never allows. */
 export function neighbourId(files: readonly CodeFile[], id: string): string | null {

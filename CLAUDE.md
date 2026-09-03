@@ -188,6 +188,14 @@ cross-file resolution and cross-file traces are tested; everything else is brows
   and would corrupt hand-written source. Keys are lower-cased; values are left verbatim. `z.` marks
   a deflated payload, `r.` an uncompressed one, and anything unprefixed or undecodable is read as
   literal source.
+- **`files=` is `src=` for the whole strip**, and goes through the same `z.`/`r.`/literal rules — a
+  hand-written bundle must keep working, which is why it is a text format and not JSON-in-base64.
+  One payload for all the tabs, not one per tab: files that import each other compress against each
+  other. `serializeFiles`/`parseFiles` round-trip exactly, and the rule that buys it is that **the
+  newline before a `--8<--` header belongs to the header** — change that and every file that ends
+  without a newline gains one on the way through a link. `copyShareLink` still writes the old
+  `src`/`lang`/`filename` form for a lone tab: shorter, and every existing link and embed keeps
+  working.
 - **The caret rule.** A caret sits _between_ characters, so a cursor at the end of a word is one past
   the identifier it belongs to. Both `findNodeAtOffset` and `identifierAt` look one character left
   when the caret isn't inside a token. Any new offset→node lookup needs the same rule.

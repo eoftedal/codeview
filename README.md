@@ -38,14 +38,29 @@ language when the new extension calls for a different one. The tree and the edit
 active tab, but **all of them are analysed together**: a tab's name is its module path, so
 an import from one tab to another resolves and a trace follows it across. Two tabs may not
 share a name, or an import would be ambiguous. Closing the last tab is not offered, since
-there is always a buffer. A share link carries the file you are looking at, not the strip.
+there is always a buffer. A share link carries the whole strip.
 
-A share link carries the whole buffer in the URL fragment, which browsers never send to
-the server — so shared code stays between the people holding the link. **Copy link** writes
-`#src=z.<payload>`: raw DEFLATE (via `CompressionStream`, no dependency), then base64url.
-Anything without a `z.` prefix is read literally, so a link can also be written by hand:
+A share link carries the code in the URL fragment, which browsers never send to the server
+— so shared code stays between the people holding the link. **Copy link** deflates (raw
+DEFLATE via `CompressionStream`, no dependency) and base64urls the result.
+
+With one tab open it writes the plain, older form, `#src=z.<payload>&lang=ts&filename=…`.
+With several it writes `#files=z.<payload>&active=<name>`, and the payload is every open
+tab in one stream — one deflate over the whole set is markedly shorter than a payload per
+file, since files that import each other repeat each other's names. Opening such a link
+opens those tabs, under their own names, on the one the sender was looking at.
+
+Anything without a `z.` prefix is read literally, so both forms can be written by hand:
 
     #src=const%20answer%20%3D%2042&lang=ts
+
+    #files=--8<-- a.ts%0Aexport const a = 1%0A--8<-- b.ts%0Aimport { a } from './a'
+
+A bundle is a header line per file (`--8<-- name`) followed by its source, verbatim. The
+newline in front of a header belongs to the header, which is what makes the round trip
+exact for a file that ends without one. A payload with no header at all is one unnamed
+file, so `files=` degrades to exactly what `src=` means. Two entries with the same name
+would make an import ambiguous, so the second becomes `db-2.ts`.
 
 The fragment is parsed without `URLSearchParams`, which decodes `+` as a space and would
 quietly corrupt hand-written source. A prefixed payload that fails to decode is treated as
@@ -63,8 +78,8 @@ key. Key names are case-insensitive, since these get typed by hand.
 | `filename`   | names the tab; its extension picks the language when `lang` is absent. **Copy link** carries it along |
 | `hideHeader` | hides the title bar, language switcher and buttons, for embedding                                     |
 
-Any of these describes exactly one file, so a link opens with that file alone rather than
-the tabs the reader happened to leave open. Without them, the last session comes back whole;
+Any of these describes what the link is about, so it opens with those files rather than the
+tabs the reader happened to leave open. Without them, the last session comes back whole;
 the seed buffer arrives as `example.ts`, because every tab needs a name.
 
 `hideHeader` needs no value, though `=false`/`=0`/`=no`/`=off` turns it off. It leaves the
@@ -276,7 +291,7 @@ src/lib/analyzer.ts        LanguageService over the open files        (pure, tes
 src/lib/astTree.ts         AST → flat node list, offset lookups       (pure, tested)
 src/lib/definitions.ts     the definition rules                       (pure, tested)
 src/lib/flow.ts            the backward provenance walk               (pure, tested)
-src/lib/share.ts           share-link encoding, fragment parsing       (pure, tested)
+src/lib/share.ts           share-link encoding, bundles, fragments     (pure, tested)
 src/lib/files.ts           open-file naming and identity              (pure, tested)
 src/lib/chat.ts            the provider contract, model catalogue, system prompt
 src/lib/markdown.ts        the answer renderer's block parser           (pure, tested)

@@ -4,6 +4,7 @@ import {
   languageForFile,
   neighbourId,
   sampleName,
+  uniqueName,
   untitledName,
   withLanguage,
   type CodeFile,
@@ -62,6 +63,15 @@ describe('names for files we make up', () => {
     // A gap gets filled, and the comparison ignores case.
     expect(untitledName(['Untitled-1.TS', 'untitled-3.ts'], 'ts')).toBe('untitled-2.ts')
     expect(untitledName(['untitled-1.ts'], 'jsx')).toBe('untitled-1.jsx')
+  })
+
+  it('steps a clashing name past the ones already open', () => {
+    expect(uniqueName('db.ts', [])).toBe('db.ts')
+    expect(uniqueName('db.ts', ['db.ts'])).toBe('db-2.ts')
+    expect(uniqueName('db.ts', ['db.ts', 'db-2.ts'])).toBe('db-3.ts')
+    expect(uniqueName('lib/db.ts', ['LIB/DB.TS'])).toBe('lib/db-2.ts')
+    // Nothing to step around the extension when there is none.
+    expect(uniqueName('Makefile', ['Makefile'])).toBe('Makefile-2')
   })
 
   it('hands out ids nothing else holds', () => {

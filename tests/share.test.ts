@@ -4,8 +4,10 @@ import {
   decodeShare,
   encodeShare,
   isFlagSet,
+  parseFiles,
   parseFragment,
   parseParams,
+  serializeFiles,
 } from '../src/lib/share'
 
 describe('encodeShare / decodeShare', () => {
@@ -156,5 +158,78 @@ describe('buildFragment', () => {
       expect(parseFragment(fragment).get('filename'), name).toBe(name)
       expect(parseFragment(fragment).get('src'), name).toBe('z.abc')
     }
+  })
+})
+
+describe('several files in one payload', () => {
+  const FILES = [
+    { name: 'server.ts', text: "import db from './db'\nconst row = db.get(1)\n" },
+    { name: 'db.ts', text: 'export default { get: (id) => id }\n' },
+  ]
+
+  it('round-trips names and source exactly', () => {
+    expect(parseFiles(serializeFiles(FILES))).toEqual(FILES)
+  })
+
+  it('round-trips a file that ends without a newline', () => {
+    // The newline before a header belongs to the header, so it is not added to the file above it.
+    const files = [
+      { name: 'a.ts', text: 'const a = 1' },
+      { name: 'b.ts', text: 'const b = 2\n' },
+      { name: 'c.ts', text: '' },
+    ]
+    expect(parseFiles(serializeFiles(files))).toEqual(files)
+  })
+
+  it('survives source that looks like a header but is not one', () => {
+    const files = [{ name: 'a.ts', text: 'const arrow = `--8<--`\n// --8<-- not a header\n' }]
+    expect(parseFiles(serializeFiles(files))).toEqual(files)
+  })
+
+  it('reads a payload written by hand, uncompressed', () => {
+    // The newline in front of a header is the header's, so `a.ts` ends where its last line does;
+    // write a blank line before the next header to give a file a trailing newline of its own.
+    expect(parseFiles('--8<-- a.ts\nconst a = 1\n--8<-- lib/b.ts\nconst b = 2\n')).toEqual([
+      { name: 'a.ts', text: 'const a = 1' },
+      { name: 'lib/b.ts', text: 'const b = 2\n' },
+    ])
+    // Extra spacing in the header, and a name with a path in it, are both fine.
+    expect(parseFiles('--8<--    src/a.ts  \nconst a = 1')).toEqual([
+      { name: 'src/a.ts', text: 'const a = 1' },
+    ])
+  })
+
+  it('treats a payload with no header at all as one unnamed file', () => {
+    // Which is exactly what `src=` means, so a hand-written link can leave the ceremony out.
+    expect(parseFiles('const answer = 42')).toEqual([{ name: null, text: 'const answer = 42' }])
+    expect(parseFiles('')).toEqual([])
+  })
+
+  it('goes through the same z. / r. / literal rules as a single buffer', async () => {
+    const payload = await encodeShare(serializeFiles(FILES))
+    expect(payload.startsWith('z.')).toBe(true)
+    expect(parseFiles((await decodeShare(payload))!)).toEqual(FILES)
+
+    // The uncompressed form a browser without CompressionStream would write.
+    const raw = `r.${btoa(serializeFiles(FILES)).replace(/=+$/, '')}`
+    expect(parseFiles((await decodeShare(raw))!)).toEqual(FILES)
+  })
+
+  it('is worth bundling: one stream over the set beats a payload apiece', async () => {
+    // The reason the whole strip goes into one payload. Files that import each other repeat each
+    // other's names, and the second one compresses against the first.
+    const body =
+      "import { helper } from './helper'\nexport function run(value) {\n  return helper(value)\n}\n"
+    const many = Array.from({ length: 6 }, (_, index) => ({
+      name: `module-${index}.ts`,
+      text: body,
+    }))
+
+    const bundled = await encodeShare(serializeFiles(many))
+    const separate = (await Promise.all(many.map((file) => encodeShare(file.text)))).reduce(
+      (total, payload) => total + payload.length,
+      0,
+    )
+    expect(bundled.length).toBeLessThan(separate)
   })
 })

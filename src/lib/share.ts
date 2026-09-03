@@ -78,6 +78,66 @@ export async function decodeShare(payload: string): Promise<string | null> {
   return payload
 }
 
+/**
+ * A file inside a shared bundle. A null name means the payload had no header at all — a link
+ * written by hand as plain source — and the reader names it.
+ */
+export interface SharedFile {
+  name: string | null
+  text: string
+}
+
+/** Starts a file inside a bundle. Chosen to be a cut mark rather than anything JavaScript could
+ *  be mistaken for, and to stay readable when a link is written or read by hand. */
+const MARKER = '--8<--'
+
+const MARKER_LINE = /^--8<--\s+(.*)$/
+
+/**
+ * Several files as one payload: a header line per file, then its source, verbatim.
+ *
+ *     --8<-- server.ts
+ *     import db from './db'
+ *     --8<-- db.ts
+ *     export default …
+ *
+ * One text, so **Copy link** deflates the whole set together — far better than a payload per file,
+ * since the second file compresses against the first. The newline before a header belongs to the
+ * header, which is what makes the round trip exact for a file that ends without one.
+ */
+export function serializeFiles(files: readonly { name: string; text: string }[]): string {
+  return files.map((file) => `${MARKER} ${file.name}\n${file.text}`).join('\n')
+}
+
+/**
+ * The inverse. A payload with no header at all is one unnamed file, so `files=` degrades to
+ * exactly what `src=` means and a hand-written link can leave the ceremony out.
+ */
+export function parseFiles(payload: string): SharedFile[] {
+  const files: SharedFile[] = []
+  let name: string | null = null
+  let body: string[] = []
+
+  const flush = (): void => {
+    if (name !== null) files.push({ name, text: body.join('\n') })
+    body = []
+  }
+
+  for (const line of payload.split('\n')) {
+    const header = MARKER_LINE.exec(line)
+    if (header) {
+      flush()
+      name = header[1]!.trim()
+      continue
+    }
+    body.push(line)
+  }
+  flush()
+
+  if (files.length === 0) return payload.length > 0 ? [{ name: null, text: payload }] : []
+  return files
+}
+
 /** Query string and fragment together, the fragment winning where both name the same key. */
 export function parseParams(search: string, hash: string): Map<string, string> {
   const params = parseFragment(search)

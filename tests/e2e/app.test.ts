@@ -347,6 +347,86 @@ describe('embedding parameters', () => {
     }
   })
 
+  it('carries every open tab through Copy link, and opens them again', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeview-'))
+    const context = await browser.createBrowserContext()
+    const fresh = await context.newPage()
+    try {
+      await fresh.setViewport({ width: 1400, height: 1000 })
+      await fresh.goto(URL, { waitUntil: 'networkidle0' })
+      await fresh.waitForSelector('.view-line')
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      const store = join(directory, 'store.ts')
+      const handler = join(directory, 'handler.ts')
+      writeFileSync(store, "export const rows = ['a', 'b']\n")
+      writeFileSync(handler, "import { rows } from './store'\nexport const first = rows[0]\n")
+      const input = (await fresh.$('input[type=file]'))!
+      await input.uploadFile(store, handler)
+      await new Promise((resolve) => setTimeout(resolve, 900))
+
+      await fresh.evaluate(() => {
+        const button = [...document.querySelectorAll('.actions > button')].find(
+          (candidate) => candidate.textContent?.trim() === 'Copy link',
+        )
+        ;(button as HTMLElement).click()
+      })
+      await new Promise((resolve) => setTimeout(resolve, 800))
+
+      const hash = await fresh.evaluate(() => location.hash)
+      // Deflated, and it names the tab that was on screen.
+      expect(hash).toMatch(/^#files=z\./)
+      expect(hash).toContain('active=handler.ts')
+
+      const recipient = await context.newPage()
+      try {
+        await recipient.goto(`${URL}${hash}`, { waitUntil: 'networkidle0' })
+        await recipient.waitForSelector('.view-line')
+        await new Promise((resolve) => setTimeout(resolve, 900))
+
+        // Their tabs, their names, and the one they were looking at — not the reader's own strip.
+        expect(
+          await recipient.$$eval('.tab .file-name', (nodes) =>
+            nodes.map((node) => node.textContent?.trim()),
+          ),
+          // Every tab, the sample the page opened with included.
+        ).toEqual(['example.ts', 'store.ts', 'handler.ts'])
+        expect(
+          await recipient.$eval('.tab.active .file-name', (el) => el.textContent?.trim()),
+        ).toBe('handler.ts')
+
+        const source = await recipient.$$eval('.view-line', (nodes) =>
+          nodes.map((node) => (node.textContent ?? '').replace(/\u00a0/g, ' ')).join('\n'),
+        )
+        expect(source).toContain("import { rows } from './store'")
+      } finally {
+        await recipient.close()
+      }
+    } finally {
+      await context.close()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  it('opens a hand-written multi-file fragment, uncompressed', async () => {
+    const payload = encodeURIComponent(
+      "--8<-- a.ts\nexport const a = 1\n--8<-- b.ts\nimport { a } from './a'\nexport const b = a\n",
+    )
+    const fresh = await open(`#files=${payload}&active=b.ts`)
+    try {
+      expect(
+        await fresh.$$eval('.tab .file-name', (nodes) =>
+          nodes.map((node) => node.textContent?.trim()),
+        ),
+      ).toEqual(['a.ts', 'b.ts'])
+      expect(await fresh.$eval('.tab.active .file-name', (el) => el.textContent?.trim())).toBe(
+        'b.ts',
+      )
+    } finally {
+      await fresh.close()
+    }
+  })
+
   it('carries the filename through Copy link', async () => {
     const fresh = await open('?filename=src/App.tsx')
     try {
