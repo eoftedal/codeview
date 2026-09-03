@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createServer, type ViteDevServer } from 'vite'
 import puppeteer, { type Browser, type Page } from 'puppeteer'
@@ -220,7 +223,8 @@ describe('language switching', () => {
       const m = (window as unknown as { __codeviewEditor: any }).__codeviewEditor.getModel()
       return { uri: m.uri.toString(), lines: m.getLineCount() }
     })
-    expect(model.uri).toContain('main.tsx')
+    // The URI is keyed by file id, but its extension still has to follow the language.
+    expect(model.uri).toMatch(/\.tsx$/)
     expect(model.lines).toBeGreaterThan(30)
     expect((await decorated('cv-def')).join('')).toContain('const config = {')
 
@@ -307,10 +311,11 @@ describe('embedding parameters', () => {
     }
   })
 
-  it('shows no filename bar when the parameter is absent', async () => {
+  it('names the sample itself when the parameter is absent', async () => {
     const fresh = await open('')
     try {
-      expect(await fresh.$('.file-name')).toBeNull()
+      // Every tab needs a name, so the seed buffer arrives under one.
+      expect(await fresh.$eval('.file-name', (el) => el.textContent?.trim())).toBe('example.ts')
     } finally {
       await fresh.close()
     }
@@ -583,6 +588,181 @@ describe('the chat pane picks a model honestly', () => {
       )
     } finally {
       await fresh.close()
+    }
+  })
+})
+
+describe('file tabs', () => {
+  /** A page with an empty localStorage, so the strip starts at exactly one tab. */
+  async function tabsPage(): Promise<Page> {
+    const fresh = await browser.newPage()
+    await fresh.setViewport({ width: 1400, height: 1000 })
+    await fresh.evaluateOnNewDocument(() => localStorage.clear())
+    await fresh.goto(URL, { waitUntil: 'networkidle0' })
+    await fresh.waitForSelector('.view-line')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    return fresh
+  }
+
+  const tabNames = (target: Page) =>
+    target.$$eval('.tab .file-name', (nodes) => nodes.map((node) => node.textContent?.trim()))
+
+  it('opens with one tab, which has no close button', async () => {
+    const fresh = await tabsPage()
+    try {
+      expect(await tabNames(fresh)).toEqual(['example.ts'])
+      // Closing the last tab would leave no buffer, so it is not offered.
+      expect(await fresh.$('.tab .close')).toBeNull()
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('adds a blank file, keeps the other one, and closes it again', async () => {
+    const fresh = await tabsPage()
+    try {
+      await fresh.click('.file-tabs .add')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      expect(await tabNames(fresh)).toEqual(['example.ts', 'untitled-1.ts'])
+      expect(await fresh.$eval('.tab.active .file-name', (el) => el.textContent?.trim())).toBe(
+        'untitled-1.ts',
+      )
+      // A new file is blank, and the tree is the empty source file it parses to.
+      const blank = await fresh.$$eval('.view-line', (nodes) =>
+        nodes.map((node) => (node.textContent ?? '').replace(/\u00a0/g, ' ').trim()).join(''),
+      )
+      expect(blank).toBe('')
+      expect(await fresh.$eval('.row', (el) => el.textContent)).toContain('SourceFile')
+
+      const tabs = await fresh.$$('.tab')
+      await tabs[0]!.click()
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      // The sample was waiting where it was left, not thrown away by the trip to the other tab.
+      expect(await fresh.$$eval('.row', (nodes) => nodes.length)).toBeGreaterThan(3)
+      expect(await fresh.$eval('.tab.active .file-name', (el) => el.textContent?.trim())).toBe(
+        'example.ts',
+      )
+
+      const closers = await fresh.$$('.tab .close')
+      await closers[1]!.click()
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(await tabNames(fresh)).toEqual(['example.ts'])
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('renames from the tab’s own context menu, and follows the extension', async () => {
+    const fresh = await tabsPage()
+    try {
+      const tab = (await fresh.$('.tab'))!
+      const box = (await tab.boundingBox())!
+      await fresh.mouse.click(box.x + 20, box.y + box.height / 2, { button: 'right' })
+      await fresh.waitForSelector('.file-tabs .menu')
+
+      // The first item is Rename.
+      await fresh.click('.file-tabs .menu button')
+      await fresh.waitForSelector('.tab .rename')
+      // Only the stem starts out selected, so the extension survives being typed over.
+      await fresh.keyboard.type('Widget')
+      await fresh.keyboard.press('Enter')
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(await tabNames(fresh)).toEqual(['Widget.ts'])
+
+      await fresh.mouse.click(box.x + 20, box.y + box.height / 2, { button: 'right' })
+      await fresh.waitForSelector('.file-tabs .menu')
+      await fresh.click('.file-tabs .menu button')
+      await fresh.waitForSelector('.tab .rename')
+      // Past the selected stem, then over the extension itself.
+      await fresh.keyboard.press('End')
+      for (let i = 0; i < 3; i++) await fresh.keyboard.press('Backspace')
+      await fresh.keyboard.type('.jsx')
+      await fresh.keyboard.press('Enter')
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      expect(await tabNames(fresh)).toEqual(['Widget.jsx'])
+      // A new extension is a new language, the same as it is for an opened file.
+      expect(await fresh.$eval('.tab.active .badge', (el) => el.textContent?.trim())).toBe('JSX')
+      expect(
+        await fresh.$$eval('.languages button.active', (nodes) =>
+          nodes.map((node) => node.textContent?.trim()),
+        ),
+      ).toEqual(['JSX'])
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('remembers every file, its name and the one that was showing', async () => {
+    // Its own storage partition: `tabsPage` clears on every navigation, which a reload would
+    // undo the point of.
+    const context = await browser.createBrowserContext()
+    const fresh = await context.newPage()
+    try {
+      await fresh.setViewport({ width: 1400, height: 1000 })
+      await fresh.goto(URL, { waitUntil: 'networkidle0' })
+      await fresh.waitForSelector('.view-line')
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      await fresh.click('.file-tabs .add')
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      const tab = (await fresh.$$('.tab'))[1]!
+      const box = (await tab.boundingBox())!
+      await fresh.mouse.click(box.x + 25, box.y + box.height / 2, { button: 'right' })
+      await fresh.waitForSelector('.file-tabs .menu')
+      await fresh.click('.file-tabs .menu button')
+      await fresh.waitForSelector('.tab .rename')
+      await fresh.keyboard.type('service')
+      await fresh.keyboard.press('Enter')
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      await fresh.click('.editor')
+      await fresh.keyboard.type('const secret = 42')
+      // Past the save debounce.
+      await new Promise((resolve) => setTimeout(resolve, 900))
+
+      await fresh.reload({ waitUntil: 'networkidle0' })
+      await fresh.waitForSelector('.view-line')
+      await new Promise((resolve) => setTimeout(resolve, 700))
+
+      expect(await tabNames(fresh)).toEqual(['example.ts', 'service.ts'])
+      expect(await fresh.$eval('.tab.active .file-name', (el) => el.textContent?.trim())).toBe(
+        'service.ts',
+      )
+      const source = await fresh.$$eval('.view-line', (nodes) =>
+        nodes.map((node) => (node.textContent ?? '').replace(/\u00a0/g, ' ')).join('\n'),
+      )
+      expect(source).toContain('const secret = 42')
+    } finally {
+      await context.close()
+    }
+  })
+
+  it('opens several picked files at once, under their own names', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'codeview-'))
+    const fresh = await tabsPage()
+    try {
+      const first = join(directory, 'alpha.ts')
+      const second = join(directory, 'beta.jsx')
+      writeFileSync(first, 'export const alpha = 1\n')
+      writeFileSync(second, 'export const beta = <p>hi</p>\n')
+
+      const input = (await fresh.$('input[type=file]'))!
+      await input.uploadFile(first, second)
+      await new Promise((resolve) => setTimeout(resolve, 700))
+
+      expect(await tabNames(fresh)).toEqual(['example.ts', 'alpha.ts', 'beta.jsx'])
+      // The last one picked is the one you land on.
+      expect(await fresh.$eval('.tab.active .file-name', (el) => el.textContent?.trim())).toBe(
+        'beta.jsx',
+      )
+      const source = await fresh.$$eval('.view-line', (nodes) =>
+        nodes.map((node) => (node.textContent ?? '').replace(/\u00a0/g, ' ')).join('\n'),
+      )
+      expect(source).toContain('const beta = <p>hi</p>')
+    } finally {
+      await fresh.close()
+      rmSync(directory, { recursive: true, force: true })
     }
   })
 })

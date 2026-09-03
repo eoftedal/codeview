@@ -28,9 +28,9 @@ const emit = defineEmits<{
 }>()
 
 const PROMPTS = [
-  'What are the sources and sinks in this file?',
+  'What are the sources and sinks in this code?',
   'Does any untrusted input reach a sink unsanitised?',
-  'Review this file for security problems.',
+  'Review this code for security problems.',
 ]
 
 const draft = ref('')
@@ -123,7 +123,7 @@ watch(
           <button
             v-if="stale"
             class="staleness"
-            title="This chat was started against an earlier version of the buffer"
+            title="This chat was started against an earlier version of the code"
             @click="emit('newChat')"
           >
             code has changed — start a new chat
@@ -133,7 +133,7 @@ watch(
 
       <div ref="body" class="body">
         <p v-if="messages.length === 0 && !pending" class="empty">
-          Ask about the code in the editor. The whole buffer goes to the model with a system prompt
+          Ask about the code in the editor. Every open file goes to the model with a system prompt
           that makes it a security engineer reasoning about <strong>sources</strong> and
           <strong>sinks</strong>.
           <br />

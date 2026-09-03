@@ -215,12 +215,18 @@ export function numberLines(code: string): string {
   return lines.map((line, index) => `${String(index + 1).padStart(width)} | ${line}`).join('\n')
 }
 
-export interface CodeContext {
-  code: string
+export interface PromptFile {
+  name: string
   language: Language
-  fileName: string | null
+  text: string
+}
+
+export interface CodeContext {
+  /** Every open file, the one on screen first — a demo-sized app fits, and a question about one
+   *  file is usually really a question about the path running through the others. */
+  files: readonly PromptFile[]
   /**
-   * The buffer budget for the model being asked. Every model here has a small context — a few
+   * The budget for the code, all files together. Every model here has a small context — a few
    * thousand tokens for the whole conversation, system prompt included — so a large buffer is
    * clipped rather than sent and rejected. The clip is stated in the prompt: a model answering
    * about half a file should know it is looking at half.
@@ -228,48 +234,78 @@ export interface CodeContext {
   maxCodeChars: number
 }
 
+/** Below this, the tail of a spent budget teaches a model nothing about a file — better to name
+ *  the file as one it cannot see than to hand over three lines of it. The file on screen comes
+ *  first and is shown whatever the budget, clipped if it has to be. */
+const MIN_FILE_CHARS = 200
+
 const ROLE = `You are a senior security engineer and an expert in static code analysis. You read code the way a reviewer does: one path at a time, precisely, and you only claim what the code in front of you actually shows.
 
-You reason about code the way a SAST tool does — taint flowing from sources to sinks — and you use these two terms in exactly that sense:
+You reason about code the way a SAST tool does — taint flowing from sources to sinks — and you use these terms in exactly that sense:
 
-- A SOURCE is a point where data enters the program from somewhere the code does not control: HTTP request fields (path, query, body, headers, cookies), form and CLI input, environment variables, files, database rows, network responses, message queues, third-party callbacks. Data arriving from a source is untrusted until something validates or encodes it.
-- A SINK is a point where data is used in an operation that becomes dangerous when the data is attacker-controlled: SQL and other query strings, shell commands and process spawning, \`eval\` and dynamic code loading, filesystem paths, outbound HTTP requests, HTML or DOM writes, deserialisation, redirects, template rendering, and cryptographic or authorisation decisions.
-- A TAINT FLOW is a path from a source to a sink along which data is untrusted. A flow is a vulnerability if the code does not validate, encode, parameterise or escape the data strongly enough for the sink.
-- A SANITISER is a function that validates, encodes, parameterises or escapes data strongly enough for a sink. A sanitiser removes the taint from a value.
-- A PROPAGATOR is a function that passes a value along without removing its taint. A propagator does not validate, encode, parameterise or escape data strongly enough for a sink.
+- **source** is a point where data enters the program from somewhere the code does not control: HTTP request fields (path, query, body, headers, cookies), form and CLI input, environment variables, files, database rows, network responses, message queues, third-party callbacks. Data arriving from a source is untrusted until something validates or encodes it.
+- **sink** is a point where data is used in an operation that becomes dangerous when the data is attacker-controlled: SQL and other query strings, shell commands and process spawning, \`eval\` and dynamic code loading, filesystem paths, outbound HTTP requests, HTML or DOM writes, deserialisation, redirects, template rendering, and cryptographic or authorisation decisions.
+- **taint flow** is a path from a source to a sink along which data is untrusted. A flow is a vulnerability if the code does not validate, encode, parameterise or escape the data strongly enough for the sink.
+- **sanitiser** is a function that validates, encodes, parameterises or escapes data strongly enough for a sink. A sanitiser removes the taint from a value.
+- **propagator** is a function that passes a value along without removing its taint. A propagator does not validate, encode, parameterise or escape data strongly enough for a sink.
 
 
 Data from a source is tainted, and stays tainted through assignments, calls, returns and string building until a sanitiser fit for the sink removes the taint. A vulnerability is a tainted value reaching a sink along some path with no validation, encoding, parameterisation or escaping strong enough for that sink. Whenever you claim one, name the source, name the sink, and give the flow between them step by step.
 
-Walk a flow one hop at a time and leave nothing out: every assignment, every function call, every propagator, every sanitiser on the way. Crossing into a function is the hop most often missed. A tainted value passed as an argument goes on flowing inside the callee **under the parameter's name** — so name the call, name the parameter it arrives as, and from there refer to the value by that parameter's name rather than the caller's. Before citing a line, check that the name you are citing actually appears on that line.
+Walk a flow one hop at a time and leave nothing out: every assignment, every function call, every propagator, every sanitiser on the way. Crossing into a function is the hop most often missed, and it is often a hop into another file. A tainted value passed as an argument goes on flowing inside the callee **under the parameter's name** — so name the call, name the parameter it arrives as, and from there refer to the value by that parameter's name rather than the caller's. Before citing a line, check that the name you are citing actually appears on that line of that file.
 
 Report a flow as one numbered step per hop, in this shape:
 
-1. \`req.body.name\` (line 4) — source: the HTTP request body
-2. assigned to \`raw\` (line 4)
-3. passed to \`render(raw)\` (line 5), arriving as parameter \`text\` (line 9)
-4. \`text\` interpolated into \`html\` (line 10)
-5. \`el.innerHTML = html\` (line 11) — sink: DOM write, nothing encodes on the path
+1. \`req.body.name\` (routes.ts line 4) — source: the HTTP request body
+2. assigned to \`raw\` (routes.ts line 4)
+3. passed to \`render(raw)\` (routes.ts line 5), arriving as parameter \`text\` (render.ts line 9)
+4. \`text\` interpolated into \`html\` (render.ts line 10)
+5. \`el.innerHTML = html\` (render.ts line 11) — sink: DOM write, nothing encodes on the path
 
-You are looking at a single file, shown below with line numbers. You cannot open other files, run the code, or search the repository — where an answer depends on code you cannot see, say which file or symbol you would need. Cite line numbers when you point at code. Keep answers short: a few sentences or a short list. Say plainly when you are unsure, and say so when the code looks fine rather than inventing a finding.`
+You are looking at every file open in the reader's editor, each shown below with its own line numbers — line 1 is the first line of that file, so name the file whenever you cite a line. These files are all you have: you cannot run the code or search the rest of the repository, and where an answer depends on code you cannot see, say which file or symbol you would need. Cite line numbers when you point at code. Keep answers short: a few sentences or a short list. Say plainly when you are unsure, and say so when the code looks fine rather than inventing a finding.`
 
 /**
- * The system prompt: the role, the two definitions, and the buffer as it stands. A session is
+ * The system prompt: the role, the two definitions, and every open file as it stands. A session is
  * created with this once, so the code it carries is a snapshot — the pane says as much when the
- * buffer moves on.
+ * files move on.
+ *
+ * The budget is spent in the order given, which is why the caller puts the file on screen first:
+ * what gets clipped is the code the reader is not looking at.
  */
-export function buildSystemPrompt({ code, language, fileName, maxCodeChars }: CodeContext): string {
-  const clipped = code.length > maxCodeChars
-  const body = clipped ? code.slice(0, maxCodeChars) : code
-  const name = fileName ?? `main.${language}`
+export function buildSystemPrompt({ files, maxCodeChars }: CodeContext): string {
+  const shown: string[] = []
+  const omitted: string[] = []
+  let budget = maxCodeChars
+
+  for (const file of files) {
+    if (shown.length > 0 && file.text.length > budget && budget < MIN_FILE_CHARS) {
+      omitted.push(file.name)
+      continue
+    }
+    const clipped = file.text.length > budget
+    const body = clipped ? file.text.slice(0, budget) : file.text
+    budget -= body.length
+    shown.push(
+      [
+        `\`${file.name}\`${clipped ? `, truncated after the first ${body.length} characters — the rest is not shown to you` : ''}:`,
+        '',
+        '```' + FENCE[file.language],
+        numberLines(body),
+        '```',
+      ].join('\n'),
+    )
+  }
 
   return [
     ROLE,
     '',
-    `The file under review is \`${name}\`${clipped ? `, truncated after the first ${maxCodeChars} characters — the rest is not shown to you` : ''}:`,
+    files.length > 1
+      ? 'Every file open in the editor is below, the one on screen first. Each is numbered from its own line 1:'
+      : 'The file under review is below, with line numbers:',
     '',
-    '```' + FENCE[language],
-    numberLines(body),
-    '```',
+    shown.join('\n\n'),
+    ...(omitted.length
+      ? ['', `Also open, but not shown to you: ${omitted.map((name) => `\`${name}\``).join(', ')}.`]
+      : []),
   ].join('\n')
 }

@@ -29,8 +29,15 @@ The build output is plain static files; drop `dist/` on any host. Pushing to `ma
 and publishes it to https://eoftedal.github.io/codeview/ — see
 `.github/workflows/deploy.yml`.
 
-Paste or type into the editor, open a local file (button or drag-and-drop), or share a
-buffer with **Copy link**. The buffer is kept in `localStorage` between visits.
+Paste or type into the editor, open local files (button or drag-and-drop), or share a
+buffer with **Copy link**. The open files are kept in `localStorage` between visits.
+
+Several files can be open at once, on a tab strip above the editor: **+** adds a blank one,
+**✕** closes one, and right-clicking a tab offers **Rename**, which also switches the
+language when the new extension calls for a different one. Only the active tab is ever
+analysed — the strip switches which buffer the tree, the definitions and the trace are
+about, it does not resolve names between files. Closing the last tab is not offered, since
+there is always a buffer. A share link carries the file you are looking at, not the strip.
 
 A share link carries the whole buffer in the URL fragment, which browsers never send to
 the server — so shared code stays between the people holding the link. **Copy link** writes
@@ -48,15 +55,19 @@ literal too — source starting with `z.` is likelier than a corrupt link.
 Read from the query string and the fragment alike, the fragment winning where both name a
 key. Key names are case-insensitive, since these get typed by hand.
 
-| Parameter    | Effect                                                                                                         |
-| ------------ | -------------------------------------------------------------------------------------------------------------- |
-| `src`        | the buffer — `z.`/`r.` payload, or literal source                                                              |
-| `lang`       | `ts`, `tsx`, `js` or `jsx`                                                                                     |
-| `filename`   | shown above the editor; its extension picks the language when `lang` is absent. **Copy link** carries it along |
-| `hideHeader` | hides the title bar, language switcher and buttons, for embedding                                              |
+| Parameter    | Effect                                                                                                |
+| ------------ | ----------------------------------------------------------------------------------------------------- |
+| `src`        | the buffer — `z.`/`r.` payload, or literal source                                                     |
+| `lang`       | `ts`, `tsx`, `js` or `jsx`                                                                            |
+| `filename`   | names the tab; its extension picks the language when `lang` is absent. **Copy link** carries it along |
+| `hideHeader` | hides the title bar, language switcher and buttons, for embedding                                     |
+
+Any of these describes exactly one file, so a link opens with that file alone rather than
+the tabs the reader happened to leave open. Without them, the last session comes back whole;
+the seed buffer arrives as `example.ts`, because every tab needs a name.
 
 `hideHeader` needs no value, though `=false`/`=0`/`=no`/`=off` turns it off. It leaves the
-filename bar alone, so an embed can still say which file it is showing:
+tab strip alone, so an embed can still say which file it is showing:
 
     ?hideHeader&filename=src/services/Connection.ts
 
@@ -171,7 +182,7 @@ cursor move, a trace costs a reference query per parameter it walks through.
 
 ## Asking a model
 
-The third tab is a chat about the buffer, answered by a model running **on your own machine**.
+The third tab is a chat about the code, answered by a model running **on your own machine**.
 There is no backend, and the promise everywhere else holds: weights come down, the code never
 goes up.
 
@@ -203,9 +214,15 @@ this browser, and does nothing else.
 
 The system prompt makes the model a security engineer reading the code as a SAST tool would —
 taint flowing from **sources** (request fields, environment, files, anything the code does not
-control) to **sinks** (queries, shell commands, `eval`, paths, DOM writes) — and carries the
-whole buffer, line-numbered, so answers can cite lines. The buffer is clipped at 12 000
-characters, and the clip is stated in the prompt: a model shown half a file should know it.
+control) to **sinks** (queries, shell commands, `eval`, paths, DOM writes) — and carries
+**every open file**, each line-numbered from its own line 1, so answers can cite a file and a
+line. This is the one place the tool is not single-file: the tree and the trace read the active
+tab, but a taint flow usually leaves the file it starts in, so the model gets all of them.
+
+The 12 000-character budget covers them together, spent in order with the file on screen first,
+so what gets clipped is code you are not looking at. A clip is stated in the prompt — a model
+shown half a file should know it — and a file the budget could not reach is named rather than
+quietly dropped.
 
 Answers come back as Markdown, so they are rendered rather than shown with their asterisks on.
 `src/lib/markdown.ts` parses the handful of constructs an answer actually uses — fenced code,
@@ -218,9 +235,10 @@ common than underscore italics; and a link is only a link when it is `http(s)`.
 A session is created on the first question and reused for follow-ups, which is what makes it a
 conversation — so the code in its system prompt is a **snapshot**. Changing model starts a new
 one: different weights, a different context budget and a different system prompt, and carrying
-the turns across would misrepresent who said them. Editing the buffer mid-chat
+the turns across would misrepresent who said them. Editing, renaming or closing a file mid-chat
 does not rewrite it; the pane says the code has changed and offers a new chat, since silently
-rebuilding the session would throw the conversation away. Availability is not probed until the
+rebuilding the session would throw the conversation away. Merely switching tabs is not a change:
+it reorders the prompt without altering a line of what is in it. Availability is not probed until the
 tab is first opened.
 
 ## How the panes stay in sync
@@ -246,15 +264,17 @@ src/lib/astTree.ts         AST → flat node list, offset lookups       (pure, t
 src/lib/definitions.ts     the definition rules                       (pure, tested)
 src/lib/flow.ts            the backward provenance walk               (pure, tested)
 src/lib/share.ts           share-link encoding, fragment parsing       (pure, tested)
+src/lib/files.ts           open-file naming and identity              (pure, tested)
 src/lib/chat.ts            the provider contract, model catalogue, system prompt
 src/lib/markdown.ts        the answer renderer's block parser           (pure, tested)
 src/lib/monacoSetup.ts     Monaco theme and compiler options
 src/lib/sample.ts          seed buffer, exercises every rule
 src/composables/useAnalysis.ts  debounced parse, held in a shallowRef
-src/composables/useBuffer.ts    sample / localStorage / share link / file open
+src/composables/useBuffer.ts    the open files: sample / localStorage / link / file open
 src/composables/useChat.ts      model choice, session, streamed answers
 src/App.vue                shared selection state, wires the panes and the tabs
-src/components/EditorPane.vue   Monaco, decorations, cursor events, file drop
+src/components/EditorPane.vue   Monaco, a model per file, decorations, file drop
+src/components/FileTabs.vue     the tab strip: switch, close, rename, add
 src/components/AstPane.vue      tree root, filter, breadcrumb, definition line
 src/components/AstNodeRow.vue   recursive row
 src/components/TracePane.vue    trace root, summary, external-source jump

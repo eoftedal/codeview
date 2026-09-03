@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { MODELS, buildSystemPrompt, modelById, numberLines } from '../src/lib/chat'
 
+const file = (name: string, text: string) => ({ name, language: 'ts' as const, text })
+
 const context = {
-  code: 'const a = 1\nconst b = 2\n',
-  language: 'ts' as const,
-  fileName: 'test.ts',
+  files: [file('test.ts', 'const a = 1\nconst b = 2\n')],
   maxCodeChars: 12_000,
 }
 
@@ -48,22 +48,47 @@ describe('the system prompt', () => {
   it('carries the role, both definitions and the numbered buffer', () => {
     const prompt = buildSystemPrompt(context)
     expect(prompt).toContain('senior security engineer')
-    expect(prompt).toContain('A SOURCE is')
-    expect(prompt).toContain('A SINK is')
+    expect(prompt).toContain('**source**')
+    expect(prompt).toContain('**sink**')
     expect(prompt).toContain('1 | const a = 1')
     expect(prompt).toContain('`test.ts`')
   })
 
-  it('names the file after the language when there is no filename', () => {
-    expect(buildSystemPrompt({ ...context, fileName: null })).toContain('`main.ts`')
+  it('carries every open file, each numbered from its own line 1', () => {
+    const prompt = buildSystemPrompt({
+      ...context,
+      files: [file('routes.ts', 'const a = 1\n'), file('db.ts', 'const b = 2\n')],
+    })
+    expect(prompt).toContain('`routes.ts`')
+    expect(prompt).toContain('`db.ts`')
+    // Both start at 1: an answer has to say which file a line is in.
+    expect(prompt).toContain('1 | const a = 1')
+    expect(prompt).toContain('1 | const b = 2')
+    expect(prompt).toContain('Every file open in the editor is below')
+  })
+
+  it('says nothing about other files when only one is open', () => {
+    expect(buildSystemPrompt(context)).toContain('The file under review is below')
   })
 
   it('clips to the asked-for budget and says so', () => {
-    const code = 'x'.repeat(500)
-    const prompt = buildSystemPrompt({ ...context, code, maxCodeChars: 100 })
+    const files = [file('big.ts', 'x'.repeat(500))]
+    const prompt = buildSystemPrompt({ ...context, files, maxCodeChars: 100 })
     expect(prompt).toContain('truncated after the first 100 characters')
     expect(prompt).toContain(`1 | ${'x'.repeat(100)}\n`)
     expect(prompt).not.toContain('x'.repeat(101))
+  })
+
+  it('spends the budget in order, and names the files it could not fit', () => {
+    const prompt = buildSystemPrompt({
+      ...context,
+      files: [file('shown.ts', 'x'.repeat(90)), file('left-out.ts', 'y'.repeat(90))],
+      maxCodeChars: 100,
+    })
+    expect(prompt).toContain('x'.repeat(90))
+    // Ten characters of the second file would teach the model nothing about it.
+    expect(prompt).not.toContain('y'.repeat(10))
+    expect(prompt).toContain('Also open, but not shown to you: `left-out.ts`.')
   })
 
   it('says nothing about truncation when the whole file fits', () => {
@@ -71,9 +96,9 @@ describe('the system prompt', () => {
   })
 
   it('honours each model’s own budget', () => {
-    const code = 'y'.repeat(13_000)
-    const builtin = buildSystemPrompt({ ...context, code, maxCodeChars: MODELS[0]!.maxCodeChars })
-    const bigger = buildSystemPrompt({ ...context, code, maxCodeChars: MODELS[1]!.maxCodeChars })
+    const files = [file('big.ts', 'y'.repeat(13_000))]
+    const builtin = buildSystemPrompt({ ...context, files, maxCodeChars: MODELS[0]!.maxCodeChars })
+    const bigger = buildSystemPrompt({ ...context, files, maxCodeChars: MODELS[1]!.maxCodeChars })
     expect(builtin).toContain('truncated after the first 12000 characters')
     expect(bigger).not.toContain('truncated')
   })

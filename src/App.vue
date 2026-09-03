@@ -3,6 +3,7 @@ import { computed, ref, shallowRef, watch } from 'vue'
 import AstPane from './components/AstPane.vue'
 import ChatPane from './components/ChatPane.vue'
 import EditorPane from './components/EditorPane.vue'
+import FileTabs from './components/FileTabs.vue'
 import SplitPane from './components/SplitPane.vue'
 import TracePane from './components/TracePane.vue'
 import { useAnalysis } from './composables/useAnalysis'
@@ -14,7 +15,22 @@ import { isExternalOrigin, type FlowTrace } from './lib/flow'
 
 const SPLIT_KEY = 'codeview:split'
 
-const { text, language, fileName, hideHeader, notice, openFile, copyShareLink, reset } = useBuffer()
+const {
+  files,
+  activeFileId,
+  fileIds,
+  text,
+  language,
+  hideHeader,
+  notice,
+  selectFile,
+  newFile,
+  closeFile,
+  renameFile,
+  openFiles,
+  copyShareLink,
+  reset,
+} = useBuffer()
 
 const showTokens = ref(false)
 const analysis = useAnalysis(text, language, showTokens)
@@ -42,7 +58,7 @@ const tracedHover = ref<Span | null>(null)
 
 /** Held here, not in the pane: the pane unmounts whenever another tab is shown, and a
  *  conversation should survive a glance at the tree. */
-const chat = useChat(text, language, fileName)
+const chat = useChat(files, activeFileId)
 
 watch(activeTab, (tab) => {
   if (tab === 'chat') chat.probe()
@@ -138,9 +154,10 @@ const languages = [
 const fileInput = ref<HTMLInputElement>()
 
 function onFilePicked(event: Event): void {
-  const file = (event.target as HTMLInputElement).files?.[0]
-  if (file) void openFile(file)
-  ;(event.target as HTMLInputElement).value = ''
+  const input = event.target as HTMLInputElement
+  const picked = [...(input.files ?? [])]
+  if (picked.length) void openFiles(picked)
+  input.value = ''
 }
 </script>
 
@@ -161,13 +178,14 @@ function onFilePicked(event: Event): void {
             {{ option.label }}
           </button>
         </div>
-        <button @click="fileInput?.click()">Open file</button>
+        <button @click="fileInput?.click()">Open files</button>
         <button @click="copyShareLink()">Copy link</button>
         <button @click="reset()">Reset</button>
         <input
           ref="fileInput"
           class="hidden-input"
           type="file"
+          multiple
           accept=".ts,.tsx,.js,.jsx,.mjs,.cjs,.mts,.cts"
           @change="onFilePicked"
         />
@@ -183,7 +201,8 @@ function onFilePicked(event: Event): void {
             ref="editorPane"
             v-model="text"
             :language="language"
-            :file-name="fileName"
+            :file-id="activeFileId"
+            :file-ids="fileIds"
             :selection="selectionSpan"
             :definition="definition"
             :hover="hoverSpan"
@@ -192,8 +211,19 @@ function onFilePicked(event: Event): void {
             :reveal-span="revealSpan"
             @cursor="onCursor"
             @trace="runTrace"
-            @open-file="openFile"
-          />
+            @open-files="openFiles"
+          >
+            <template #tabs>
+              <FileTabs
+                :files="files"
+                :active-id="activeFileId"
+                @select="selectFile"
+                @close="closeFile"
+                @rename="renameFile"
+                @add="newFile"
+              />
+            </template>
+          </EditorPane>
         </template>
         <template #right>
           <div class="right-pane">

@@ -1,5 +1,4 @@
 import { computed, onScopeDispose, ref, watch, type Ref } from 'vue'
-import type { Language } from '../lib/analyzer'
 import {
   buildSystemPrompt,
   modelById,
@@ -7,7 +6,9 @@ import {
   type ChatSession,
   type ModelChoice,
   type ModelEngine,
+  type PromptFile,
 } from '../lib/chat'
+import type { CodeFile } from '../lib/files'
 import { providerFor, usableModels } from '../lib/providers'
 import { hasGpuAdapter } from '../lib/providers/webgpu'
 
@@ -40,7 +41,7 @@ export interface Chat {
   /** The answer being streamed right now; empty when nothing is in flight. */
   pending: Ref<string>
   busy: Ref<boolean>
-  /** The buffer has changed since this conversation's system prompt was built. */
+  /** The open files have changed since this conversation's system prompt was built. */
   stale: Ref<boolean>
   /** Settle what can run here. Idempotent, and deliberately not run on load. */
   probe: () => void
@@ -54,20 +55,31 @@ function messageOf(error: unknown): string {
   return String(error)
 }
 
+/** What the prompt sees: every open file, the one on screen first, so a tight budget clips the
+ *  files the reader is not looking at rather than the one they are. */
+function promptFiles(files: readonly CodeFile[], activeId: string): PromptFile[] {
+  const ordered = [...files]
+  const index = ordered.findIndex((file) => file.id === activeId)
+  if (index > 0) ordered.unshift(...ordered.splice(index, 1))
+  return ordered.map(({ name, language, text }) => ({ name, language, text }))
+}
+
+/** What a session was built from, in tab order — switching tabs reorders the prompt but changes
+ *  nothing about the code in it, and should not cost a conversation. */
+function signatureOf(files: readonly CodeFile[]): string {
+  return files.map((file) => `${file.name}\n${file.text}`).join('\u0000')
+}
+
 /**
  * A conversation with a model running on this machine — the browser's own, or weights fetched once
  * and cached and then run on the GPU.
  *
- * The session is created lazily, on the first question, and carries the code in its system prompt
- * — so a chat started after an edit sees the edit. It is *not* rebuilt underneath an ongoing
+ * The session is created lazily, on the first question, and carries every open file in its system
+ * prompt — so a chat started after an edit sees the edit. It is *not* rebuilt underneath an ongoing
  * conversation, which would mean throwing the conversation away; instead `stale` says the code has
  * moved on and the pane offers a new chat.
  */
-export function useChat(
-  text: Ref<string>,
-  language: Ref<Language>,
-  fileName: Ref<string | null>,
-): Chat {
+export function useChat(files: Ref<CodeFile[]>, activeId: Ref<string>): Chat {
   const models = ref<ModelChoice[]>(usableModels())
 
   const remembered = localStorage.getItem(MODEL_KEY)
@@ -90,7 +102,7 @@ export function useChat(
   const messages = ref<ChatMessage[]>([])
   const pending = ref('')
   const busy = ref(false)
-  const sessionCode = ref<string | null>(null)
+  const sessionFiles = ref<string | null>(null)
 
   // Two lifetimes: the engine holds the loaded model and survives "New chat"; the session is only
   // a system prompt and its turns. Tearing the engine down per conversation would mean reloading
@@ -139,7 +151,9 @@ export function useChat(
 
   const stale = computed(
     () =>
-      messages.value.length > 0 && sessionCode.value !== null && sessionCode.value !== text.value,
+      messages.value.length > 0 &&
+      sessionFiles.value !== null &&
+      sessionFiles.value !== signatureOf(files.value),
   )
 
   async function ensureEngine(selected: ModelChoice): Promise<ModelEngine> {
@@ -170,18 +184,15 @@ export function useChat(
     if (!selected) throw new Error('No language model is selected.')
 
     const loaded = await ensureEngine(selected)
-    // Read after the load, not before: a first download can take minutes, and the buffer the
-    // reader asks about is the one on screen when they ask.
-    const code = text.value
+    // Read after the load, not before: a first download can take minutes, and the code the reader
+    // asks about is what is open when they ask.
     session = await loaded.chat(
       buildSystemPrompt({
-        code,
-        language: language.value,
-        fileName: fileName.value,
+        files: promptFiles(files.value, activeId.value),
         maxCodeChars: selected.maxCodeChars,
       }),
     )
-    sessionCode.value = code
+    sessionFiles.value = signatureOf(files.value)
     status.value = 'available'
     return session
   }
@@ -246,7 +257,7 @@ export function useChat(
     stop()
     session?.destroy()
     session = null
-    sessionCode.value = null
+    sessionFiles.value = null
     messages.value = []
     pending.value = ''
   }

@@ -31,6 +31,14 @@ Monaco wiring or the build config must pass `test:e2e` locally, not just `test`.
 A single-buffer AST viewer: Monaco on the left, the TypeScript AST on the right, kept in sync, with
 the definition of whatever is under the cursor highlighted. No backend, no multi-file resolution.
 
+**Several files can be open, but only one is ever analysed.** The tab strip
+(`FileTabs.vue`, `src/lib/files.ts`) switches which buffer the analyzer, the definitions and the
+trace are about; it does not make anything multi-file. `useBuffer` holds `files` plus an active id
+and exposes `text`/`language`/`fileName` as writable views onto the active one, which is why
+`useAnalysis`, `useChat` and the panes below it still see exactly one buffer and needed no change.
+Resist the pull to resolve imports across tabs: `noResolve` is what makes the trace's terminal
+condition principled (see below), and cross-file resolution would take that away.
+
 **Two independent TypeScript setups exist, and conflating them causes confusion.**
 
 1. `src/lib/analyzer.ts` — our own `ts.LanguageService` over one in-memory file, running `noLib` +
@@ -42,8 +50,9 @@ the definition of whatever is under the cursor highlighted. No backend, no multi
 Because of `noLib`/`noResolve`, a definition outside the buffer has no range to highlight, so
 imported names resolve to their import statement. That is the intended answer, not a gap to fix.
 
-**Data flow.** `useBuffer` decides the buffer's source (share link → localStorage → sample) and owns
-filename/language/notice. `useAnalysis` holds a debounced (150 ms) parse in a `shallowRef` and bumps
+**Data flow.** `useBuffer` decides where the open files come from (a link, which describes exactly
+one file → localStorage, which restores the whole strip → the sample) and owns
+filenames/languages/notice. `useAnalysis` holds a debounced (150 ms) parse in a `shallowRef` and bumps
 a `revision` counter. `App.vue` owns the shared selection state and wires the two panes.
 
 **Two questions, two costs.** `resolveDefinition` is one definition lookup and runs on every cursor
@@ -99,9 +108,14 @@ fails. Anything fp16 on WebGPU is suspect for small models — the same reason G
 The thinking prefill comes back in the answer, so `markdown.ts` parses `<think>` as a block kind: empty means protocol and is
 dropped, non-empty is folded into a `<details>`, and an unterminated one is thinking-in-progress. `useChat` lives in `App.vue`, not in `ChatPane.vue`,
 because the pane unmounts on every tab switch and a conversation must not. The system prompt (role,
-the source/sink definitions, the line-numbered buffer) is built once per session, so the code it
-carries is a snapshot — edits raise a `stale` hint rather than silently rebuilding the session,
-which would discard the conversation. The availability probe waits for the tab to be opened.
+the source/sink definitions, then **every open file**, line-numbered) is built once per session, so
+the code it carries is a snapshot — edits raise a `stale` hint rather than silently rebuilding the
+session, which would discard the conversation. The chat is the one part that is not single-buffer:
+the analyzer sees the active tab, the model sees them all, because a taint flow usually leaves the
+file it starts in. `maxCodeChars` is the budget for all of them together, spent in the order given
+— which is why `promptFiles` puts the file on screen first — and files that do not fit are named
+rather than dropped silently. Staleness is measured in **tab order**, so switching tabs (which only
+reorders the prompt) does not cost a conversation, while an edit, a rename or a close does. The availability probe waits for the tab to be opened.
 
 Answers are Markdown, rendered by `markdown.ts` → `MarkdownText.vue` → `MarkdownSpans.vue` as
 real elements — never `v-html`, which is what keeps model output from becoming markup. The parser's
@@ -109,7 +123,7 @@ odd-looking rules are deliberate: an unterminated fence is code (a streaming ans
 mid-block), emphasis is `*`-only (`_` would italicise `snake_case`), and only `http(s)` targets
 become links.
 
-**Pure vs. impure.** `src/lib/{analyzer,astTree,definitions,flow,share}.ts` are pure and unit-tested
+**Pure vs. impure.** `src/lib/{analyzer,astTree,definitions,files,flow,share}.ts` are pure and unit-tested
 over fixture strings; everything else is browser-bound and covered only by the e2e suites.
 `chat.ts` is the mixed case: `buildSystemPrompt`/`numberLines` are pure, `languageModel()` is not.
 
@@ -131,8 +145,18 @@ over fixture strings; everything else is browser-bound and covered only by the e
   box behind the text, which loses the tint-plus-underline effect.
 - **Programmatic cursor moves are wrapped in a suppression flag** (`withoutCursorEvents` in
   `EditorPane.vue`) so the resulting change event isn't mistaken for a user action and bounced back.
-- **Monaco models need a real file extension in their URI** (`inmemory://codeview/main.tsx`); the TS
-  worker keys off it and will flag valid TypeScript as errors without it.
+- **Monaco models need a real file extension in their URI** (`inmemory://codeview/<file id>.tsx`);
+  the TS worker keys off it and will flag valid TypeScript as errors without it. The URI is keyed by
+  file **id**, not name, so it survives a rename — but a language switch still means a new model,
+  and `showActive` in `EditorPane.vue` is the one place that swaps them. It saves the outgoing view
+  state _before_ asking for the new model, re-applies every decoration after (detaching a model
+  drops them), and emits a `cursor` event, since the same offset means something else in another
+  buffer. The `modelValue` watcher beside it targets the model for `props.fileId` rather than the
+  attached one: on a tab switch both props change at once, and writing the new text into the
+  outgoing model would silently overwrite the file being left behind.
+- **A tab's rename field is focused after `nextTick`, not in the ref callback.** Vue re-invokes a
+  function ref on every patch, and `v-model`'s own mounted hook writes `value` back afterwards —
+  either one drops the selection, which is what puts the caret in the middle of the old name.
 - **`ts.SyntaxKind` reverse lookup is unreliable** — the enum aliases range markers onto real kinds,
   so `VariableStatement` comes back as `FirstStatement`. Use `kindName()` from `astTree.ts`.
 - **Share fragments are parsed by hand, not with `URLSearchParams`**, which decodes `+` as a space
