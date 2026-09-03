@@ -5,17 +5,16 @@
  */
 
 import type { Availability, LoadOptions, ModelEngine, Provider } from '../chat'
+import { withoutThoughts } from './thoughts'
 import type { FromWorker, ToWorker } from './transformersWorker'
 import { hasGpuAdapter } from './webgpu'
 
 type Message = { role: 'system' | 'user' | 'assistant'; content: string }
 
-/* `AskOptions.thinking` is accepted and ignored here. There is a route — the pipeline spreads
- * `tokenizer_encode_kwargs` into `apply_chat_template`, so `enable_thinking` would reach the
- * template — but Gemma 4, the one model here that could use it, returns its reasoning in a
- * `<|channel>thought` block rather than the `<think>` one `markdown.ts` folds away, so it would
- * arrive in the answer as markers. The ONNX half is therefore offered without a thinking mode,
- * which is also the default its templates render. */
+/* `AskOptions.thinking` rides each question over to the worker, which spends it on the chat
+ * template — there is no session-level switch here, and none is wanted: the flag belongs to the
+ * question. A model without a thinking mode never sees it, since the pane only offers the choice
+ * where `ModelChoice.thinking` says there is one. */
 
 /** One request in flight at a time, which is all the pane ever asks for. */
 interface Pending {
@@ -92,8 +91,10 @@ export const transformers: Provider = {
 
                 const finish = () => {
                   options?.signal?.removeEventListener('abort', onAbort)
-                  // Interrupted or not, what was said stays in the history so a follow-up has context.
-                  messages.push({ role: 'assistant', content: answer })
+                  // Interrupted or not, what was said stays in the history so a follow-up has
+                  // context — the answer, that is, not the thinking that came before it, which is
+                  // what the model's own template drops from a past turn too.
+                  messages.push({ role: 'assistant', content: withoutThoughts(answer) })
                 }
 
                 pending = {
@@ -118,7 +119,7 @@ export const transformers: Provider = {
                 // The whole conversation goes over each turn: re-prefilling is slower than
                 // carrying a KV cache across turns, but it is obviously correct, and these are
                 // short chats.
-                send({ type: 'ask', messages })
+                send({ type: 'ask', messages, thinking: options?.thinking === true })
               },
             })
           },

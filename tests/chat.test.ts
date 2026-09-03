@@ -23,9 +23,15 @@ describe('the model catalogue', () => {
     expect(modelById('nothing-like-this')).toBeNull()
   })
 
-  it('flags thinking only on the reasoning models, since suppressing it prefills a think block', () => {
+  it('flags thinking only on the models that have a mode to ask for', () => {
     const thinking = MODELS.filter((choice) => choice.thinking).map((choice) => choice.id)
-    expect(thinking).toEqual(['qwen3.5-2b', 'qwen3.5-4b', 'qwen3.5-9b'])
+    expect(thinking).toEqual([
+      'qwen3.5-2b',
+      'qwen3.5-4b',
+      'qwen3.5-9b',
+      'gemma-4-e2b',
+      'gemma-4-e4b',
+    ])
   })
 
   it('runs each ONNX model at the quantisation its own repo asks for', () => {

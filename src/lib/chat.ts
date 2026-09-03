@@ -53,8 +53,9 @@ export interface LoadOptions {
   /** Weight download progress, 0–1. Never called for a model that is already cached. */
   onProgress?: (loaded: number) => void
   /** Whether this model *has* a thinking mode. Whether to use it is decided per question — but
-   *  it can only be asked of a model that has one: suppression works by prefilling an empty
-   *  block, which would corrupt a model without. */
+   *  it can only be asked of a model that has one: WebLLM suppresses thinking by prefilling an
+   *  empty block, which would corrupt a model without. (The ONNX side needs this at load time for
+   *  nothing; there the flag rides the question alone.) */
   thinking?: boolean
   /** ONNX quantisation, when the model asks for something other than the default. */
   dtype?: Quantisation
@@ -210,6 +211,7 @@ export const MODELS: readonly ModelChoice[] = [
     model: 'onnx-community/gemma-4-E2B-it-ONNX',
     // q4f16, the default: this Gemma's own WebGPU demo runs these two sessions at exactly that,
     // so unlike Gemma 3 its fp16 path is one the publisher stands behind.
+    thinking: true,
     note: 'Google’s newest small model, and the strongest non-Qwen here. A long first download.',
   },
   {
@@ -219,6 +221,7 @@ export const MODELS: readonly ModelChoice[] = [
     size: '~4.9 GB',
     maxCodeChars: 14_000,
     model: 'onnx-community/gemma-4-E4B-it-ONNX',
+    thinking: true,
     note: 'The same model one size up. Wants a discrete or Apple-silicon GPU, and patience.',
   },
 ]

@@ -13,10 +13,11 @@ import {
   type DataType,
   type TextGenerationPipeline,
 } from '@huggingface/transformers'
+import { foldChannels } from './thoughts'
 
 export type ToWorker =
   | { type: 'load'; model: string; dtype?: DataType }
-  | { type: 'ask'; messages: { role: string; content: string }[] }
+  | { type: 'ask'; messages: { role: string; content: string }[]; thinking?: boolean }
   | { type: 'stop' }
 
 export type FromWorker =
@@ -27,6 +28,9 @@ export type FromWorker =
   | { type: 'error'; message: string }
 
 const MAX_NEW_TOKENS = 640
+/** A thought is spent before the answer begins, so thinking gets its own, larger budget — a model
+ *  cut off mid-reasoning has said nothing at all. */
+const MAX_THINKING_TOKENS = 1280
 
 let generator: TextGenerationPipeline | null = null
 let stopper: InterruptableStoppingCriteria | null = null
@@ -49,22 +53,35 @@ async function load(model: string, dtype: DataType): Promise<void> {
   post({ type: 'ready' })
 }
 
-async function ask(messages: { role: string; content: string }[]): Promise<void> {
+async function ask(
+  messages: { role: string; content: string }[],
+  thinking: boolean,
+): Promise<void> {
   if (!generator) throw new Error('The model is not loaded.')
 
   stopper = new InterruptableStoppingCriteria()
+  // Thinking is delimited by channel markers, and those are special tokens: skipped, the reasoning
+  // arrives glued to the front of the answer with nothing to separate the two. Kept, the protocol
+  // tokens come through as well, which is what `foldChannels` is for.
+  const fold = thinking ? foldChannels() : null
   const streamer = new TextStreamer(generator.tokenizer, {
     skip_prompt: true,
-    skip_special_tokens: true,
-    callback_function: (text: string) => post({ type: 'token', text }),
+    skip_special_tokens: !thinking,
+    callback_function: (chunk: string) => {
+      const text = fold ? fold(chunk) : chunk
+      if (text) post({ type: 'token', text })
+    },
   })
 
   await generator(messages as Parameters<TextGenerationPipeline>[0], {
-    max_new_tokens: MAX_NEW_TOKENS,
+    max_new_tokens: thinking ? MAX_THINKING_TOKENS : MAX_NEW_TOKENS,
     // A security answer should be the same twice running, so no sampling.
     do_sample: false,
     streamer,
     stopping_criteria: stopper,
+    // The pipeline hands these to `apply_chat_template`, which is where a model's thinking mode is
+    // turned on — a template without the variable simply ignores it.
+    ...(thinking ? { tokenizer_encode_kwargs: { enable_thinking: true } } : {}),
   })
   post({ type: 'done' })
 }
@@ -73,7 +90,7 @@ self.onmessage = async (event: MessageEvent<ToWorker>) => {
   const message = event.data
   try {
     if (message.type === 'load') await load(message.model, message.dtype ?? 'q4f16')
-    else if (message.type === 'ask') await ask(message.messages)
+    else if (message.type === 'ask') await ask(message.messages, message.thinking === true)
     else if (message.type === 'stop') stopper?.interrupt()
   } catch (caught) {
     post({ type: 'error', message: caught instanceof Error ? caught.message : String(caught) })

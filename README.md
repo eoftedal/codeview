@@ -236,8 +236,13 @@ open) and is absent, while Gemma 4's own WebGPU demo runs the same q4f16 session
 for. Gemma 4's small models are multimodal, and only their text half is fetched — asking for text
 generation leaves the vision and audio encoders in the repo, but not the per-layer embedding
 tables, which are why an "E2B" of 2.3B effective parameters still costs 3 GB. GLM-Edge
-is the only GLM published small enough to run in a browser at all. The Qwen3.5 models are
-reasoning models whose thinking block is suppressed, since an answer should be the answer — and where one arrives anyway it is folded away rather than shown.
+is the only GLM published small enough to run in a browser at all.
+
+The Qwen3.5 models and both Gemma 4s can reason before they answer, and the **think** checkbox
+beside the picker decides whether they do — per question, so turning it on mid-conversation costs
+nothing. Off by default, since an answer should be the answer; where reasoning arrives anyway it is
+folded away rather than shown. Thinking is slower twice over: the reasoning is generated before the
+answer starts, and it is spent out of the same budget.
 
 Starting a new chat keeps the model loaded: only the conversation and its system prompt are
 replaced. Changing model is what unloads one.

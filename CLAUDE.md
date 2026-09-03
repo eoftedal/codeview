@@ -125,7 +125,18 @@ settles it once and drops every downloadable model when there is none. That is w
 with the bare "no language model" message rather than a picker full of things that cannot run.
 `enable_thinking` is sent only for models flagged `thinking`, and its value is per _question_, not
 per session — it rides `AskOptions`, because `extra_body` is a request field. WebLLM turns thinking
-off by prefilling an empty `<think>` block, which would corrupt a model that has none. ONNX quantisation is the model's call, not the worker's: a repo's `transformers_js_config` names
+off by prefilling an empty `<think>` block, which would corrupt a model that has none. **Each
+provider reaches the same flag by its own road**: WebLLM's is `extra_body`, while the ONNX
+pipeline's is `tokenizer_encode_kwargs`, which it spreads into `apply_chat_template`. What comes
+_back_ differs too, and that is the part with teeth. Gemma 4 answers in channels —
+`<|channel>thought…<channel|>` — and those markers are **special tokens**, so the worker must turn
+`skip_special_tokens` off for a thinking question or the reasoning arrives pasted onto the front of
+the answer with nothing to separate them. `providers/thoughts.ts` translates the channel into the
+`<think>` block `markdown.ts` already folds, and drops the protocol tokens that then come through
+with it; it can work chunk by chunk because `TextStreamer` flushes a special token on its own, so a
+marker never arrives split. The thought is kept out of the _history_, which is what Gemma's own
+template does with a past turn's channels, and is why `withoutThoughts` sits between the stream and
+`messages`. ONNX quantisation is the model's call, not the worker's: a repo's `transformers_js_config` names
 what its weights were validated at, and forcing `q4f16` on a model that asks for `q4` (GLM-Edge)
 fails. Anything fp16 on WebGPU is suspect for small models — the same reason Gemma 3 is absent,
 while Gemma 4 is present because its publisher's own WebGPU demo runs these sessions at q4f16.
