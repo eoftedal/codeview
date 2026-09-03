@@ -125,7 +125,7 @@ export const MODELS: readonly ModelChoice[] = [
     size: '~1.9 GB',
     maxCodeChars: 14_000,
     model: 'gemma-2-2b-it-q4f16_1-MLC',
-    note: 'Google’s, and the safe Gemma here — Gemma 3 overflows fp16 on WebGPU.',
+    note: 'Google’s, and the one Gemma WebLLM has a build for. Gemma 3 overflows fp16 on WebGPU.',
   },
   {
     id: 'qwen3.5-2b',
@@ -194,6 +194,32 @@ export const MODELS: readonly ModelChoice[] = [
     // Its own repo asks for q4 rather than the q4f16 everything else here runs at.
     dtype: 'q4',
     note: 'The only GLM small enough to run here. General-purpose, and slower: it runs at q4.',
+  },
+  // Gemma 4's small models are multimodal, and their repos hold an audio and a vision encoder
+  // beside the text ones. Asking for `text-generation` loads `Gemma4ForCausalLM` against weights
+  // whose architecture is `Gemma4ForConditionalGeneration`, which Transformers.js reads as
+  // text-only: the encoders are never fetched, and the size below is the two files that are —
+  // the embeddings and the decoder. Per-layer embeddings are why an “E2B” costs 3 GB: the
+  // effective parameters are few, the lookup tables are not.
+  {
+    id: 'gemma-4-e2b',
+    provider: 'transformers',
+    label: 'Gemma 4 E2B',
+    size: '~3.1 GB',
+    maxCodeChars: 14_000,
+    model: 'onnx-community/gemma-4-E2B-it-ONNX',
+    // q4f16, the default: this Gemma's own WebGPU demo runs these two sessions at exactly that,
+    // so unlike Gemma 3 its fp16 path is one the publisher stands behind.
+    note: 'Google’s newest small model, and the strongest non-Qwen here. A long first download.',
+  },
+  {
+    id: 'gemma-4-e4b',
+    provider: 'transformers',
+    label: 'Gemma 4 E4B',
+    size: '~4.9 GB',
+    maxCodeChars: 14_000,
+    model: 'onnx-community/gemma-4-E4B-it-ONNX',
+    note: 'The same model one size up. Wants a discrete or Apple-silicon GPU, and patience.',
   },
 ]
 

@@ -10,9 +10,12 @@ import { hasGpuAdapter } from './webgpu'
 
 type Message = { role: 'system' | 'user' | 'assistant'; content: string }
 
-/* `AskOptions.thinking` is accepted and ignored here: driving a chat template's `enable_thinking`
- * through the text-generation pipeline has no route in Transformers.js, and nothing in the ONNX
- * half of the catalogue reasons anyway. */
+/* `AskOptions.thinking` is accepted and ignored here. There is a route — the pipeline spreads
+ * `tokenizer_encode_kwargs` into `apply_chat_template`, so `enable_thinking` would reach the
+ * template — but Gemma 4, the one model here that could use it, returns its reasoning in a
+ * `<|channel>thought` block rather than the `<think>` one `markdown.ts` folds away, so it would
+ * arrive in the answer as markers. The ONNX half is therefore offered without a thinking mode,
+ * which is also the default its templates render. */
 
 /** One request in flight at a time, which is all the pane ever asks for. */
 interface Pending {

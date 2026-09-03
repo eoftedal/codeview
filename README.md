@@ -223,13 +223,19 @@ browser can actually run:
 | Qwen2.5-Coder 1.5B / 3B / 7B | WebLLM over WebGPU                    | 1.6 / 2.5 / 5.1 GB  |
 | Qwen3.5 2B / 4B              | WebLLM over WebGPU                    | 2.2 / 3.9 GB        |
 | Qwen2.5-Coder 1.5B (ONNX)    | Transformers.js over WebGPU           | ~1.2 GB             |
+| GLM-Edge 1.5B                | Transformers.js over WebGPU           | ~1.3 GB             |
+| Gemma 4 E2B / E4B            | Transformers.js over WebGPU           | 3.1 / 4.9 GB        |
 
 The browser's own model is the default wherever it exists — nothing to download, and no wait.
 The rest fetch their weights once from the Hugging Face CDN and the browser caches them; the
 first question after picking one pays for the download, and the progress bar says so. Both
 WebGPU runtimes are loaded lazily, so a reader who never picks one never downloads either
-library. Gemma 2 rather than Gemma 3 is deliberate: Gemma 3 overflows fp16 on WebGPU
-([onnxruntime#26732](https://github.com/microsoft/onnxruntime/issues/26732), open), and GLM-Edge
+library. Which Gemma is on offer is decided per generation, not by version number: Gemma 3
+overflows fp16 on WebGPU ([onnxruntime#26732](https://github.com/microsoft/onnxruntime/issues/26732),
+open) and is absent, while Gemma 4's own WebGPU demo runs the same q4f16 sessions this pane asks
+for. Gemma 4's small models are multimodal, and only their text half is fetched — asking for text
+generation leaves the vision and audio encoders in the repo, but not the per-layer embedding
+tables, which are why an "E2B" of 2.3B effective parameters still costs 3 GB. GLM-Edge
 is the only GLM published small enough to run in a browser at all. The Qwen3.5 models are
 reasoning models whose thinking block is suppressed, since an answer should be the answer — and where one arrives anyway it is folded away rather than shown.
 

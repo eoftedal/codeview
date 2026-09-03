@@ -127,7 +127,15 @@ with the bare "no language model" message rather than a picker full of things th
 per session — it rides `AskOptions`, because `extra_body` is a request field. WebLLM turns thinking
 off by prefilling an empty `<think>` block, which would corrupt a model that has none. ONNX quantisation is the model's call, not the worker's: a repo's `transformers_js_config` names
 what its weights were validated at, and forcing `q4f16` on a model that asks for `q4` (GLM-Edge)
-fails. Anything fp16 on WebGPU is suspect for small models — the same reason Gemma 3 is absent.
+fails. Anything fp16 on WebGPU is suspect for small models — the same reason Gemma 3 is absent,
+while Gemma 4 is present because its publisher's own WebGPU demo runs these sessions at q4f16.
+The Gemma 4 entries are also the one place a **multimodal** repo is loaded: `text-generation`
+instantiates `Gemma4ForCausalLM` against weights whose architecture is
+`Gemma4ForConditionalGeneration`, which Transformers.js reads as text-only and fetches
+`embed_tokens` plus `decoder_model_merged` alone — never the vision or audio encoder. Nothing in
+the provider knows this; it falls out of the repo's own config, which is also where the external
+data chunk counts come from. Their size figures are those two files, and it is the per-layer
+embeddings, not the 2.3B effective parameters, that make an "E2B" a 3 GB download.
 
 The thinking prefill comes back in the answer, so `markdown.ts` parses `<think>` as a block kind: empty means protocol and is
 dropped, non-empty is folded into a `<details>`, and an unterminated one is thinking-in-progress. `useChat` lives in `App.vue`, not in `ChatPane.vue`,

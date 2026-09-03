@@ -33,6 +33,20 @@ describe('the model catalogue', () => {
     expect(modelById('glm-edge-1.5b')?.dtype).toBe('q4')
     // Everything else takes the q4f16 default, so it should not be pinned here.
     expect(modelById('qwen-coder-1.5b-onnx')?.dtype).toBeUndefined()
+    // Gemma 4 included: its own WebGPU demo runs these sessions at q4f16, unlike Gemma 3.
+    expect(modelById('gemma-4-e2b')?.dtype).toBeUndefined()
+  })
+
+  it('points the Gemma 4 entries at the instruction-tuned ONNX repos', () => {
+    // The repos are multimodal; `text-generation` loads only the text sessions out of them.
+    expect(modelById('gemma-4-e2b')).toMatchObject({
+      provider: 'transformers',
+      model: 'onnx-community/gemma-4-E2B-it-ONNX',
+    })
+    expect(modelById('gemma-4-e4b')).toMatchObject({
+      provider: 'transformers',
+      model: 'onnx-community/gemma-4-E4B-it-ONNX',
+    })
   })
 
   it('gives every downloadable model a provider model id and a size', () => {
