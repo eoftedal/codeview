@@ -1,5 +1,6 @@
 import { computed, onScopeDispose, ref, watch, type Ref } from 'vue'
 import {
+  DEFAULT_ROLE,
   buildSystemPrompt,
   modelById,
   type Availability,
@@ -10,10 +11,14 @@ import {
 } from '../lib/chat'
 import type { CodeFile } from '../lib/files'
 import { providerFor, usableModels } from '../lib/providers'
+import { decodeShare, parseParams } from '../lib/share'
 import { hasGpuAdapter } from '../lib/providers/webgpu'
 
 const MODEL_KEY = 'codeview:chat-model'
 const THINKING_KEY = 'codeview:chat-thinking'
+/** Only written when the reader has actually rewritten the brief: an absent key means the default,
+ *  so a later edit to `DEFAULT_ROLE` reaches everyone who never touched theirs. */
+const ROLE_KEY = 'codeview:chat-role'
 
 export interface ChatMessage {
   id: number
@@ -34,6 +39,12 @@ export interface Chat {
   choice: Ref<ModelChoice | null>
   /** Let a reasoning model think first. Only meaningful where `choice.thinking` is set. */
   thinking: Ref<boolean>
+  /** The system prompt's instructions half, the reader's to rewrite. The code half is generated
+   *  from the open files and is appended to whatever this says. Read-only: `setRole` is the way
+   *  in, because a change has to reach `localStorage` and drop the session with it. */
+  role: Readonly<Ref<string>>
+  /** Whether that brief is still the one shipped, for a pane that marks a rewritten one. */
+  roleIsDefault: Ref<boolean>
   status: Ref<ChatStatus>
   /** Weight download progress, 0–1, while `status` is `downloading`. */
   progress: Ref<number>
@@ -48,6 +59,9 @@ export interface Chat {
   ask: (question: string) => Promise<void>
   stop: () => void
   newChat: () => void
+  /** Rewrite the brief. Blank means the shipped one. Remembered, and starts a new chat, since a
+   *  conversation carries the prompt it began with. */
+  setRole: (text: string) => void
 }
 
 function messageOf(error: unknown): string {
@@ -80,6 +94,7 @@ function signatureOf(files: readonly CodeFile[]): string {
  * moved on and the pane offers a new chat.
  */
 export function useChat(files: Ref<CodeFile[]>, activeId: Ref<string>): Chat {
+  const params = parseParams(location.search, location.hash)
   const models = ref<ModelChoice[]>(usableModels())
 
   const remembered = localStorage.getItem(MODEL_KEY)
@@ -97,6 +112,40 @@ export function useChat(files: Ref<CodeFile[]>, activeId: Ref<string>): Chat {
   // so turning it on mid-conversation costs nothing.
   const thinking = ref(localStorage.getItem(THINKING_KEY) === 'on')
   watch(thinking, (on) => localStorage.setItem(THINKING_KEY, on ? 'on' : 'off'))
+
+  // The brief a session is built with. A conversation carries the prompt it began with, so
+  // rewriting it drops the conversation the way changing model does — but not the engine: the
+  // weights are the same ones, and reloading them for a wording change would be absurd.
+  const role = ref(localStorage.getItem(ROLE_KEY) || DEFAULT_ROLE)
+  const roleIsDefault = computed(() => role.value === DEFAULT_ROLE)
+
+  function setRole(text: string): void {
+    const next = text.trim() ? text : DEFAULT_ROLE
+    if (next === role.value) return
+    role.value = next
+    // Only a brief that differs is worth storing: an absent key means the shipped one, so a later
+    // edit to `DEFAULT_ROLE` still reaches everyone who never wrote their own.
+    if (next === DEFAULT_ROLE) localStorage.removeItem(ROLE_KEY)
+    else localStorage.setItem(ROLE_KEY, next)
+    newChat()
+  }
+
+  /**
+   * A brief carried by the link, which wins over the stored one — the same order the buffer
+   * follows, where a link describes what it is about and the last session fills in the rest.
+   *
+   * It is deliberately *not* written to `localStorage`: it belongs to the link, and opening
+   * someone else's should not overwrite the brief this reader wrote for themselves. Reloading
+   * keeps it anyway, since the fragment is still in the address bar.
+   */
+  const linked = params.get('systemprompt') ?? null
+  if (linked !== null) {
+    void decodeShare(linked).then((decoded) => {
+      if (!decoded?.trim()) return
+      role.value = decoded
+      newChat()
+    })
+  }
   const status = ref<ChatStatus>(models.value.length === 0 ? 'unavailable' : 'checking')
   const progress = ref(0)
   const messages = ref<ChatMessage[]>([])
@@ -190,6 +239,7 @@ export function useChat(files: Ref<CodeFile[]>, activeId: Ref<string>): Chat {
       buildSystemPrompt({
         files: promptFiles(files.value, activeId.value),
         maxCodeChars: selected.maxCodeChars,
+        role: role.value,
       }),
     )
     sessionFiles.value = signatureOf(files.value)
@@ -286,6 +336,8 @@ export function useChat(files: Ref<CodeFile[]>, activeId: Ref<string>): Chat {
     model,
     choice,
     thinking,
+    role,
+    roleIsDefault,
     status,
     progress,
     messages,
@@ -296,5 +348,6 @@ export function useChat(files: Ref<CodeFile[]>, activeId: Ref<string>): Chat {
     ask,
     stop,
     newChat,
+    setRole,
   }
 }

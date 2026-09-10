@@ -646,6 +646,334 @@ describe('the chat pane picks a model honestly', () => {
     }
   })
 
+  it('lets the system prompt be rewritten, and put back', async () => {
+    const fresh = await chatPageWith(function () {
+      localStorage.clear()
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async () => ({
+          promptStreaming: () => new ReadableStream({ start: (c) => c.close() }),
+          destroy: () => {},
+        }),
+      }
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+    })
+    try {
+      await fresh.click('.prompt')
+      const shipped = await fresh.$eval('.prompt-text', (el) => (el as HTMLTextAreaElement).value)
+      expect(shipped).toContain('senior security engineer')
+
+      // Only the brief is editable: the code half is generated, and is not in the box.
+      expect(shipped).not.toContain('const greeting')
+
+      await fresh.$eval('.prompt-text', (el) => {
+        const box = el as HTMLTextAreaElement
+        box.value = 'You are a poet.'
+        box.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await fresh.click('.prompt-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      // The editor closes, and the button says the brief is no longer the shipped one.
+      expect(await fresh.$('.prompt-editor')).toBeNull()
+      expect(await fresh.$eval('.prompt', (el) => el.className)).toContain('custom')
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:chat-role'))).toBe(
+        'You are a poet.',
+      )
+
+      // It outlives the pane, which unmounts on every tab switch.
+      const tabs = await fresh.$$('.tabs button')
+      await tabs[0]!.click()
+      await tabs[2]!.click()
+      await fresh.click('.prompt')
+      expect(await fresh.$eval('.prompt-text', (el) => (el as HTMLTextAreaElement).value)).toBe(
+        'You are a poet.',
+      )
+
+      await fresh.click('.prompt-editor .restore')
+      await fresh.click('.prompt-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(await fresh.$eval('.prompt', (el) => el.className)).not.toContain('custom')
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:chat-role'))).toBeNull()
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('drops the button’s label when the pane is dragged narrow, keeping the cogwheel', async () => {
+    const fresh = await chatPageWith(function () {
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async () => ({
+          promptStreaming: () => new ReadableStream({ start: (c) => c.close() }),
+          destroy: () => {},
+        }),
+      }
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+    })
+    const labelShown = () =>
+      fresh.$eval('.prompt .label', (el) => getComputedStyle(el).display !== 'none')
+    try {
+      await fresh.setViewport({ width: 1400, height: 1000 })
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(await labelShown()).toBe(true)
+
+      // Drag the divider to the right edge; the split clamps it at its own limit, which is where
+      // the pane is narrowest a reader can make it.
+      const handle = (await (await fresh.$('.split .divider'))!.boundingBox())!
+      await fresh.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2)
+      await fresh.mouse.down()
+      await fresh.mouse.move(1399, handle.y + handle.height / 2, { steps: 10 })
+      await fresh.mouse.up()
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      const width = await fresh.$eval('.chat-pane', (el) => el.getBoundingClientRect().width)
+      expect(width).toBeLessThan(360)
+      expect(await labelShown()).toBe(false)
+
+      // The gesture itself survives: the cogwheel is what is left, it is still *inside* the pane
+      // — the toolbar has to wrap rather than overflow, or the button is merely out of sight —
+      // and it still opens the editor.
+      const [pane, cog] = await fresh.evaluate(() =>
+        ['.chat-pane', '.prompt'].map((selector) => {
+          const box = document.querySelector(selector)!.getBoundingClientRect()
+          return { left: box.left, right: box.right, width: box.width }
+        }),
+      )
+      expect(cog!.width).toBeGreaterThan(0)
+      expect(cog!.right).toBeLessThanOrEqual(pane!.right)
+      expect(cog!.left).toBeGreaterThanOrEqual(pane!.left)
+      await fresh.click('.prompt')
+      expect(await fresh.$('.prompt-editor')).not.toBeNull()
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('keeps the toolbar on one row, even with a Stop button and a narrow pane', async () => {
+    const fresh = await chatPageWith(function () {
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        // A stream that never closes, so the pane stays busy and Stop stays on screen.
+        create: async () => ({
+          promptStreaming: () => new ReadableStream({ start() {} }),
+          destroy: () => {},
+        }),
+      }
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+    })
+    /** Every toolbar item's top edge, and whether any of them hangs outside the pane. */
+    const layout = () =>
+      fresh.evaluate(() => {
+        const pane = document.querySelector('.chat-pane')!.getBoundingClientRect()
+        const items = [...document.querySelectorAll('.toolbar > *')]
+        return {
+          count: items.length,
+          rows: new Set(items.map((el) => Math.round(el.getBoundingClientRect().top / 10))).size,
+          overflows: items.some((el) => el.getBoundingClientRect().right > pane.right + 0.5),
+        }
+      })
+    try {
+      await fresh.setViewport({ width: 1400, height: 1000 })
+      await fresh.type('.composer textarea', 'hello')
+      await fresh.click('.composer .send')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      // Picker, New chat, Stop, System prompt — the row the picker used to push a button out of.
+      expect((await layout()).count).toBe(4)
+      expect(await layout()).toMatchObject({ rows: 1, overflows: false })
+
+      const handle = (await (await fresh.$('.split .divider'))!.boundingBox())!
+      await fresh.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2)
+      await fresh.mouse.down()
+      await fresh.mouse.move(1399, handle.y + handle.height / 2, { steps: 10 })
+      await fresh.mouse.up()
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      expect(await layout()).toMatchObject({ count: 4, rows: 1, overflows: false })
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('remembers a rewritten system prompt across a reload', async () => {
+    // Its own storage partition, and deliberately no clear on navigation: what survives a reload
+    // *is* the point, and `chatPageWith` empties localStorage on every document.
+    const context = await browser.createBrowserContext()
+    const fresh = await context.newPage()
+    try {
+      await fresh.evaluateOnNewDocument(function () {
+        ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+          availability: async () => 'available',
+          create: async () => ({
+            promptStreaming: () => new ReadableStream({ start: (c) => c.close() }),
+            destroy: () => {},
+          }),
+        }
+        Object.defineProperty(navigator, 'gpu', {
+          value: { requestAdapter: async () => ({}) },
+          configurable: true,
+        })
+      })
+      const openChat = async () => {
+        await fresh.waitForSelector('.row')
+        const tabs = await fresh.$$('.tabs button')
+        await tabs[2]!.click()
+        await fresh.waitForSelector('.chat-pane')
+        await new Promise((resolve) => setTimeout(resolve, 400))
+      }
+
+      await fresh.goto(URL, { waitUntil: 'networkidle0' })
+      await openChat()
+      await fresh.click('.prompt')
+      await fresh.$eval('.prompt-text', (el) => {
+        const box = el as HTMLTextAreaElement
+        box.value = 'You are a poet.'
+        box.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await fresh.click('.prompt-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:chat-role'))).toBe(
+        'You are a poet.',
+      )
+
+      await fresh.reload({ waitUntil: 'networkidle0' })
+      await openChat()
+      expect(await fresh.$eval('.prompt', (el) => el.className)).toContain('custom')
+      await fresh.click('.prompt')
+      expect(await fresh.$eval('.prompt-text', (el) => (el as HTMLTextAreaElement).value)).toBe(
+        'You are a poet.',
+      )
+    } finally {
+      await context.close()
+    }
+  })
+
+  it('takes a system prompt written into the link in clear text', async () => {
+    const fresh = await browser.newPage()
+    await fresh.evaluateOnNewDocument(function () {
+      localStorage.clear()
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async () => ({
+          promptStreaming: () => new ReadableStream({ start: (c) => c.close() }),
+          destroy: () => {},
+        }),
+      }
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+    })
+    try {
+      // Hand-written, unzipped, and with + for the spaces — the query-string reading, since a
+      // brief is prose. `%2B` is how a literal plus is written.
+      await fresh.goto(`${URL}#systemprompt=you+are+a+poet+who+likes+C%2B%2B`, {
+        waitUntil: 'networkidle0',
+      })
+      await fresh.waitForSelector('.row')
+      const tabs = await fresh.$$('.tabs button')
+      await tabs[2]!.click()
+      await fresh.waitForSelector('.chat-pane')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      expect(await fresh.$eval('.prompt', (el) => el.className)).toContain('custom')
+      await fresh.click('.prompt')
+      expect(await fresh.$eval('.prompt-text', (el) => (el as HTMLTextAreaElement).value)).toBe(
+        'you are a poet who likes C++',
+      )
+      // The link's brief belongs to the link: it must not overwrite one this reader wrote.
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:chat-role'))).toBeNull()
+      // And a chat-only link leaves the reader's own tabs alone rather than reading as a share.
+      expect(await fresh.$$eval('.tab', (nodes) => nodes.length)).toBe(1)
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('carries a rewritten system prompt into Copy link, and nothing when it is the default', async () => {
+    const fresh = await chatPageWith(function () {
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async () => ({
+          promptStreaming: () => new ReadableStream({ start: (c) => c.close() }),
+          destroy: () => {},
+        }),
+      }
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+    })
+    const copyLink = async () => {
+      await fresh.evaluate(() => {
+        const button = [...document.querySelectorAll('.actions > button')].find(
+          (candidate) => candidate.textContent?.trim() === 'Copy link',
+        )
+        ;(button as HTMLElement).click()
+      })
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      return fresh.evaluate(() => location.hash)
+    }
+    try {
+      // The shipped brief is not worth a parameter: it is what every reader gets anyway.
+      expect(await copyLink()).not.toContain('systemprompt')
+
+      await fresh.click('.prompt')
+      await fresh.$eval('.prompt-text', (el) => {
+        const box = el as HTMLTextAreaElement
+        box.value = 'You are a poet.'
+        box.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await fresh.click('.prompt-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      const hash = await copyLink()
+      expect(hash).toMatch(/systemprompt=z\./)
+
+      // Which the other end reads back, deflated payload and all.
+      const opened = await browser.newPage()
+      try {
+        await opened.evaluateOnNewDocument(function () {
+          ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+            availability: async () => 'available',
+            create: async () => ({
+              promptStreaming: () => new ReadableStream({ start: (c) => c.close() }),
+              destroy: () => {},
+            }),
+          }
+          Object.defineProperty(navigator, 'gpu', {
+            value: { requestAdapter: async () => ({}) },
+            configurable: true,
+          })
+        })
+        await opened.goto(`${URL}${hash}`, { waitUntil: 'networkidle0' })
+        await opened.waitForSelector('.row')
+        const tabs = await opened.$$('.tabs button')
+        await tabs[2]!.click()
+        await opened.waitForSelector('.chat-pane')
+        await new Promise((resolve) => setTimeout(resolve, 400))
+        await opened.click('.prompt')
+        expect(await opened.$eval('.prompt-text', (el) => (el as HTMLTextAreaElement).value)).toBe(
+          'You are a poet.',
+        )
+      } finally {
+        await opened.close()
+      }
+    } finally {
+      await fresh.close()
+    }
+  })
+
   it('offers thinking only on a model that has it, and off by default', async () => {
     const fresh = await chatPageWith(function () {
       ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {

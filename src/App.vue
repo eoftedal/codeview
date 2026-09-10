@@ -185,6 +185,12 @@ const languages = [
   { id: 'jsx', label: 'JSX' },
 ] as const
 
+/** The link carries the chat's brief when the reader wrote one — the two composables meet here,
+ *  as everything else does, rather than reaching into each other. */
+function shareLink(): void {
+  void copyShareLink({ systemPrompt: chat.roleIsDefault.value ? null : chat.role.value })
+}
+
 const fileInput = ref<HTMLInputElement>()
 
 function onFilePicked(event: Event): void {
@@ -199,7 +205,7 @@ function onFilePicked(event: Event): void {
   <div class="app">
     <header v-if="!hideHeader" class="app-bar">
       <h1>codeview</h1>
-      <p class="tagline">cursor ↔ AST, with definitions</p>
+      <p class="tagline">cursor ↔ AST, definitions, traces, and a local model</p>
 
       <div class="actions">
         <div class="languages">
@@ -213,7 +219,7 @@ function onFilePicked(event: Event): void {
           </button>
         </div>
         <button @click="fileInput?.click()">Open files</button>
-        <button @click="copyShareLink()">Copy link</button>
+        <button @click="shareLink()">Copy link</button>
         <button @click="reset()">Reset</button>
         <input
           ref="fileInput"
@@ -302,6 +308,8 @@ function onFilePicked(event: Event): void {
               :model="chat.model.value"
               :choice="chat.choice.value"
               :thinking="chat.thinking.value"
+              :role="chat.role.value"
+              :role-is-default="chat.roleIsDefault.value"
               :status="chat.status.value"
               :progress="chat.progress.value"
               :messages="chat.messages.value"
@@ -310,6 +318,7 @@ function onFilePicked(event: Event): void {
               :stale="chat.stale.value"
               @update:model="chat.model.value = $event"
               @update:thinking="chat.thinking.value = $event"
+              @update:role="chat.setRole($event)"
               @ask="chat.ask($event)"
               @stop="chat.stop()"
               @new-chat="chat.newChat()"

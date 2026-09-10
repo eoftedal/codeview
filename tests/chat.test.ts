@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MODELS, buildSystemPrompt, modelById, numberLines } from '../src/lib/chat'
+import { DEFAULT_ROLE, MODELS, buildSystemPrompt, modelById, numberLines } from '../src/lib/chat'
 
 const file = (name: string, text: string) => ({ name, language: 'ts' as const, text })
 
@@ -113,6 +113,22 @@ describe('the system prompt', () => {
 
   it('says nothing about truncation when the whole file fits', () => {
     expect(buildSystemPrompt(context)).not.toContain('truncated')
+  })
+
+  it('takes a rewritten brief in place of the default one', () => {
+    const prompt = buildSystemPrompt({ ...context, role: 'You are a poet. Describe this code.' })
+    expect(prompt).toContain('You are a poet.')
+    expect(prompt).not.toContain('senior security engineer')
+    // Only the brief is the reader's: the code half is generated either way.
+    expect(prompt).toContain('1 | const a = 1')
+    expect(prompt).toContain('The file under review is below')
+  })
+
+  it('falls back to the shipped brief when the custom one is blank', () => {
+    for (const role of [undefined, '', '   \n  ']) {
+      expect(buildSystemPrompt({ ...context, role })).toContain('senior security engineer')
+    }
+    expect(buildSystemPrompt({ ...context, role: DEFAULT_ROLE })).toBe(buildSystemPrompt(context))
   })
 
   it('honours each model’s own budget', () => {

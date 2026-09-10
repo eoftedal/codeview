@@ -20,24 +20,36 @@ async function pipe(bytes: Uint8Array, transform: TransformStream): Promise<Uint
 }
 
 /**
+ * Keys whose value is prose rather than code, and which therefore take the ordinary query-string
+ * reading: `+` is a space, and a literal plus is `%2B`. Everywhere else a `+` must survive exactly
+ * as written — `#src=a+b` is an addition — which is the whole reason this file parses by hand.
+ *
+ * The swap happens *before* the percent-decoding, so the two do not eat each other: `%2B` is still
+ * `%2B` when the `+`s become spaces, and comes back a plus.
+ */
+const PROSE_KEYS = new Set(['systemprompt'])
+
+/**
  * Parsed by hand rather than with `URLSearchParams`, which decodes `+` as a space — that would
  * quietly corrupt a hand-written `#src=a+b`.
  *
  * Keys are lower-cased: these get typed by hand, and `hideHeader` should not fail over its capital
- * H. Values are left exactly as written.
+ * H. Values are left exactly as written, bar the one prose key above.
  */
 export function parseFragment(hash: string): Map<string, string> {
   const params = new Map<string, string>()
   for (const part of hash.replace(/^[#?]/, '').split('&')) {
     if (!part) continue
     const equals = part.indexOf('=')
-    const key = equals < 0 ? part : part.slice(0, equals)
-    const value = equals < 0 ? '' : part.slice(equals + 1)
+    const rawKey = equals < 0 ? part : part.slice(0, equals)
+    const rawValue = equals < 0 ? '' : part.slice(equals + 1)
     try {
-      params.set(decodeURIComponent(key).toLowerCase(), decodeURIComponent(value))
+      const key = decodeURIComponent(rawKey).toLowerCase()
+      const value = PROSE_KEYS.has(key) ? rawValue.replace(/\+/g, '%20') : rawValue
+      params.set(key, decodeURIComponent(value))
     } catch {
       // A malformed %-escape is more useful kept raw than dropped.
-      params.set(key.toLowerCase(), value)
+      params.set(rawKey.toLowerCase(), rawValue)
     }
   }
   return params

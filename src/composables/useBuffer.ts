@@ -292,23 +292,33 @@ export function useBuffer() {
     notice.value = rejected.length ? `Not opened — ${rejected.join('; ')}.` : null
   }
 
-  /** Build a share link and put it on the clipboard. Only ever on an explicit request — writing
-   *  the hash on every keystroke would flood browser history. */
-  async function copyShareLink(): Promise<boolean> {
+  /**
+   * Build a share link and put it on the clipboard. Only ever on an explicit request — writing
+   * the hash on every keystroke would flood browser history.
+   *
+   * `systemPrompt` is the chat's, passed in rather than reached for: this composable owns the
+   * files and knows nothing about the model. Null when the reader never rewrote it, which is why
+   * an ordinary link carries no `systemprompt=` at all.
+   */
+  async function copyShareLink(options: { systemPrompt?: string | null } = {}): Promise<boolean> {
+    const systemprompt = options.systemPrompt ? await encodeShare(options.systemPrompt) : undefined
     // Every tab goes into the link, deflated as one payload: a set of files that import each other
     // is only worth reading together, and one stream over all of them is far shorter than a
     // payload apiece. A lone file keeps the older, plainer `src` form — same link as ever, and
     // shorter for the common case.
     const single = files.value.length === 1
+    // Last in the fragment: it is the longest thing in it, and a link stays readable up front.
     const fragment = single
       ? buildFragment({
           src: await encodeShare(text.value),
           lang: language.value,
           filename: fileName.value,
+          systemprompt,
         })
       : buildFragment({
           files: await encodeShare(serializeFiles(files.value)),
           active: fileName.value,
+          systemprompt,
         })
     const url = `${location.origin}${location.pathname}${fragment}`
     history.replaceState(null, '', fragment)

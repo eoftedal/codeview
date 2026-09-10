@@ -155,7 +155,18 @@ the source/sink definitions, then **every open file**, line-numbered) is built o
 the code it carries is a snapshot — edits raise a `stale` hint rather than silently rebuilding the
 session, which would discard the conversation. The model is given every open file for the same reason the trace
 crosses them: a taint flow usually leaves the file it starts in. What it is _not_ given is which
-one is on screen beyond the ordering, so answers cite a file with every line number. `maxCodeChars` is the budget for all of them together, spent in the order given
+one is on screen beyond the ordering, so answers cite a file with every line number. The **role half** of that prompt is the reader's to rewrite — the cogwheel in the pane, `DEFAULT_ROLE`
+in `chat.ts`, stored under `codeview:chat-role` **only while it differs**, so a later edit to the
+shipped brief reaches everyone who never touched theirs. It also rides a link: `copyShareLink` takes
+the brief as an argument (`App.vue` supplies it, since `useBuffer` knows nothing about the chat) and
+writes `systemprompt=` only when one has been written, while `useChat` reads that key itself and
+**does not store what a link supplied** — the link's brief must not overwrite the reader's own, which
+is why `setRole` rather than the ref is what persists. It is also no part of `fromParams`, so a
+chat-only link leaves the open tabs alone. The file listing is not editable, because it
+is generated from the buffer rather than typed; `buildSystemPrompt` appends it under whatever the role
+says, and a blank role falls back to the default rather than sending a model no instructions. Saving a
+different brief drops the session and keeps the engine, for the same reason `newChat` does: the weights
+did not change. `maxCodeChars` is the budget for all of them together, spent in the order given
 — which is why `promptFiles` puts the file on screen first — and files that do not fit are named
 rather than dropped silently. Staleness is measured in **tab order**, so switching tabs (which only
 reorders the prompt) does not cost a conversation, while an edit, a rename or a close does. The availability probe waits for the tab to be opened.
@@ -204,7 +215,10 @@ cross-file resolution and cross-file traces are tested; everything else is brows
 - **`ts.SyntaxKind` reverse lookup is unreliable** — the enum aliases range markers onto real kinds,
   so `VariableStatement` comes back as `FirstStatement`. Use `kindName()` from `astTree.ts`.
 - **Share fragments are parsed by hand, not with `URLSearchParams`**, which decodes `+` as a space
-  and would corrupt hand-written source. Keys are lower-cased; values are left verbatim. `z.` marks
+  and would corrupt hand-written source. Keys are lower-cased; values are left verbatim — except
+  `systemprompt`, the one key holding prose rather than code, where `+` **is** a space and `%2B` a
+  literal plus (`PROSE_KEYS` in `share.ts`). That swap runs on the still-encoded value, before the
+  percent-decoding, which is the only order in which those two survive each other. `z.` marks
   a deflated payload, `r.` an uncompressed one, and anything unprefixed or undecodable is read as
   literal source.
 - **`files=` is `src=` for the whole strip**, and goes through the same `z.`/`r.`/literal rules — a

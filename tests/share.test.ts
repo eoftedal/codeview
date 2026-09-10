@@ -66,6 +66,22 @@ describe('parseFragment', () => {
     expect(new URLSearchParams('src=a+b').get('src')).toBe('a b')
   })
 
+  it('reads + as a space in a system prompt, which is prose rather than code', () => {
+    // The one key where the ordinary query-string reading applies: a hand-written brief is
+    // written the way anything else in a URL is.
+    expect(parseFragment('#systemprompt=you+are+a+poet').get('systemprompt')).toBe('you are a poet')
+    // Percent escapes still work, and mix with it.
+    expect(parseFragment('#systemprompt=you%20are+a').get('systemprompt')).toBe('you are a')
+    // Case-insensitive like every other key.
+    expect(parseFragment('#systemPrompt=a+b').get('systemprompt')).toBe('a b')
+    // …and a literal plus survives, because the swap happens before the percent-decoding.
+    expect(parseFragment('#systemprompt=review+the+C%2B%2B+parts').get('systemprompt')).toBe(
+      'review the C++ parts',
+    )
+    // The code keys are untouched by any of it.
+    expect(parseFragment('#src=a+b&systemprompt=a+b').get('src')).toBe('a+b')
+  })
+
   it('keeps a malformed escape rather than dropping the key', () => {
     expect(parseFragment('#src=100%%20done').get('src')).toBe('100%%20done')
   })

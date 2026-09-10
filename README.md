@@ -64,23 +64,32 @@ would make an import ambiguous, so the second becomes `db-2.ts`.
 
 The fragment is parsed without `URLSearchParams`, which decodes `+` as a space and would
 quietly corrupt hand-written source. A prefixed payload that fails to decode is treated as
-literal too — source starting with `z.` is likelier than a corrupt link.
+literal too — source starting with `z.` is likelier than a corrupt link. The single exception
+is `systemprompt`, which is prose rather than code and so takes the ordinary reading: `+` is a
+space there, and `%2B` a literal plus.
 
 ## Parameters
 
 Read from the query string and the fragment alike, the fragment winning where both name a
 key. Key names are case-insensitive, since these get typed by hand.
 
-| Parameter    | Effect                                                                                                |
-| ------------ | ----------------------------------------------------------------------------------------------------- |
-| `src`        | the buffer — `z.`/`r.` payload, or literal source                                                     |
-| `lang`       | `ts`, `tsx`, `js` or `jsx`                                                                            |
-| `filename`   | names the tab; its extension picks the language when `lang` is absent. **Copy link** carries it along |
-| `hideHeader` | hides the title bar, language switcher and buttons, for embedding                                     |
+| Parameter      | Effect                                                                                                          |
+| -------------- | --------------------------------------------------------------------------------------------------------------- |
+| `src`          | the buffer — `z.`/`r.` payload, or literal source                                                               |
+| `lang`         | `ts`, `tsx`, `js` or `jsx`                                                                                      |
+| `filename`     | names the tab; its extension picks the language when `lang` is absent. **Copy link** carries it along           |
+| `hideHeader`   | hides the title bar, language switcher and buttons, for embedding                                               |
+| `systemprompt` | the chat's brief — `z.`/`r.` payload, or literal text. **Copy link** carries it only when you have rewritten it |
 
 Any of these describes what the link is about, so it opens with those files rather than the
 tabs the reader happened to leave open. Without them, the last session comes back whole;
-the seed buffer arrives as `example.ts`, because every tab needs a name.
+the seed buffer arrives as `example.ts`, because every tab needs a name. `systemprompt` is the
+exception on both counts: it says nothing about which files are open, so it leaves the reader's
+tabs alone, and it belongs to the link rather than to the reader — it is not written to
+`localStorage`, so opening someone else's link cannot overwrite a brief you wrote yourself.
+It can be written out in the clear, spaces and all:
+
+    #systemprompt=you+are+a+reviewer+who+only+reports+SQL+injection
 
 `hideHeader` needs no value, though `=false`/`=0`/`=no`/`=off` turns it off. It leaves the
 tab strip alone, so an embed can still say which file it is showing:
@@ -257,6 +266,18 @@ control) to **sinks** (queries, shell commands, `eval`, paths, DOM writes) — a
 **every open file**, each line-numbered from its own line 1, so answers can cite a file and a
 line. This is the one place the tool is not single-file: the tree and the trace read the active
 tab, but a taint flow usually leaves the file it starts in, so the model gets all of them.
+
+The **⚙ System prompt** button opens that brief for editing — for another kind of review, another output
+shape, another language. What you write replaces the role and the two definitions; the open files
+are appended below it either way, since they are generated from the editor rather than typed.
+**Restore default** puts the shipped brief back, a rewritten one is remembered between visits and
+marked on the button — which keeps the cogwheel and drops its words when the pane is dragged narrow — and saving one starts a new chat, since a conversation keeps the prompt it
+began with. The model stays loaded through it: the weights have not changed, only the wording.
+
+A rewritten brief also travels: **Copy link** adds a `systemprompt=` to the fragment when there is
+one to add, and nothing when the brief is the shipped one, which every reader has anyway. The other
+end can be written by hand — see [Parameters](#parameters) — so one link can hand someone the code
+and the question to ask about it.
 
 The 12 000-character budget covers them together, spent in order with the file on screen first,
 so what gets clipped is code you are not looking at. A clip is stated in the prompt — a model

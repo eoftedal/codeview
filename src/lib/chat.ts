@@ -254,6 +254,10 @@ export interface CodeContext {
   /** Every open file, the one on screen first — a demo-sized app fits, and a question about one
    *  file is usually really a question about the path running through the others. */
   files: readonly PromptFile[]
+  /** The instructions half of the prompt, which the reader may rewrite. Blank or absent means
+   *  `DEFAULT_ROLE`: the code half is generated either way, so a custom role replaces the
+   *  reviewer's brief and nothing else. */
+  role?: string
   /**
    * The budget for the code, all files together. Every model here has a small context — a few
    * thousand tokens for the whole conversation, system prompt included — so a large buffer is
@@ -268,7 +272,13 @@ export interface CodeContext {
  *  first and is shown whatever the budget, clipped if it has to be. */
 const MIN_FILE_CHARS = 200
 
-const ROLE = `You are a senior security engineer and an expert in static code analysis. You read code the way a reviewer does: one path at a time, precisely, and you only claim what the code in front of you actually shows.
+/**
+ * The reviewer's brief: everything the prompt says that is not the code itself. It is the half the
+ * pane lets a reader rewrite — for another kind of review, another output shape, another language —
+ * and the half a reset restores. The code half is appended by `buildSystemPrompt` regardless, since
+ * it is generated from the open files rather than written.
+ */
+export const DEFAULT_ROLE = `You are a senior security engineer and an expert in static code analysis. You read code the way a reviewer does: one path at a time, precisely, and you only claim what the code in front of you actually shows.
 
 You reason about code the way a SAST tool does — taint flowing from sources to sinks — and you use these terms in exactly that sense:
 
@@ -298,10 +308,13 @@ You are looking at every file open in the reader's editor, each shown below with
  * created with this once, so the code it carries is a snapshot — the pane says as much when the
  * files move on.
  *
+ * The role is the reader's to replace; the file listing is not, because it is built from the buffer
+ * rather than typed. So an edited prompt is an edited brief with the same code under it.
+ *
  * The budget is spent in the order given, which is why the caller puts the file on screen first:
  * what gets clipped is the code the reader is not looking at.
  */
-export function buildSystemPrompt({ files, maxCodeChars }: CodeContext): string {
+export function buildSystemPrompt({ files, maxCodeChars, role }: CodeContext): string {
   const shown: string[] = []
   const omitted: string[] = []
   let budget = maxCodeChars
@@ -326,7 +339,7 @@ export function buildSystemPrompt({ files, maxCodeChars }: CodeContext): string 
   }
 
   return [
-    ROLE,
+    role?.trim() || DEFAULT_ROLE,
     '',
     files.length > 1
       ? 'Every file open in the editor is below, the one on screen first. Each is numbered from its own line 1:'
