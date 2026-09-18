@@ -4,7 +4,13 @@
  * door does that part, and this file is only the conversation and the stream.
  */
 
-import type { Availability, LoadOptions, ModelEngine, Provider } from '../chat'
+import {
+  CODE_ACK,
+  type Availability,
+  type LoadOptions,
+  type ModelEngine,
+  type Provider,
+} from '../chat'
 import { withoutThoughts } from './thoughts'
 import type { FromWorker, ToWorker } from './transformersWorker'
 import { hasGpuAdapter } from './webgpu'
@@ -77,8 +83,20 @@ export const transformers: Provider = {
     return {
       // The worker holds the loaded pipeline; a conversation is only its list of turns, so a new
       // chat costs an array rather than a reload.
-      async chat(system) {
-        const messages: Message[] = [{ role: 'system', content: system }]
+      async chat(system, code) {
+        // Its own turn, ahead of the question. Not a `tool` message: `apply_chat_template` runs the
+        // model's own Jinja template, and Gemma's has no tool role to render one into — while the
+        // acknowledgement below is what keeps that same template happy, since it raises on two
+        // user turns in a row.
+        const messages: Message[] = [
+          { role: 'system', content: system },
+          ...(code
+            ? ([
+                { role: 'user', content: code },
+                { role: 'assistant', content: CODE_ACK },
+              ] as Message[])
+            : []),
+        ]
         return {
           promptStreaming(input, options) {
             messages.push({ role: 'user', content: input })

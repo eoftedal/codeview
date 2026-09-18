@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, shallowRef, watch } from 'vue'
+import AgentsPane from './components/AgentsPane.vue'
 import AstPane from './components/AstPane.vue'
 import ChatPane from './components/ChatPane.vue'
 import EditorPane from './components/EditorPane.vue'
 import FileTabs from './components/FileTabs.vue'
 import SplitPane from './components/SplitPane.vue'
 import TracePane from './components/TracePane.vue'
+import { useAgents } from './composables/useAgents'
 import { useAnalysis } from './composables/useAnalysis'
 import { useBuffer } from './composables/useBuffer'
 import { useChat } from './composables/useChat'
+import { useModel } from './composables/useModel'
 import { findNodeAtOffset } from './lib/astTree'
 import type { DefinitionResult, Span } from './lib/definitions'
 import { isExternalOrigin, type FlowTarget, type FlowTrace } from './lib/flow'
@@ -53,18 +56,23 @@ const revealToken = ref(0)
 /** Set when a trace row asks for a scroll, so the reveal lands on that exact step. */
 const revealSpan = ref<Span | null>(null)
 
-const activeTab = ref<'ast' | 'trace' | 'chat'>('ast')
+const activeTab = ref<'ast' | 'trace' | 'chat' | 'agents'>('ast')
 // Shallow: the graph is replaced wholesale and must never be deeply proxied, like the AST.
 const trace = shallowRef<FlowTrace | null>(null)
 /** A step the trace pane is pointing at, which wins over the AST row under the pointer. */
 const tracedHover = ref<FlowTarget | null>(null)
 
-/** Held here, not in the pane: the pane unmounts whenever another tab is shown, and a
- *  conversation should survive a glance at the tree. */
-const chat = useChat(files, activeFileId)
+/** One loaded model for the whole app: a conversation and an agent run are two uses of the same
+ *  weights, and a second engine would put the same gigabytes on the GPU twice. */
+const model = useModel()
+
+/** Held here, not in the panes: a pane unmounts whenever another tab is shown, and neither a
+ *  conversation nor a run should survive only as long as a glance at the tree. */
+const chat = useChat(model, files, activeFileId)
+const agents = useAgents(model, files, activeFileId)
 
 watch(activeTab, (tab) => {
-  if (tab === 'chat') chat.probe()
+  if (tab === 'chat' || tab === 'agents') model.probe()
 })
 
 const editorPane = ref<InstanceType<typeof EditorPane>>()
@@ -185,10 +193,14 @@ const languages = [
   { id: 'jsx', label: 'JSX' },
 ] as const
 
-/** The link carries the chat's brief when the reader wrote one — the two composables meet here,
- *  as everything else does, rather than reaching into each other. */
+/** The link carries the chat's brief and the agents' team when the reader wrote either — the
+ *  composables meet here, as everything else does, rather than reaching into each other. Both are
+ *  null while they are the shipped ones, so an ordinary link carries neither. */
 function shareLink(): void {
-  void copyShareLink({ systemPrompt: chat.roleIsDefault.value ? null : chat.role.value })
+  void copyShareLink({
+    systemPrompt: chat.roleIsDefault.value ? null : chat.role.value,
+    agents: agents.shareText.value,
+  })
 }
 
 const fileInput = ref<HTMLInputElement>()
@@ -280,6 +292,9 @@ function onFilePicked(event: Event): void {
               <button :class="{ active: activeTab === 'chat' }" @click="activeTab = 'chat'">
                 Chat
               </button>
+              <button :class="{ active: activeTab === 'agents' }" @click="activeTab = 'agents'">
+                Agents
+              </button>
             </nav>
 
             <AstPane
@@ -304,24 +319,47 @@ function onFilePicked(event: Event): void {
             />
             <ChatPane
               v-else-if="activeTab === 'chat'"
-              :models="chat.models.value"
-              :model="chat.model.value"
-              :choice="chat.choice.value"
-              :thinking="chat.thinking.value"
+              :models="model.models.value"
+              :model="model.model.value"
+              :choice="model.choice.value"
+              :thinking="model.thinking.value"
               :role="chat.role.value"
               :role-is-default="chat.roleIsDefault.value"
-              :status="chat.status.value"
-              :progress="chat.progress.value"
+              :status="model.status.value"
+              :progress="model.progress.value"
               :messages="chat.messages.value"
               :pending="chat.pending.value"
               :busy="chat.busy.value"
               :stale="chat.stale.value"
-              @update:model="chat.model.value = $event"
-              @update:thinking="chat.thinking.value = $event"
+              @update:model="model.model.value = $event"
+              @update:thinking="model.thinking.value = $event"
               @update:role="chat.setRole($event)"
               @ask="chat.ask($event)"
               @stop="chat.stop()"
               @new-chat="chat.newChat()"
+            />
+            <AgentsPane
+              v-else-if="activeTab === 'agents'"
+              :models="model.models.value"
+              :model="model.model.value"
+              :choice="model.choice.value"
+              :thinking="model.thinking.value"
+              :status="model.status.value"
+              :progress="model.progress.value"
+              :team="agents.team.value"
+              :team-is-default="agents.teamIsDefault.value"
+              :task="agents.task.value"
+              :steps="agents.steps.value"
+              :pending="agents.pending.value"
+              :pending-step="agents.pendingStep.value"
+              :running="agents.running.value"
+              @update:model="model.model.value = $event"
+              @update:thinking="model.thinking.value = $event"
+              @update:task="agents.task.value = $event"
+              @update:team="agents.setTeam($event)"
+              @run="agents.run()"
+              @stop="agents.stop()"
+              @clear="agents.clear()"
             />
           </div>
         </template>

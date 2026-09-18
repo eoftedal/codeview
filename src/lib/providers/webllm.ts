@@ -4,7 +4,13 @@
  * downloadable model never pays for either.
  */
 
-import type { Availability, LoadOptions, ModelEngine, Provider } from '../chat'
+import {
+  CODE_ACK,
+  type Availability,
+  type LoadOptions,
+  type ModelEngine,
+  type Provider,
+} from '../chat'
 import { hasGpuAdapter } from './webgpu'
 
 /** The catalogue defaults these models to 4096 tokens — less than the browser's own model, and too
@@ -42,8 +48,20 @@ export const webllm: Provider = {
     return {
       // Completions are stateless, so a conversation is nothing but its own list of turns: a new
       // chat costs an array, not a reload.
-      async chat(system) {
-        const messages: Message[] = [{ role: 'system', content: system }]
+      async chat(system, code) {
+        // The code opens the history as a user turn, answered at once, rather than being folded
+        // into the system message. `tool` is a role this schema has but cannot use here: it
+        // requires a `tool_call_id`, and MLC drops an assistant turn's `tool_calls` when it
+        // renders the prompt, so the call it was meant to answer would never exist.
+        const messages: Message[] = [
+          { role: 'system', content: system },
+          ...(code
+            ? ([
+                { role: 'user', content: code },
+                { role: 'assistant', content: CODE_ACK },
+              ] as Message[])
+            : []),
+        ]
 
         return {
           promptStreaming(input, options) {

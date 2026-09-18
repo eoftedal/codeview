@@ -296,12 +296,15 @@ export function useBuffer() {
    * Build a share link and put it on the clipboard. Only ever on an explicit request — writing
    * the hash on every keystroke would flood browser history.
    *
-   * `systemPrompt` is the chat's, passed in rather than reached for: this composable owns the
-   * files and knows nothing about the model. Null when the reader never rewrote it, which is why
-   * an ordinary link carries no `systemprompt=` at all.
+   * `systemPrompt` is the chat's and `agents` the agents pane's team, both passed in rather than
+   * reached for: this composable owns the files and knows nothing about the model. Each is null
+   * when the reader never rewrote it, which is why an ordinary link carries neither key at all.
    */
-  async function copyShareLink(options: { systemPrompt?: string | null } = {}): Promise<boolean> {
+  async function copyShareLink(
+    options: { systemPrompt?: string | null; agents?: string | null } = {},
+  ): Promise<boolean> {
     const systemprompt = options.systemPrompt ? await encodeShare(options.systemPrompt) : undefined
+    const agents = options.agents ? await encodeShare(options.agents) : undefined
     // Every tab goes into the link, deflated as one payload: a set of files that import each other
     // is only worth reading together, and one stream over all of them is far shorter than a
     // payload apiece. A lone file keeps the older, plainer `src` form — same link as ever, and
@@ -314,11 +317,13 @@ export function useBuffer() {
           lang: language.value,
           filename: fileName.value,
           systemprompt,
+          agents,
         })
       : buildFragment({
           files: await encodeShare(serializeFiles(files.value)),
           active: fileName.value,
           systemprompt,
+          agents,
         })
     const url = `${location.origin}${location.pathname}${fragment}`
     history.replaceState(null, '', fragment)

@@ -1,21 +1,16 @@
-import { computed, onScopeDispose, ref, watch, type Ref } from 'vue'
+import { computed, onScopeDispose, ref, type Ref } from 'vue'
 import {
   DEFAULT_ROLE,
+  buildCodeMessage,
   buildSystemPrompt,
-  modelById,
-  type Availability,
+  promptFiles,
   type ChatSession,
-  type ModelChoice,
-  type ModelEngine,
-  type PromptFile,
 } from '../lib/chat'
 import type { CodeFile } from '../lib/files'
-import { providerFor, usableModels } from '../lib/providers'
 import { decodeShare, parseParams } from '../lib/share'
-import { hasGpuAdapter } from '../lib/providers/webgpu'
+import { isAbort, messageOf, streamAnswer } from '../lib/stream'
+import type { ModelHost } from './useModel'
 
-const MODEL_KEY = 'codeview:chat-model'
-const THINKING_KEY = 'codeview:chat-thinking'
 /** Only written when the reader has actually rewritten the brief: an absent key means the default,
  *  so a later edit to `DEFAULT_ROLE` reaches everyone who never touched theirs. */
 const ROLE_KEY = 'codeview:chat-role'
@@ -28,54 +23,25 @@ export interface ChatMessage {
   failed?: boolean
 }
 
-/** `checking` covers the availability probe; after that it is whatever the provider reported. */
-export type ChatStatus = 'checking' | Availability
-
 export interface Chat {
-  /** The models this browser can actually run, built-in first. Empty means none can. */
-  models: Ref<ModelChoice[]>
-  /** The chosen model's id, remembered between visits. */
-  model: Ref<string>
-  choice: Ref<ModelChoice | null>
-  /** Let a reasoning model think first. Only meaningful where `choice.thinking` is set. */
-  thinking: Ref<boolean>
   /** The system prompt's instructions half, the reader's to rewrite. The code half is generated
    *  from the open files and is appended to whatever this says. Read-only: `setRole` is the way
    *  in, because a change has to reach `localStorage` and drop the session with it. */
   role: Readonly<Ref<string>>
   /** Whether that brief is still the one shipped, for a pane that marks a rewritten one. */
   roleIsDefault: Ref<boolean>
-  status: Ref<ChatStatus>
-  /** Weight download progress, 0–1, while `status` is `downloading`. */
-  progress: Ref<number>
   messages: Ref<ChatMessage[]>
   /** The answer being streamed right now; empty when nothing is in flight. */
   pending: Ref<string>
   busy: Ref<boolean>
   /** The open files have changed since this conversation's system prompt was built. */
   stale: Ref<boolean>
-  /** Settle what can run here. Idempotent, and deliberately not run on load. */
-  probe: () => void
   ask: (question: string) => Promise<void>
   stop: () => void
   newChat: () => void
   /** Rewrite the brief. Blank means the shipped one. Remembered, and starts a new chat, since a
    *  conversation carries the prompt it began with. */
   setRole: (text: string) => void
-}
-
-function messageOf(error: unknown): string {
-  if (error instanceof Error) return error.message
-  return String(error)
-}
-
-/** What the prompt sees: every open file, the one on screen first, so a tight budget clips the
- *  files the reader is not looking at rather than the one they are. */
-function promptFiles(files: readonly CodeFile[], activeId: string): PromptFile[] {
-  const ordered = [...files]
-  const index = ordered.findIndex((file) => file.id === activeId)
-  if (index > 0) ordered.unshift(...ordered.splice(index, 1))
-  return ordered.map(({ name, language, text }) => ({ name, language, text }))
 }
 
 /** What a session was built from, in tab order — switching tabs reorders the prompt but changes
@@ -86,32 +52,16 @@ function signatureOf(files: readonly CodeFile[]): string {
 
 /**
  * A conversation with a model running on this machine — the browser's own, or weights fetched once
- * and cached and then run on the GPU.
+ * and cached and then run on the GPU. The model itself is `useModel`'s, and is shared with whatever
+ * else holds a conversation.
  *
  * The session is created lazily, on the first question, and carries every open file in its system
  * prompt — so a chat started after an edit sees the edit. It is *not* rebuilt underneath an ongoing
  * conversation, which would mean throwing the conversation away; instead `stale` says the code has
  * moved on and the pane offers a new chat.
  */
-export function useChat(files: Ref<CodeFile[]>, activeId: Ref<string>): Chat {
+export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<string>): Chat {
   const params = parseParams(location.search, location.hash)
-  const models = ref<ModelChoice[]>(usableModels())
-
-  const remembered = localStorage.getItem(MODEL_KEY)
-  // Built-in first in the catalogue, so the default is the one with nothing to download.
-  const model = ref(
-    (remembered && models.value.some((choice) => choice.id === remembered) ? remembered : null) ??
-      models.value[0]?.id ??
-      'builtin',
-  )
-
-  const choice = computed(() => modelById(model.value))
-
-  // Off by default: thinking is slower and most questions here do not need it. The setting is
-  // remembered, and applies from the next question — it is a per-request flag, not a session one,
-  // so turning it on mid-conversation costs nothing.
-  const thinking = ref(localStorage.getItem(THINKING_KEY) === 'on')
-  watch(thinking, (on) => localStorage.setItem(THINKING_KEY, on ? 'on' : 'off'))
 
   // The brief a session is built with. A conversation carries the prompt it began with, so
   // rewriting it drops the conversation the way changing model does — but not the engine: the
@@ -146,57 +96,17 @@ export function useChat(files: Ref<CodeFile[]>, activeId: Ref<string>): Chat {
       newChat()
     })
   }
-  const status = ref<ChatStatus>(models.value.length === 0 ? 'unavailable' : 'checking')
-  const progress = ref(0)
+
   const messages = ref<ChatMessage[]>([])
   const pending = ref('')
   const busy = ref(false)
   const sessionFiles = ref<string | null>(null)
 
-  // Two lifetimes: the engine holds the loaded model and survives "New chat"; the session is only
-  // a system prompt and its turns. Tearing the engine down per conversation would mean reloading
-  // weights onto the GPU every time, which is exactly what a new chat should not cost.
-  let engine: ModelEngine | null = null
+  // The session is only a system prompt and its turns; the engine that runs it belongs to
+  // `useModel` and outlives every conversation held with it.
   let session: ChatSession | null = null
   let controller: AbortController | null = null
   let nextId = 0
-  let probed = false
-
-  /** Asking what can run here is the pane's first cost, so it waits for the pane to be opened
-   *  rather than running on load for everyone who never uses it.
-   *
-   *  A GPU adapter is a fact about the browser rather than about any one model — Chrome exposes
-   *  `navigator.gpu` on machines that then hand back nothing — so it is settled once, and every
-   *  downloadable model is dropped when there is no GPU to run it on. Which is what leaves the
-   *  pane with nothing to offer, and the plain message, on a browser that can do neither. */
-  function probe(): void {
-    if (probed) return
-    probed = true
-    void (async () => {
-      if (!(await hasGpuAdapter())) {
-        models.value = models.value.filter((choice) => choice.provider === 'builtin')
-        if (models.value.length === 0) {
-          status.value = 'unavailable'
-          return
-        }
-        // Selecting a different model re-enters this through the watcher below.
-        if (!models.value.some((choice) => choice.id === model.value)) {
-          model.value = models.value[0]!.id
-          return
-        }
-      }
-      const selected = choice.value
-      if (!selected) {
-        status.value = 'unavailable'
-        return
-      }
-      try {
-        status.value = await providerFor(selected.provider).availability()
-      } catch {
-        status.value = 'unavailable'
-      }
-    })()
-  }
 
   const stale = computed(
     () =>
@@ -205,45 +115,22 @@ export function useChat(files: Ref<CodeFile[]>, activeId: Ref<string>): Chat {
       sessionFiles.value !== signatureOf(files.value),
   )
 
-  async function ensureEngine(selected: ModelChoice): Promise<ModelEngine> {
-    if (engine) return engine
-    try {
-      engine = await providerFor(selected.provider).load({
-        model: selected.model,
-        thinking: selected.thinking,
-        dtype: selected.dtype,
-        onProgress: (loaded) => {
-          progress.value = loaded
-          if (loaded < 1) status.value = 'downloading'
-        },
-      })
-    } catch (caught) {
-      // A model that will not load is worth saying plainly, but the pane keeps its picker so
-      // another one can be tried.
-      status.value = 'unavailable'
-      throw caught
-    }
-    return engine
-  }
-
   async function ensureSession(): Promise<ChatSession> {
     if (session) return session
 
-    const selected = choice.value
-    if (!selected) throw new Error('No language model is selected.')
-
-    const loaded = await ensureEngine(selected)
+    const loaded = await model.engine()
     // Read after the load, not before: a first download can take minutes, and the code the reader
-    // asks about is what is open when they ask.
+    // asks about is what is open when they ask. The brief is the system prompt; the code is seeded
+    // as an opening turn behind it, so instructions and data stay separable.
     session = await loaded.chat(
-      buildSystemPrompt({
+      buildSystemPrompt(role.value),
+      buildCodeMessage({
         files: promptFiles(files.value, activeId.value),
-        maxCodeChars: selected.maxCodeChars,
-        role: role.value,
+        maxCodeChars: model.choice.value?.maxCodeChars ?? 12_000,
       }),
     )
     sessionFiles.value = signatureOf(files.value)
-    status.value = 'available'
+    model.markAvailable()
     return session
   }
 
@@ -259,26 +146,20 @@ export function useChat(files: Ref<CodeFile[]>, activeId: Ref<string>): Chat {
     try {
       const active = await ensureSession()
       controller = new AbortController()
-      // Read by hand rather than `for await`: every provider hands back a plain ReadableStream
-      // of deltas.
-      const reader = active
-        .promptStreaming(trimmed, {
-          signal: controller.signal,
-          thinking: thinking.value && choice.value?.thinking === true,
-        })
-        .getReader()
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        answer += value
-        pending.value = answer
-      }
+      answer = await streamAnswer(
+        active,
+        trimmed,
+        { signal: controller.signal, thinking: model.thinkingNow() },
+        (text) => {
+          pending.value = text
+        },
+      )
       messages.value = [
         ...messages.value,
         { id: nextId++, role: 'assistant', text: answer.trim() || '(the model returned nothing)' },
       ]
     } catch (caught) {
-      const aborted = caught instanceof DOMException && caught.name === 'AbortError'
+      const aborted = isAbort(caught)
       if (aborted && answer.trim()) {
         messages.value = [
           ...messages.value,
@@ -312,39 +193,22 @@ export function useChat(files: Ref<CodeFile[]>, activeId: Ref<string>): Chat {
     pending.value = ''
   }
 
-  // A different model is a different engine and a different conversation: weights, context budget
-  // and system prompt all change, and carrying the turns across would be a lie about who said them.
-  watch(model, (id) => {
-    localStorage.setItem(MODEL_KEY, id)
-    newChat()
-    engine?.destroy()
-    engine = null
-    progress.value = 0
-    probed = false
-    status.value = 'checking'
-    probe()
-  })
+  // A different model is a different conversation — and the engine under this session is about to
+  // be torn down, so the session has to go first.
+  model.onChange(newChat)
 
   onScopeDispose(() => {
     controller?.abort()
     session?.destroy()
-    engine?.destroy()
   })
 
   return {
-    models,
-    model,
-    choice,
-    thinking,
     role,
     roleIsDefault,
-    status,
-    progress,
     messages,
     pending,
     busy,
     stale,
-    probe,
     ask,
     stop,
     newChat,

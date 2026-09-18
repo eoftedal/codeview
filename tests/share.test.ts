@@ -82,6 +82,11 @@ describe('parseFragment', () => {
     expect(parseFragment('#src=a+b&systemprompt=a+b').get('src')).toBe('a+b')
   })
 
+  it('reads the agents bundle as prose too, since it is briefs rather than code', () => {
+    expect(parseFragment('#agents=be+skeptical').get('agents')).toBe('be skeptical')
+    expect(parseFragment('#agents=C%2B%2B+reviewer').get('agents')).toBe('C++ reviewer')
+  })
+
   it('keeps a malformed escape rather than dropping the key', () => {
     expect(parseFragment('#src=100%%20done').get('src')).toBe('100%%20done')
   })

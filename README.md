@@ -64,32 +64,35 @@ would make an import ambiguous, so the second becomes `db-2.ts`.
 
 The fragment is parsed without `URLSearchParams`, which decodes `+` as a space and would
 quietly corrupt hand-written source. A prefixed payload that fails to decode is treated as
-literal too — source starting with `z.` is likelier than a corrupt link. The single exception
-is `systemprompt`, which is prose rather than code and so takes the ordinary reading: `+` is a
-space there, and `%2B` a literal plus.
+literal too — source starting with `z.` is likelier than a corrupt link. The exceptions are
+`systemprompt` and `agents`, which are prose rather than code and so take the ordinary reading:
+`+` is a space there, and `%2B` a literal plus.
 
 ## Parameters
 
 Read from the query string and the fragment alike, the fragment winning where both name a
 key. Key names are case-insensitive, since these get typed by hand.
 
-| Parameter      | Effect                                                                                                          |
-| -------------- | --------------------------------------------------------------------------------------------------------------- |
-| `src`          | the buffer — `z.`/`r.` payload, or literal source                                                               |
-| `lang`         | `ts`, `tsx`, `js` or `jsx`                                                                                      |
-| `filename`     | names the tab; its extension picks the language when `lang` is absent. **Copy link** carries it along           |
-| `hideHeader`   | hides the title bar, language switcher and buttons, for embedding                                               |
-| `systemprompt` | the chat's brief — `z.`/`r.` payload, or literal text. **Copy link** carries it only when you have rewritten it |
+| Parameter      | Effect                                                                                                             |
+| -------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `src`          | the buffer — `z.`/`r.` payload, or literal source                                                                  |
+| `lang`         | `ts`, `tsx`, `js` or `jsx`                                                                                         |
+| `filename`     | names the tab; its extension picks the language when `lang` is absent. **Copy link** carries it along              |
+| `hideHeader`   | hides the title bar, language switcher and buttons, for embedding                                                  |
+| `systemprompt` | the chat's brief — `z.`/`r.` payload, or literal text. **Copy link** carries it only when you have rewritten it    |
+| `agents`       | the agents tab's team, as a `--8<--` bundle — same rules. **Copy link** carries it only when you have rewritten it |
 
 Any of these describes what the link is about, so it opens with those files rather than the
 tabs the reader happened to leave open. Without them, the last session comes back whole;
-the seed buffer arrives as `example.ts`, because every tab needs a name. `systemprompt` is the
-exception on both counts: it says nothing about which files are open, so it leaves the reader's
-tabs alone, and it belongs to the link rather than to the reader — it is not written to
-`localStorage`, so opening someone else's link cannot overwrite a brief you wrote yourself.
-It can be written out in the clear, spaces and all:
+the seed buffer arrives as `example.ts`, because every tab needs a name. `systemprompt` and
+`agents` are the exceptions on both counts: neither says anything about which files are open, so
+they leave the reader's tabs alone, and both belong to the link rather than to the reader — they
+are not written to `localStorage`, so opening someone else's link cannot overwrite a brief or a
+team you wrote yourself. Both can be written out in the clear, spaces and all:
 
     #systemprompt=you+are+a+reviewer+who+only+reports+SQL+injection
+
+    #agents=--8%3C--+orchestrator%0AYou+brief+them.%0A--8%3C--+Scan%0ARead+the+routes.
 
 `hideHeader` needs no value, though `=false`/`=0`/`=no`/`=off` turns it off. It leaves the
 tab strip alone, so an embed can still say which file it is showing:
@@ -267,6 +270,17 @@ control) to **sinks** (queries, shell commands, `eval`, paths, DOM writes) — a
 line. This is the one place the tool is not single-file: the tree and the trace read the active
 tab, but a taint flow usually leaves the file it starts in, so the model gets all of them.
 
+The brief and the code reach the model as different things. The **system prompt** is the brief
+alone; the open files arrive as a **hidden opening turn** of the conversation — a message carrying
+the line-numbered listing, answered with a one-line acknowledgement — before your first question.
+Instructions are instructions and code is data, and the code message says as much in its first
+sentence, so a line written inside a comment reads as part of the file under review rather than as
+part of the brief. It is not sent as a `tool` message: a tool message is a reply to a tool call and
+there is no call to reply to, and of the three model back-ends here one has no tool role at all,
+one cannot render the call the message would answer, and one runs chat templates that reject the
+role outright. The acknowledgement is there because some chat templates refuse two user turns in a
+row.
+
 The **⚙ System prompt** button opens that brief for editing — for another kind of review, another output
 shape, another language. What you write replaces the role and the two definitions; the open files
 are appended below it either way, since they are generated from the editor rather than typed.
@@ -300,6 +314,76 @@ does not rewrite it; the pane says the code has changed and offers a new chat, s
 rebuilding the session would throw the conversation away. Merely switching tabs is not a change:
 it reorders the prompt without altering a line of what is in it. Availability is not probed until the
 tab is first opened.
+
+## Running a line of agents
+
+The **Agents** tab is the same model asked several questions in a row instead of one, with the
+answers carried between them. An **orchestrator** writes each agent's brief; each **agent** reads
+the code and reports back; the orchestrator reads that, briefs the next one, and writes the summary
+at the end. The shipped team is two agents: the chat pane's own reviewer, then a skeptical triage
+pass that rules on what the first one claimed — the second question that makes the first one worth
+asking.
+
+**The orchestrator never sees the code.** Its context is its brief and the roster, and nothing
+else; it can only ever reason about what the agents reported, which is what keeps a summary from
+citing lines nobody read. Every agent sees **every open file**, line-numbered, under its own brief —
+the same system prompt the chat pane builds, with the same budget and the same clipping.
+
+A run of two agents is five turns:
+
+    you          →  the task, as you wrote it
+    Orchestrator →  brief for Review
+    Review       →  report          (sees the files)
+    Orchestrator →  brief for Triage
+    Triage       →  report          (sees the files, and Review's report in full)
+    Orchestrator →  summary
+
+What the run is _about_ is the task you type, not something the orchestrator decides. Its brief
+describes the job — brief an agent, read what comes back, carry it to the next, summarise — and
+says explicitly that the subject is yours to set; the security expertise lives in the agents' own
+briefs, which is the half of the team that can actually read the code. Your task is put in front of
+the orchestrator again with every brief it writes, not just the first, because a task mentioned once
+is one a small model has drifted away from by the second hop.
+
+The relay is **verbatim**, and that is the pane's doing rather than the orchestrator's: the next
+agent is handed the orchestrator's new brief _and_ the previous report copied word for word,
+because a file, a line and a name survive a hand-off only if they are copied. The orchestrator is
+told twice — in its brief and again each time it is asked — that the report travels on its own, so
+it must not summarise, restate or reword a verdict; a model handed a verdict and asked to write
+about it will rewrite it otherwise, and a rewritten verdict arrives contradicting the copy beside it
+in a voice that sounds just as authoritative. Since "told not to" is not a guarantee, the receiving
+agent is also told outright which copy wins: where the brief characterises the report differently,
+the report is what counts. What the orchestrator itself is given is clipped at 6 000 characters, and the
+clip is stated rather than silent.
+
+What does **not** travel is a reasoning model's thinking. The transcript keeps it, folded into the
+row that produced it, but every hop after it is built from the answer alone — working-out is not a
+finding, it invites the next agent to treat a discarded line of thought as one, and a context this
+small is better spent on the code.
+
+The transcript is read at two depths. Your task and the orchestrator's messages are the spine and
+are always open — between them they say what was asked and what came of it. An agent's report is
+the bulk of the text, so it arrives **folded**; open it to read it. What an agent was _handed_ is
+not shown under it, because it is already in the stream: the brief above it, and the report before
+it. The hop in flight is always open — a run is slow, and watching the text arrive is how you know
+it is still going.
+
+The task box is for a run that has not begun. Starting one takes it away, and finishing does not
+bring it back — a run is one task from beginning to end, and a second task typed under the first
+one's findings would be a different run wearing the same transcript. **Clear** hands the box back,
+and drops the transcript it would have been appended to.
+
+The **⚙ Agents** button opens the team: the orchestrator's brief, each agent's brief and name, and
+buttons to add or remove one. The last agent cannot be removed — an orchestrator with nobody to
+brief has no run to make. A rewritten team is remembered between visits, marked on the button, and
+rides **Copy link** as an `agents=` bundle; the shipped team is carried by neither, so a later edit
+to the defaults reaches everyone who never wrote their own. Saving clears the transcript, since it
+was produced by a different set of instructions.
+
+The model picker is **the chat's own**: one selection, one set of weights on the GPU, shared by both
+tabs. Switching between them costs nothing, and changing the model in one changes it in the other —
+which also drops the conversation and the transcript, because both were produced by weights that
+are about to be unloaded.
 
 ## How the panes stay in sync
 

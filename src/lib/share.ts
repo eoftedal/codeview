@@ -27,7 +27,7 @@ async function pipe(bytes: Uint8Array, transform: TransformStream): Promise<Uint
  * The swap happens *before* the percent-decoding, so the two do not eat each other: `%2B` is still
  * `%2B` when the `+`s become spaces, and comes back a plus.
  */
-const PROSE_KEYS = new Set(['systemprompt'])
+const PROSE_KEYS = new Set(['systemprompt', 'agents'])
 
 /**
  * Parsed by hand rather than with `URLSearchParams`, which decodes `+` as a space — that would
@@ -105,8 +105,15 @@ const MARKER = '--8<--'
 
 const MARKER_LINE = /^--8<--\s+(.*)$/
 
+/** One named chunk of a bundle. Files use it; so do the agents' prompts, which are the same
+ *  problem — several named texts that have to survive one link intact. */
+export interface Section {
+  name: string
+  text: string
+}
+
 /**
- * Several files as one payload: a header line per file, then its source, verbatim.
+ * Several texts as one payload: a header line per section, then its body, verbatim.
  *
  *     --8<-- server.ts
  *     import db from './db'
@@ -115,23 +122,21 @@ const MARKER_LINE = /^--8<--\s+(.*)$/
  *
  * One text, so **Copy link** deflates the whole set together — far better than a payload per file,
  * since the second file compresses against the first. The newline before a header belongs to the
- * header, which is what makes the round trip exact for a file that ends without one.
+ * header, which is what makes the round trip exact for a body that ends without one.
  */
-export function serializeFiles(files: readonly { name: string; text: string }[]): string {
-  return files.map((file) => `${MARKER} ${file.name}\n${file.text}`).join('\n')
+export function serializeSections(sections: readonly Section[]): string {
+  return sections.map((section) => `${MARKER} ${section.name}\n${section.text}`).join('\n')
 }
 
-/**
- * The inverse. A payload with no header at all is one unnamed file, so `files=` degrades to
- * exactly what `src=` means and a hand-written link can leave the ceremony out.
- */
-export function parseFiles(payload: string): SharedFile[] {
-  const files: SharedFile[] = []
+/** The inverse. A payload with no header at all has no sections — what the caller makes of that
+ *  differs: a file bundle reads it as plain source, an agent bundle as malformed. */
+export function parseSections(payload: string): Section[] {
+  const sections: Section[] = []
   let name: string | null = null
   let body: string[] = []
 
   const flush = (): void => {
-    if (name !== null) files.push({ name, text: body.join('\n') })
+    if (name !== null) sections.push({ name, text: body.join('\n') })
     body = []
   }
 
@@ -146,6 +151,19 @@ export function parseFiles(payload: string): SharedFile[] {
   }
   flush()
 
+  return sections
+}
+
+export function serializeFiles(files: readonly { name: string; text: string }[]): string {
+  return serializeSections(files)
+}
+
+/**
+ * The file reading of a bundle. A payload with no header at all is one unnamed file, so `files=`
+ * degrades to exactly what `src=` means and a hand-written link can leave the ceremony out.
+ */
+export function parseFiles(payload: string): SharedFile[] {
+  const files = parseSections(payload)
   if (files.length === 0) return payload.length > 0 ? [{ name: null, text: payload }] : []
   return files
 }

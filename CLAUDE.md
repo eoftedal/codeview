@@ -115,7 +115,12 @@ them knows which model is answering. **Two lifetimes, and conflating them is the
 coming back**: a `ModelEngine` owns the loaded weights and outlives conversations, while a
 `ChatSession` is a system prompt and its turns. `newChat` drops the session and keeps the engine —
 destroying the engine per conversation means reloading the model onto the GPU on every "New chat". No key, no
-server, no hosted fallback — every model runs on the reader's machine.
+server, no hosted fallback — every model runs on the reader's machine. That engine is now
+`useModel`'s and not the chat's: **one loaded model for the whole app**, one picker, one `thinking`
+flag, shared with the agents tab, because a conversation and a run are two uses of the same weights
+and a second engine would put the same gigabytes on the GPU twice. Consumers register through
+`onChange` rather than watching `model` themselves — the host calls them _before_ it destroys the
+old engine, so a session is never torn down after the thing underneath it.
 
 Both WebGPU libraries are **dynamically imported inside workers** (`worker: { format: 'es' }`,
 `optimizeDeps.exclude`), so they land in their own chunks and the main bundle is unchanged; check
@@ -171,16 +176,89 @@ did not change. `maxCodeChars` is the budget for all of them together, spent in 
 rather than dropped silently. Staleness is measured in **tab order**, so switching tabs (which only
 reorders the prompt) does not cost a conversation, while an edit, a rename or a close does. The availability probe waits for the tab to be opened.
 
+**The agents tab is the same engine asked in a line instead of once.** `src/lib/agents.ts` is pure —
+the briefs, the message each hop is asked, and the link format — and `useAgents` runs them. **The
+whole design rests on one asymmetry: the orchestrator never sees the code, every sub-agent sees all
+of it.** The orchestrator's session is built from `orchestratorPrompt` (its brief plus the roster)
+and lives for the whole run, accumulating what each agent reported; each agent gets a _fresh_
+session from the same `buildSystemPrompt` the chat uses, and it is destroyed the moment its step
+ends — an agent is one question asked of the files, not a conversation. Five turns for two agents:
+kickoff, agent, relay, agent, summary. The relay is **verbatim** (`handoffMessage` appends the
+previous report word for word) because the orchestrator's paraphrase is exactly where a file, a line
+and a name get lost — and it is defended three times over, since a model shown a verdict and asked
+to write about it rewrites it by default: `DEFAULT_ORCHESTRATOR` forbids restating a report,
+`relayMessage` forbids it again at the point of asking, and `handoffMessage` closes with the line
+that actually settles it — where the brief and the report disagree, the report is authoritative.
+Weakening any of the three is how a "mitigated" reaches the next agent as a "confirmed"; what the _orchestrator_ is given is clipped at `MAX_RELAY_CHARS`, and the clip
+is stated. A run snapshots `promptFiles` once, so two agents cannot disagree about what line 12 says
+because the reader typed in between.
+
+**The subject of a run is the reader's task, and the orchestrator's brief must not compete with
+it.** `DEFAULT_ORCHESTRATOR` deliberately names no review of its own: it describes the job — brief,
+relay, summarise — and says outright that what to look for is the reader's to decide. An earlier
+version opened with "the review you are running is a taint review", and the orchestrator followed
+_that_ instead of the task in the box; a concrete mission in a system prompt beats a task mentioned
+once in a message, every time. The taint vocabulary belongs to the agents, which is where it already
+was (`DEFAULT_ROLE`) — the participant that cannot read a line of code is the last one that should
+be holding opinions about what to look for. `tests/agents.test.ts` asserts the brief stays free of
+`taint` and `sink` for exactly this reason. The task also rides **every** message the orchestrator is
+asked for (`taskBlock`, in kickoff, relay _and_ summary), not just the first: mentioned once, a small
+model has drifted back to whatever its own instructions made salient by the second brief.
+
+**What a step shows and what it passes on are different text.** `speak` keeps the answer whole in
+the transcript — `markdown.ts` folds a `<think>` block into a disclosure, and a reader may want to
+open it — but returns `withoutThoughts(answer)`, and that return value is what the next hop's
+message is built from. Thinking is the model working towards an answer, not the answer: relaying it
+spends a small context window on working-out and invites the next agent to treat a discarded line of
+thought as a finding. An answer that is _only_ thinking therefore returns nothing, which a brief
+recovers from by falling back to the reader's task.
+
+`StepKind` is a rendering contract as much as a data one: `task` and the orchestrator's `brief` /
+`summary` are the spine and always open, an `agent` report arrives folded, and the hop in flight is
+always open — a run is slow, and the streaming text is the only sign it is alive. A step does
+**not** keep what it was handed: a handoff is the brief above it plus the report before it, and both
+are already rows in the same transcript, so storing it would only render the same text twice.
+`tests/e2e/app.test.ts` asserts that shape over `.step.task`, `.step.brief` and `details.report`,
+and checks the relay against what actually reached the model (`__inputs`) rather than against the
+DOM — along with the invariant itself, that the orchestrator's system prompt carries the roster and
+no code while every agent's carries the file.
+
+The team travels the way the chat's brief does and for the same reasons: stored under
+`codeview:agents` **only while it differs** from `defaultTeam()`, read from an `agents=` link
+without being persisted, and written into `copyShareLink` by `App.vue` (never reached for by
+`useBuffer`, which knows nothing about models). It is a `--8<--` bundle — the same text format as
+`files=`, through the same `serializeSections`/`parseSections` — with the orchestrator as the first
+section, whatever its header says. `normalizeTeam` is not cosmetic: a name with a newline in it
+would break the bundle, and two agents answering to one name would leave the orchestrator briefing
+whichever it meant.
+
 Answers are Markdown, rendered by `markdown.ts` → `MarkdownText.vue` → `MarkdownSpans.vue` as
 real elements — never `v-html`, which is what keeps model output from becoming markup. The parser's
 odd-looking rules are deliberate: an unterminated fence is code (a streaming answer is always
 mid-block), emphasis is `*`-only (`_` would italicise `snake_case`), and only `http(s)` targets
 become links.
 
-**Pure vs. impure.** `src/lib/{analyzer,astTree,definitions,files,flow,share}.ts` are pure and
+**The brief is the system prompt; the code is a turn.** `buildSystemPrompt(role)` now returns the
+brief and nothing else, and `buildCodeMessage({files, maxCodeChars})` returns the listing, which
+`ModelEngine.chat(system, code)` seeds as a **hidden opening exchange** — a user turn carrying the
+files, then `CODE_ACK` — ahead of the first real question. Instructions and data are different kinds
+of thing, and a model told which is which is harder to talk out of its brief by something written in
+a comment; the code message says so in its first sentence. **It is not a `tool` message, and that
+was checked rather than assumed**: a tool message answers a tool call and there is none, Chrome's
+Prompt API has no tool role at all (`initialPrompts` is system/user/assistant), WebLLM's
+`ChatCompletionToolMessageParam` demands a `tool_call_id` while MLC drops an assistant turn's
+`tool_calls` when rendering — so the call could never exist — and `apply_chat_template` runs the
+model's own Jinja, which Gemma's has no tool branch in. **`CODE_ACK` is load-bearing, not polite**:
+Gemma's template raises on two user turns in a row, so the seeded history has to stay alternating.
+The agents' orchestrator calls `chat(system)` with no second argument, which is now the whole
+mechanism by which it never sees a file.
+
+**Pure vs. impure.** `src/lib/{agents,analyzer,astTree,definitions,files,flow,share}.ts` are pure and
 unit-tested over fixture strings — the analyzer's fixtures are now _sets_ of files, which is how
 cross-file resolution and cross-file traces are tested; everything else is browser-bound and covered only by the e2e suites.
-`chat.ts` is the mixed case: `buildSystemPrompt`/`numberLines` are pure, `languageModel()` is not.
+`chat.ts` is the mixed case: `buildSystemPrompt`/`numberLines`/`promptFiles`/`describeStatus` are
+pure, the `MODELS` catalogue is data, and only the provider seam is not. `stream.ts` is the shared
+read loop both panes accumulate an answer with.
 
 ## Things that will bite
 

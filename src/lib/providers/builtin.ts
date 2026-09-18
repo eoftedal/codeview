@@ -3,7 +3,14 @@
  * the browser owns the weights. Where the global is missing, this provider is simply unavailable.
  */
 
-import type { Availability, ChatSession, LoadOptions, ModelEngine, Provider } from '../chat'
+import {
+  CODE_ACK,
+  type Availability,
+  type ChatSession,
+  type LoadOptions,
+  type ModelEngine,
+  type Provider,
+} from '../chat'
 
 interface BuiltinCreateOptions {
   initialPrompts?: { role: 'system' | 'user' | 'assistant'; content: string }[]
@@ -42,11 +49,22 @@ export const builtin: Provider = {
     return {
       // Chrome binds the system prompt when the session is made and owns the weights itself, so a
       // new conversation is simply a new session — there is nothing here to reload.
-      async chat(system) {
+      async chat(system, code) {
         // A first run may have to fetch the model, which is large enough that silence looks
         // broken. The monitor is handed over every time, so only real progress reports a download.
         return model.create({
-          initialPrompts: [{ role: 'system', content: system }],
+          // The Prompt API takes a prefilled history, so the code rides in as a turn of its own
+          // rather than as part of the brief. There is no `tool` role here to put it in — and a
+          // tool message would have no tool call to answer anyway.
+          initialPrompts: [
+            { role: 'system', content: system },
+            ...(code
+              ? ([
+                  { role: 'user', content: code },
+                  { role: 'assistant', content: CODE_ACK },
+                ] as const)
+              : []),
+          ],
           monitor: (monitor) => {
             monitor.addEventListener('downloadprogress', (event) => {
               onProgress?.((event as ProgressEvent).loaded)

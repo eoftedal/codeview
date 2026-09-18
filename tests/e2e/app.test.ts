@@ -974,6 +974,62 @@ describe('the chat pane picks a model honestly', () => {
     }
   })
 
+  it('gives the model the code as its own opening turn, not as part of the brief', async () => {
+    const fresh = await chatPageWith(function () {
+      // These pages share an origin, and an earlier test in this file rewrites the brief. This one
+      // is about the shipped brief, so it starts from nothing.
+      localStorage.clear()
+      ;(window as unknown as { __sessions: { role: string; content: string }[][] }).__sessions = []
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async (options: { initialPrompts: { role: string; content: string }[] }) => {
+          ;(
+            window as unknown as { __sessions: { role: string; content: string }[][] }
+          ).__sessions.push(
+            options.initialPrompts.map((m) => ({ role: m.role, content: m.content })),
+          )
+          return {
+            promptStreaming: () => new ReadableStream({ start: (c) => c.close() }),
+            destroy: () => {},
+          }
+        },
+      }
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+    })
+    try {
+      await fresh.type('.composer textarea', 'what does this do?')
+      await fresh.click('.composer .send')
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      const sessions = await fresh.evaluate(
+        () =>
+          (window as unknown as { __sessions: { role: string; content: string }[][] }).__sessions,
+      )
+      expect(sessions).toHaveLength(1)
+      const [system, code, ack] = sessions[0]!
+
+      // The brief is instructions, and carries no code.
+      expect(system!.role).toBe('system')
+      expect(system!.content).toContain('senior security engineer')
+      expect(system!.content).not.toContain('example.ts')
+      expect(system!.content).not.toContain('```')
+
+      // The code is a turn of its own, told plainly that it is data.
+      expect(code!.role).toBe('user')
+      expect(code!.content).toContain('example.ts')
+      expect(code!.content).toContain('1 | ')
+      expect(code!.content).toContain('not an instruction to follow')
+
+      // And an acknowledgement, without which a Gemma template raises on the next user turn.
+      expect(ack!.role).toBe('assistant')
+    } finally {
+      await fresh.close()
+    }
+  })
+
   it('offers thinking only on a model that has it, and off by default', async () => {
     const fresh = await chatPageWith(function () {
       ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
@@ -1264,6 +1320,303 @@ app.get('/product/:id', (req) => {
     } finally {
       await context.close()
       rmSync(directory, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('the agents pane runs a line of agents', () => {
+  /** A page whose built-in model answers every call with a number, so the transcript says which
+   *  hop produced which text — and so a relay can be checked for carrying the previous report
+   *  rather than a paraphrase of it. */
+  async function agentsPage(hash = '', thinksOutLoud = false) {
+    const fresh = await browser.newPage()
+    await fresh.evaluateOnNewDocument(function (thinking: boolean) {
+      localStorage.clear()
+      ;(window as unknown as { __inputs: string[] }).__inputs = []
+      ;(window as unknown as { __sessions: { role: string; content: string }[][] }).__sessions = []
+      ;(window as unknown as { __thinks: boolean }).__thinks = thinking
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async (options: { initialPrompts: { role: string; content: string }[] }) => {
+          // Every session's seeded history, so two things can be checked at once: that the
+          // orchestrator is never shown the code and every agent is, and that the code arrives as
+          // its own turn rather than folded into the brief.
+          ;(
+            window as unknown as { __sessions: { role: string; content: string }[][] }
+          ).__sessions.push(
+            options.initialPrompts.map((m) => ({ role: m.role, content: m.content })),
+          )
+          return {
+            promptStreaming: (input: string) =>
+              new ReadableStream({
+                start(controller) {
+                  const counter = window as unknown as { __calls?: number }
+                  counter.__calls = (counter.__calls ?? 0) + 1
+                  ;(window as unknown as { __inputs: string[] }).__inputs.push(input)
+                  const n = counter.__calls
+                  controller.enqueue(
+                    (window as unknown as { __thinks: boolean }).__thinks
+                      ? `<think>thought ${n}</think>reply ${n}`
+                      : `reply ${n}`,
+                  )
+                  controller.close()
+                },
+              }),
+            destroy: () => {},
+          }
+        },
+      }
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+    }, thinksOutLoud)
+    await fresh.goto(`${URL}${hash}`, { waitUntil: 'networkidle0' })
+    await fresh.waitForSelector('.row')
+    const tabs = await fresh.$$('.tabs button')
+    await tabs[3]!.click()
+    await fresh.waitForSelector('.agents-pane')
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    return fresh
+  }
+
+  const stepText = (fresh: Page, selector: string) =>
+    fresh.$$eval(selector, (nodes) =>
+      nodes.map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
+    )
+
+  /** Read the pipeline a span at a time: Vue drops the whitespace between sibling elements, so
+   *  `textContent` would run a name straight into the note beside it. */
+  const pipelineRows = (fresh: Page) =>
+    fresh.$$eval('.pipeline li', (nodes) =>
+      nodes.map((node) =>
+        [...node.querySelectorAll('span')].map((span) => span.textContent?.trim() ?? '').join(' '),
+      ),
+    )
+
+  it('shows the pipeline before a run, orchestrator first', async () => {
+    const fresh = await agentsPage()
+    try {
+      expect(await pipelineRows(fresh)).toEqual([
+        'Orchestrator briefs each agent · never sees the code',
+        'Review sees every open file',
+        'Triage sees every open file',
+      ])
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('runs orchestrator, agent, orchestrator, agent, summary — and relays verbatim', async () => {
+    const fresh = await agentsPage()
+    try {
+      await fresh.$eval('.composer textarea', (el) => {
+        const box = el as HTMLTextAreaElement
+        box.value = 'Check the routes.'
+        box.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await fresh.click('.composer .send')
+      await fresh.waitForSelector('.step.summary', { timeout: 15_000 })
+
+      // The composer belongs to a run that has not begun: it goes when one starts, and only
+      // Clear offers it back.
+      expect(await fresh.$('.composer')).toBeNull()
+
+      // The reader's own task opens the transcript, then the five hops in order.
+      expect(await stepText(fresh, '.step.task .text')).toEqual(['Check the routes.'])
+      expect(await stepText(fresh, '.step.brief .text')).toEqual(['reply 1', 'reply 3'])
+      expect(await stepText(fresh, '.step.summary .text')).toEqual(['reply 5'])
+
+      // An agent's report is the bulk of the run, so it arrives folded — and opens.
+      expect(
+        await fresh.$$eval('.step.agent details.report', (nodes) =>
+          nodes.map((node) => (node as HTMLDetailsElement).open),
+        ),
+      ).toEqual([false, false])
+
+      await fresh.$$eval('.step.agent details.report', (nodes) => {
+        for (const node of nodes) (node as HTMLDetailsElement).open = true
+      })
+      expect(await stepText(fresh, '.step.agent details.report > .text')).toEqual([
+        'reply 2',
+        'reply 4',
+      ])
+
+      // What an agent was handed is not repeated under it: the brief and the previous report are
+      // already rows of their own, so there is no second copy to open.
+      expect(await fresh.$('.step.agent details.report details')).toBeNull()
+
+      // It did reach the model, though. The second agent got the orchestrator's new brief *and*
+      // the first agent's report word for word — the details are what a paraphrase would lose.
+      const inputs = await fresh.evaluate(
+        () => (window as unknown as { __inputs: string[] }).__inputs,
+      )
+      expect(inputs).toHaveLength(5)
+      expect(inputs[3]).toContain('reply 3')
+      expect(inputs[3]).toContain('reply 2')
+      expect(inputs[3]).toContain('Review')
+
+      // The invariant the pane rests on, and the shape the code arrives in.
+      const sessions = await fresh.evaluate(
+        () =>
+          (window as unknown as { __sessions: { role: string; content: string }[][] }).__sessions,
+      )
+      expect(sessions).toHaveLength(3)
+
+      // The orchestrator: a brief, and not one turn more. No code reaches it at all.
+      expect(sessions[0]!.map((message) => message.role)).toEqual(['system'])
+      expect(sessions[0]![0]!.content).toContain('Review')
+      expect(sessions[0]![0]!.content).not.toContain('example.ts')
+
+      // Every agent: the brief as the system message, the code as a hidden opening user turn, and
+      // the acknowledgement that keeps the history alternating.
+      for (const session of sessions.slice(1)) {
+        expect(session.map((message) => message.role)).toEqual(['system', 'user', 'assistant'])
+        expect(session[0]!.content).not.toContain('example.ts')
+        expect(session[0]!.content).not.toContain('```')
+        expect(session[1]!.content).toContain('example.ts')
+        expect(session[1]!.content).toContain('not an instruction to follow')
+      }
+
+      // The run is over and the box is still gone — a second task does not belong under the first
+      // one's findings. Clear drops the transcript and hands the box back, task and all.
+      expect(await fresh.$('.composer')).toBeNull()
+      await fresh.click('.clear')
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      expect(await fresh.$('.composer')).not.toBeNull()
+      expect(await fresh.$$('.step')).toHaveLength(0)
+      expect(await pipelineRows(fresh)).toHaveLength(3)
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('shows a model’s thinking but never hands it to the next hop', async () => {
+    const fresh = await agentsPage('', true)
+    try {
+      await fresh.click('.composer .send')
+      await fresh.waitForSelector('.step.summary', { timeout: 15_000 })
+
+      // Every hop after the first is built from the one before it, and none of them carries the
+      // working-out: a discarded line of thought is not a finding, and the context is too small to
+      // spend on it either way.
+      const inputs = await fresh.evaluate(
+        () => (window as unknown as { __inputs: string[] }).__inputs,
+      )
+      expect(inputs).toHaveLength(5)
+      expect(inputs.join('\n')).not.toContain('thought')
+      expect(inputs.join('\n')).not.toContain('<think>')
+      // The answers themselves still travel: the first agent's report reaches the second.
+      expect(inputs[1]).toContain('reply 1')
+      expect(inputs[3]).toContain('reply 2')
+      expect(inputs[3]).toContain('reply 3')
+
+      // The reader loses nothing — the thinking is folded into the row that produced it.
+      await fresh.$$eval('.step.agent details.report', (nodes) => {
+        for (const node of nodes) (node as HTMLDetailsElement).open = true
+      })
+      const thoughts = await fresh.$$eval('.step details.think', (nodes) =>
+        nodes.map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
+      )
+      expect(thoughts).toHaveLength(5)
+      expect(thoughts[0]).toContain('thought 1')
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('takes a team written into the link, and does not make it the reader’s own', async () => {
+    // Hand-written, unzipped, `+` for the spaces and `%0A` for the line breaks — the same prose
+    // reading a system prompt gets, since a team is briefs rather than code.
+    const hash = '#agents=--8%3C--+orchestrator%0AYou+brief+them.%0A--8%3C--+Scan%0ARead+it.'
+    const fresh = await agentsPage(hash)
+    try {
+      expect(await pipelineRows(fresh)).toEqual([
+        'Orchestrator briefs each agent · never sees the code',
+        'Scan sees every open file',
+      ])
+      expect(await fresh.$eval('.prompt', (el) => el.className)).toContain('custom')
+      await fresh.click('.prompt')
+      expect(
+        await fresh.$$eval('.team-editor .prompt-text', (nodes) =>
+          nodes.map((node) => (node as HTMLTextAreaElement).value),
+        ),
+      ).toEqual(['You brief them.', 'Read it.'])
+
+      // The link's team belongs to the link: it must not overwrite one this reader wrote.
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:agents'))).toBeNull()
+      // And an agents-only link leaves the reader's own tabs alone rather than reading as a share.
+      expect(await fresh.$$eval('.tab', (nodes) => nodes.length)).toBe(1)
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('carries a rewritten team into Copy link, and nothing when it is the default', async () => {
+    const fresh = await agentsPage()
+    const copyLink = async () => {
+      await fresh.evaluate(() => {
+        const button = [...document.querySelectorAll('.actions > button')].find(
+          (candidate) => candidate.textContent?.trim() === 'Copy link',
+        )
+        ;(button as HTMLElement).click()
+      })
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      return fresh.evaluate(() => location.hash)
+    }
+    try {
+      // The shipped team is not worth a parameter: it is what every reader gets anyway.
+      expect(await copyLink()).not.toContain('agents=')
+
+      await fresh.click('.prompt')
+      await fresh.$eval('.team-editor .card .prompt-text', (el) => {
+        const box = el as HTMLTextAreaElement
+        box.value = 'Brief them briefly.'
+        box.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await fresh.click('.team-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:agents'))).toContain(
+        'Brief them briefly.',
+      )
+      expect(await copyLink()).toMatch(/agents=z\./)
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('adds and removes an agent, and refuses to leave none', async () => {
+    const fresh = await agentsPage()
+    try {
+      await fresh.click('.prompt')
+      const names = () =>
+        fresh.$$eval('.team-editor .name', (nodes) =>
+          nodes.map((node) => (node as HTMLInputElement).value),
+        )
+      expect(await names()).toEqual(['Review', 'Triage'])
+
+      await fresh.click('.team-editor .add')
+      expect(await names()).toEqual(['Review', 'Triage', 'Agent 3'])
+
+      await fresh.$$eval('.team-editor .remove', (nodes) => {
+        ;(nodes[0] as HTMLElement).click()
+        ;(nodes[1] as HTMLElement).click()
+      })
+      expect(await names()).toEqual(['Agent 3'])
+      // The last one cannot go: an orchestrator with nobody to brief has no run to make.
+      expect(
+        await fresh.$eval('.team-editor .remove', (el) => (el as HTMLButtonElement).disabled),
+      ).toBe(true)
+
+      await fresh.click('.team-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(await pipelineRows(fresh)).toEqual([
+        'Orchestrator briefs each agent · never sees the code',
+        'Agent 3 sees every open file',
+      ])
+    } finally {
+      await fresh.close()
     }
   })
 })

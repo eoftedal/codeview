@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
-import { DEFAULT_ROLE, type ModelChoice } from '../lib/chat'
-import type { ChatMessage, ChatStatus } from '../composables/useChat'
+import { DEFAULT_ROLE, describeStatus, type ModelChoice, type ModelStatus } from '../lib/chat'
+import type { ChatMessage } from '../composables/useChat'
 
 const props = defineProps<{
   /** Models this browser can run. Empty means none can, and the pane says only that. */
@@ -14,7 +14,7 @@ const props = defineProps<{
   role: string
   /** Whether that is still the shipped one, which is all a rewritten prompt is marked by. */
   roleIsDefault: boolean
-  status: ChatStatus
+  status: ModelStatus
   progress: number
   messages: ChatMessage[]
   /** The answer streaming in right now, if any. */
@@ -58,23 +58,9 @@ function savePrompt(): void {
   editingPrompt.value = false
 }
 
-const statusLabel = computed(() => {
-  const size = props.choice?.size
-  switch (props.status) {
-    case 'checking':
-      return 'checking this model…'
-    case 'unavailable':
-      return 'this model will not load here'
-    case 'downloadable':
-      return size && size !== 'no download'
-        ? `${size} downloads on the first question, then it is cached`
-        : 'ready on the first question'
-    case 'downloading':
-      return `downloading the model… ${Math.round(props.progress * 100)}%`
-    default:
-      return props.busy ? 'thinking…' : 'ready — running on this machine'
-  }
-})
+const statusLabel = computed(() =>
+  describeStatus(props.status, props.choice, props.busy, props.progress),
+)
 
 function send(question: string = draft.value): void {
   if (props.busy || !question.trim()) return
