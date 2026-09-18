@@ -81,6 +81,39 @@ export interface LoadOptions {
   thinking?: boolean
   /** ONNX quantisation, when the model asks for something other than the default. */
   dtype?: Quantisation
+  /** Sampling to apply over the model's own defaults, on every question. */
+  sampling?: Sampling
+}
+
+/**
+ * Sampling a model's publisher recommends over the defaults its weights ship with. Per model and
+ * in the catalogue on purpose: a figure here has a source — a model card, not a guess — and the
+ * reader is given no knob for it, because a picker that works is the promise and a tuning panel
+ * is not.
+ *
+ * The defaults are not always the publisher's: an MLC build's `mlc-chat-config.json` is what
+ * WebLLM reads when nothing is said, and Qwen3.5's ships `top_p: 1.0` where the model card asks
+ * for 0.95 — the whole distribution at temperature 1, which is where a long thought wanders off
+ * and does not come back. WebLLM's request takes `temperature` and `top_p` but not `top_k` or
+ * `min_p`, so a card's row is translated as far as it goes.
+ *
+ * The two penalties are both ways of discouraging repetition, and they differ in kind.
+ * `repetitionPenalty` is multiplicative and every provider here has it; `presencePenalty` is
+ * additive, OpenAI's flavour, and only WebLLM takes it — the ONNX pipeline has no such knob, so it
+ * is ignored there, as are the two above: that pipeline runs greedy on purpose.
+ */
+export interface Sampling {
+  /** 0 and up. WebLLM only. */
+  temperature?: number
+  /** 0 to 1, 1 off: nucleus sampling. WebLLM only. */
+  topP?: number
+  /** −2 to 2, 0 off. A token already anywhere in the text is discouraged, however often it
+   *  appeared — which is what Qwen recommends against a thinking loop. WebLLM only. */
+  presencePenalty?: number
+  /** Greater than 0, 1 off. Logits of tokens seen so far are divided by it (multiplied when they
+   *  are negative). Blunt: it discourages the code's own identifiers too, which an answer has to
+   *  repeat to cite them, so keep it close to 1. */
+  repetitionPenalty?: number
 }
 
 export interface Provider {
@@ -110,8 +143,42 @@ export interface ModelChoice {
    *  free choice: a repo's `transformers_js_config` names what its weights were validated at, and
    *  fp16 compute is where small models go numerically wrong on WebGPU. */
   dtype?: Quantisation
+  /** Sampling the publisher recommends over the weights' own defaults, where it does. */
+  sampling?: Sampling
   note: string
 }
+
+/**
+ * The Qwen3.5 model card's row for thinking mode on general tasks, as far as WebLLM can carry it
+ * (`top_k=20, min_p=0` have no field): `temperature=1.0, top_p=0.95, presence_penalty=1.5,
+ * repetition_penalty=1.0`. The presence penalty is Qwen's own remedy for a reasoning model that
+ * never stops, with the card's warning that the top of its 0–2 range costs some quality and can
+ * mix languages; the repetition penalty is left where every row of the card leaves it. The card's
+ * other thinking row, for "precise coding", is `temperature=0.6, presence_penalty=0` — closer to
+ * what a review is, but it gives up the anti-loop penalty, and looping is the problem observed.
+ */
+const QWEN3_SAMPLING: Sampling = {
+  temperature: 1.0,
+  topP: 0.95,
+  presencePenalty: 1.5,
+  repetitionPenalty: 1.0,
+}
+
+/**
+ * Qwen2.5-Coder's own `generation_config.json`, which the MLC builds do not carry: their
+ * `mlc-chat-config.json` ships `temperature 1.0, top_p 1.0, repetition_penalty 1.0` where Qwen
+ * released the weights with `temperature 0.7, top_p 0.8, top_k 20, repetition_penalty 1.1`. The
+ * ONNX entry is *not* given this: Transformers.js reads the repo's own file, so the penalty is
+ * already applied there, and the rest is sampling, which that pipeline does not do.
+ */
+const QWEN25_CODER_SAMPLING: Sampling = { temperature: 0.7, topP: 0.8, repetitionPenalty: 1.1 }
+
+/**
+ * Gemma 2's `generation_config.json` names no sampling at all; Google's own recommendation, given
+ * by its staff on the model's discussion board, is `temperature 1.0, top_p 0.95, top_k 64` — the
+ * same figures its later model cards print. The MLC build ships 0.7 and 0.9, which are MLC's.
+ */
+const GEMMA2_SAMPLING: Sampling = { temperature: 1.0, topP: 0.95 }
 
 /**
  * The models on offer. Deliberately a short list: every entry is a promise that it works, and a
@@ -139,6 +206,7 @@ export const MODELS: readonly ModelChoice[] = [
     size: '~1.6 GB',
     maxCodeChars: 14_000,
     model: 'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC',
+    sampling: QWEN25_CODER_SAMPLING,
     note: 'Code-trained weights. Runs on most integrated GPUs.',
   },
   {
@@ -148,6 +216,7 @@ export const MODELS: readonly ModelChoice[] = [
     size: '~1.9 GB',
     maxCodeChars: 14_000,
     model: 'gemma-2-2b-it-q4f16_1-MLC',
+    sampling: GEMMA2_SAMPLING,
     note: 'Google’s, and the one Gemma WebLLM has a build for. Gemma 3 overflows fp16 on WebGPU.',
   },
   {
@@ -158,6 +227,7 @@ export const MODELS: readonly ModelChoice[] = [
     maxCodeChars: 14_000,
     model: 'Qwen3.5-2B-q4f16_1-MLC',
     thinking: true,
+    sampling: QWEN3_SAMPLING,
     note: 'Newer and general-purpose rather than code-trained. Can reason before answering.',
   },
   {
@@ -167,6 +237,7 @@ export const MODELS: readonly ModelChoice[] = [
     size: '~2.5 GB',
     maxCodeChars: 14_000,
     model: 'Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC',
+    sampling: QWEN25_CODER_SAMPLING,
     note: 'Better at following a value across functions.',
   },
   {
@@ -177,6 +248,7 @@ export const MODELS: readonly ModelChoice[] = [
     maxCodeChars: 14_000,
     model: 'Qwen3.5-4B-q4f16_1-MLC',
     thinking: true,
+    sampling: QWEN3_SAMPLING,
     note: 'The strongest reasoning per gigabyte here. Can reason before answering.',
   },
   {
@@ -186,6 +258,7 @@ export const MODELS: readonly ModelChoice[] = [
     size: '~5.1 GB',
     maxCodeChars: 14_000,
     model: 'Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC',
+    sampling: QWEN25_CODER_SAMPLING,
     note: 'Strongest here, and needs a discrete or Apple-silicon GPU.',
   },
   {
@@ -196,6 +269,7 @@ export const MODELS: readonly ModelChoice[] = [
     maxCodeChars: 14_000,
     model: 'Qwen3.5-9B-q4f16_1-MLC',
     thinking: true,
+    sampling: QWEN3_SAMPLING,
     note: 'The largest on offer. Wants a discrete GPU with memory to spare.',
   },
   {
@@ -205,6 +279,8 @@ export const MODELS: readonly ModelChoice[] = [
     size: '~1.2 GB',
     maxCodeChars: 14_000,
     model: 'onnx-community/Qwen2.5-Coder-1.5B-Instruct',
+    // No `sampling`: the repo's `generation_config.json` carries Qwen's `repetition_penalty 1.1`
+    // and the pipeline reads it; the rest of that file is sampling, and the pipeline is greedy.
     note: 'The same weights through Transformers.js rather than WebLLM.',
   },
   {
@@ -214,7 +290,8 @@ export const MODELS: readonly ModelChoice[] = [
     size: '~1.3 GB',
     maxCodeChars: 14_000,
     model: 'onnx-community/glm-edge-1.5b-chat-ONNX',
-    // Its own repo asks for q4 rather than the q4f16 everything else here runs at.
+    // Its own repo asks for q4 rather than the q4f16 everything else here runs at. It publishes
+    // no sampling figures, so there is nothing to carry.
     dtype: 'q4',
     note: 'The only GLM small enough to run here. General-purpose, and slower: it runs at q4.',
   },
@@ -224,6 +301,11 @@ export const MODELS: readonly ModelChoice[] = [
   // text-only: the encoders are never fetched, and the size below is the two files that are —
   // the embeddings and the decoder. Per-layer embeddings are why an “E2B” costs 3 GB: the
   // effective parameters are few, the lookup tables are not.
+  //
+  // No `sampling` on either: the model card's one recommendation is `temperature 1.0, top_p 0.95,
+  // top_k 64` across all use cases, which is sampling, and this pipeline runs greedy on purpose.
+  // It names no repetition penalty. If a thought is ever seen looping under greedy decoding, the
+  // card's row is the thing to try — at the cost of the same answer twice running.
   {
     id: 'gemma-4-e2b',
     provider: 'transformers',

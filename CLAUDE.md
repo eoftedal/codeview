@@ -274,14 +274,36 @@ cross-file resolution and cross-file traces are tested; everything else is brows
 `chat.ts` is the mixed case: `buildSystemPrompt`/`numberLines`/`promptFiles`/`describeStatus` are
 pure, the `MODELS` catalogue is data, and only the provider seam is not. `stream.ts` is the shared
 read loop both panes accumulate an answer with, and it is where an answer learns it was **cut off**:
-the ONNX worker caps generation at one `MAX_NEW_TOKENS` — a ceiling against a model that never
-emits its end of turn, not a per-model figure and not a target, so it is deliberately generous and
-shared between thinking and answer — and reports reaching it on `done`. The stream stays
+both providers cap generation at one `MAX_NEW_TOKENS` (`providers/ceiling.ts`, its own module so
+the ONNX worker's bundle does not pull the catalogue in for a number) — a ceiling against a model
+that never emits its end of turn, not a per-model figure and not a target, so it is deliberately
+generous and shared between thinking and answer. The ONNX worker counts tokens with a stopping
+criterion and reports reaching it on `done`; WebLLM reports `finish_reason: 'length'`, which is
+also what a **full context window** produces — a long thought over a large listing ends there,
+silently, unless it is read. Neither provider has a thinking budget to offer: WebLLM lets no
+assistant prefill through, so a thought cannot be closed early. The stream stays
 `ReadableStream<string>` (the built-in provider hands Chrome's own through untouched), so the flag
 travels beside it as `AskOptions.onTruncated`, which `streamAnswer` installs and returns as
 `Answer.truncated`; both panes append `TRUNCATED_NOTE`, and the agents pane relays it to the next
 hop for the same reason the code listing states its clip. An answer that is only thinking gets no
-note, or the note would be handed on as the whole report.
+note, or the note would be handed on as the whole report. Both providers keep
+`withoutThoughts(answer)` in the history, not the thought: Qwen's and Gemma's own templates drop a
+past turn's reasoning, and in an 8 k window it would otherwise crowd out the next question.
+**Sampling is a catalogue field, not a knob**: `ModelChoice.sampling` carries what a model's
+publisher recommends over its weights' own defaults, rides `LoadOptions` like `dtype`, and is
+applied on every question. It exists because **MLC builds do not carry the publisher's
+`generation_config.json`**: Qwen3.5's and Qwen2.5-Coder's `mlc-chat-config.json` ship `top_p 1.0`
+(and, for Coder, no repetition penalty) where the cards say 0.95 / 0.8 and 1.1, and Gemma 2's
+ships MLC's own 0.7/0.9. So every WebLLM entry names its publisher's row (`QWEN3_SAMPLING`,
+`QWEN25_CODER_SAMPLING`, `GEMMA2_SAMPLING`), each with its source in the comment. The ONNX
+entries name none, and that is not an omission: Transformers.js reads the repo's own
+`generation_config.json` (so ONNX Qwen2.5-Coder already has its 1.1), and the pipeline runs
+greedy, so a card's sampling row has nothing to apply to — GLM-Edge publishes none and Gemma 4's
+card names no penalty. WebLLM takes `temperature`, `top_p`,
+`presence_penalty` and `repetition_penalty` (no `top_k`/`min_p` field); the ONNX pipeline only the
+repetition penalty, since it runs greedy on purpose, so anything else on an ONNX entry is a figure
+nothing reads, and `tests/chat.test.ts` refuses it. Unset means the weights' own config decides —
+each field is spread in only when set, never sent as null.
 
 ## Things that will bite
 

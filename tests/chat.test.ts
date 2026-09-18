@@ -21,6 +21,30 @@ describe('the model catalogue', () => {
     expect(MODELS[0]!.provider).toBe('builtin')
   })
 
+  it('keeps every sampling figure inside what the providers accept', () => {
+    // WebLLM throws on a presence penalty outside −2…2 and a repetition penalty at or below 0 —
+    // at question time, after the download, which is the worst moment to find out.
+    for (const choice of MODELS) {
+      const { temperature, topP, presencePenalty, repetitionPenalty } = choice.sampling ?? {}
+      if (temperature !== undefined) expect(temperature).toBeGreaterThanOrEqual(0)
+      if (topP !== undefined) {
+        expect(topP).toBeGreaterThan(0)
+        expect(topP).toBeLessThanOrEqual(1)
+      }
+      if (presencePenalty !== undefined) {
+        expect(presencePenalty).toBeGreaterThanOrEqual(-2)
+        expect(presencePenalty).toBeLessThanOrEqual(2)
+      }
+      if (repetitionPenalty !== undefined) expect(repetitionPenalty).toBeGreaterThan(0)
+      // Anything but a repetition penalty on an ONNX entry would be a figure nothing reads.
+      if (choice.provider === 'transformers') {
+        expect(temperature).toBeUndefined()
+        expect(topP).toBeUndefined()
+        expect(presencePenalty).toBeUndefined()
+      }
+    }
+  })
+
   it('resolves an id to its provider and model', () => {
     const choice = modelById('qwen-coder-1.5b')
     expect(choice).toMatchObject({

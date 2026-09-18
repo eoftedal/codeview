@@ -14,10 +14,11 @@ import {
   type DataType,
   type TextGenerationPipeline,
 } from '@huggingface/transformers'
+import { MAX_NEW_TOKENS } from './ceiling'
 import { foldChannels } from './thoughts'
 
 export type ToWorker =
-  | { type: 'load'; model: string; dtype?: DataType }
+  | { type: 'load'; model: string; dtype?: DataType; repetitionPenalty?: number }
   | { type: 'ask'; messages: { role: string; content: string }[]; thinking?: boolean }
   | { type: 'stop' }
 
@@ -28,16 +29,6 @@ export type FromWorker =
   /** `truncated`: the answer ended at `MAX_NEW_TOKENS`, not at the model's own end of turn. */
   | { type: 'done'; truncated: boolean }
   | { type: 'error'; message: string }
-
-/**
- * A ceiling, not a target. A model that has finished emits its end of turn long before this, so
- * the figure only matters for one that never does — looping, or reasoning past all use — and it is
- * set where reaching it means exactly that. One number whether thinking or not: the thought is
- * spent from the same budget as the answer, so a ceiling roomy enough for either is roomy enough
- * for both. Reaching it is reported rather than swallowed — an answer cut off mid-sentence is
- * otherwise indistinguishable from one that finished, and it is the pane's job to say which.
- */
-const MAX_NEW_TOKENS = 4096
 
 /** Counts what the model generated. It stops nothing: a stopping criterion is simply the one hook
  *  `generate` offers per token, and the count is how the worker knows, afterwards, whether a run
@@ -53,12 +44,15 @@ class TokenCounter extends StoppingCriteria {
 
 let generator: TextGenerationPipeline | null = null
 let stopper: InterruptableStoppingCriteria | null = null
+/** The catalogue's, when it has one; otherwise the model's own `generation_config` decides. */
+let repetitionPenalty: number | undefined
 
 function post(message: FromWorker): void {
   self.postMessage(message)
 }
 
-async function load(model: string, dtype: DataType): Promise<void> {
+async function load(model: string, dtype: DataType, penalty?: number): Promise<void> {
+  repetitionPenalty = penalty
   generator = await pipeline('text-generation', model, {
     device: 'webgpu',
     // q4f16 is the usual WebGPU build, but it is the model's call, not ours: a repo whose
@@ -97,6 +91,7 @@ async function ask(
     max_new_tokens: MAX_NEW_TOKENS,
     // A security answer should be the same twice running, so no sampling.
     do_sample: false,
+    ...(repetitionPenalty !== undefined ? { repetition_penalty: repetitionPenalty } : {}),
     streamer,
     stopping_criteria: [stopper, counter],
     // The pipeline hands these to `apply_chat_template`, which is where a model's thinking mode is
@@ -112,9 +107,11 @@ async function ask(
 self.onmessage = async (event: MessageEvent<ToWorker>) => {
   const message = event.data
   try {
-    if (message.type === 'load') await load(message.model, message.dtype ?? 'q4f16')
-    else if (message.type === 'ask') await ask(message.messages, message.thinking === true)
-    else if (message.type === 'stop') stopper?.interrupt()
+    if (message.type === 'load') {
+      await load(message.model, message.dtype ?? 'q4f16', message.repetitionPenalty)
+    } else if (message.type === 'ask') {
+      await ask(message.messages, message.thinking === true)
+    } else if (message.type === 'stop') stopper?.interrupt()
   } catch (caught) {
     post({ type: 'error', message: caught instanceof Error ? caught.message : String(caught) })
   }

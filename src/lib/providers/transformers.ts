@@ -35,7 +35,7 @@ export const transformers: Provider = {
     return (await hasGpuAdapter()) ? 'downloadable' : 'unavailable'
   },
 
-  async load({ model, onProgress, dtype }: LoadOptions): Promise<ModelEngine> {
+  async load({ model, onProgress, dtype, sampling }: LoadOptions): Promise<ModelEngine> {
     if (!model) throw new Error('Transformers.js needs a model id.')
 
     const worker = new Worker(new URL('./transformersWorker.ts', import.meta.url), {
@@ -78,7 +78,8 @@ export const transformers: Provider = {
     await new Promise<void>((resolve, reject) => {
       ready = { onToken: () => {}, resolve: () => resolve(), reject }
       worker.onerror = (event) => reject(new Error(event.message || 'The model worker failed.'))
-      send({ type: 'load', model, dtype })
+      // Only the repetition penalty crosses: the pipeline has no presence penalty to give it to.
+      send({ type: 'load', model, dtype, repetitionPenalty: sampling?.repetitionPenalty })
     })
 
     return {

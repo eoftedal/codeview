@@ -138,6 +138,7 @@ export function useModel(): ModelHost {
       model: selected.model,
       thinking: selected.thinking,
       dtype: selected.dtype,
+      sampling: selected.sampling,
       onProgress: (fraction) => {
         progress.value = fraction
         if (fraction < 1) status.value = 'downloading'

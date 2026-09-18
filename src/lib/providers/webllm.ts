@@ -11,6 +11,8 @@ import {
   type ModelEngine,
   type Provider,
 } from '../chat'
+import { MAX_NEW_TOKENS } from './ceiling'
+import { withoutThoughts } from './thoughts'
 import { hasGpuAdapter } from './webgpu'
 
 /** The catalogue defaults these models to 4096 tokens — less than the browser's own model, and too
@@ -27,7 +29,12 @@ export const webllm: Provider = {
     return (await hasGpuAdapter()) ? 'downloadable' : 'unavailable'
   },
 
-  async load({ model, onProgress, thinking: reasons }: LoadOptions): Promise<ModelEngine> {
+  async load({
+    model,
+    onProgress,
+    thinking: reasons,
+    sampling,
+  }: LoadOptions): Promise<ModelEngine> {
     if (!model) throw new Error('WebLLM needs a model id.')
 
     const { CreateWebWorkerMLCEngine, prebuiltAppConfig } = await import('@mlc-ai/web-llm')
@@ -76,28 +83,51 @@ export const webllm: Provider = {
                   const chunks = await engine.chat.completions.create({
                     messages,
                     stream: true,
+                    max_tokens: MAX_NEW_TOKENS,
+                    // Left out rather than sent as null, so the weights' own config still decides
+                    // whatever the catalogue does not.
+                    ...(sampling?.temperature !== undefined
+                      ? { temperature: sampling.temperature }
+                      : {}),
+                    ...(sampling?.topP !== undefined ? { top_p: sampling.topP } : {}),
+                    ...(sampling?.presencePenalty !== undefined
+                      ? { presence_penalty: sampling.presencePenalty }
+                      : {}),
+                    ...(sampling?.repetitionPenalty !== undefined
+                      ? { repetition_penalty: sampling.repetitionPenalty }
+                      : {}),
                     // Only a model with a thinking mode is asked about it either way: WebLLM turns
                     // thinking off by prefilling an empty block, which would corrupt one without.
                     ...(reasons
                       ? { extra_body: { enable_thinking: options?.thinking === true } }
                       : {}),
                   })
+                  // `length` is WebLLM's word for both ends it can run into — the ceiling above,
+                  // and a context window with no room left, which is where a long thought over a
+                  // large listing goes. Either way the model did not finish, and the reader should
+                  // hear it. It rides the closing chunk, whose delta is empty, so it is read first.
+                  let truncated = false
                   for await (const chunk of chunks) {
-                    const delta = chunk.choices[0]?.delta?.content
+                    const choice = chunk.choices[0]
+                    if (choice?.finish_reason === 'length') truncated = true
+                    const delta = choice?.delta?.content
                     if (!delta) continue
                     answer += delta
                     controller.enqueue(delta)
                   }
                   // Whatever was said stays in the history, interrupted or not, so a follow-up
-                  // about "that" still has something to point at.
-                  messages.push({ role: 'assistant', content: answer })
+                  // about "that" still has something to point at — the answer, not the thinking
+                  // before it, which Qwen's own template drops from a past turn too, and which
+                  // would otherwise spend the next question's window on old working-out.
+                  messages.push({ role: 'assistant', content: withoutThoughts(answer) })
                   if (options?.signal?.aborted) {
                     controller.error(new DOMException('Aborted', 'AbortError'))
                   } else {
+                    if (truncated) options?.onTruncated?.()
                     controller.close()
                   }
                 } catch (caught) {
-                  messages.push({ role: 'assistant', content: answer })
+                  messages.push({ role: 'assistant', content: withoutThoughts(answer) })
                   controller.error(caught)
                 } finally {
                   options?.signal?.removeEventListener('abort', onAbort)
