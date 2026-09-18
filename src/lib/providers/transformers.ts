@@ -25,7 +25,8 @@ type Message = { role: 'system' | 'user' | 'assistant'; content: string }
 /** One request in flight at a time, which is all the pane ever asks for. */
 interface Pending {
   onToken: (text: string) => void
-  resolve: () => void
+  /** `truncated`: the worker's ceiling ended the answer, not the model. */
+  resolve: (truncated: boolean) => void
   reject: (error: Error) => void
 }
 
@@ -52,14 +53,14 @@ export const transformers: Provider = {
           onProgress?.(message.loaded)
           break
         case 'ready':
-          ready?.resolve()
+          ready?.resolve(false)
           ready = null
           break
         case 'token':
           pending?.onToken(message.text)
           break
         case 'done':
-          pending?.resolve()
+          pending?.resolve(message.truncated)
           pending = null
           break
         case 'error': {
@@ -75,7 +76,7 @@ export const transformers: Provider = {
     }
 
     await new Promise<void>((resolve, reject) => {
-      ready = { onToken: () => {}, resolve, reject }
+      ready = { onToken: () => {}, resolve: () => resolve(), reject }
       worker.onerror = (event) => reject(new Error(event.message || 'The model worker failed.'))
       send({ type: 'load', model, dtype })
     })
@@ -120,11 +121,14 @@ export const transformers: Provider = {
                     answer += text
                     controller.enqueue(text)
                   },
-                  resolve: () => {
+                  resolve: (truncated) => {
                     finish()
                     if (options?.signal?.aborted) {
                       controller.error(new DOMException('Aborted', 'AbortError'))
                     } else {
+                      // Said before the close, so the reader of the stream learns it before the
+                      // stream tells them there is nothing more.
+                      if (truncated) options?.onTruncated?.()
                       controller.close()
                     }
                   },

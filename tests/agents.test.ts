@@ -14,6 +14,7 @@ import {
   relayMessage,
   serializeTeam,
   summaryMessage,
+  teamModels,
   type AgentSpec,
 } from '../src/lib/agents'
 import { DEFAULT_ROLE } from '../src/lib/chat'
@@ -125,6 +126,78 @@ describe('serializeTeam / parseTeam', () => {
     expect(parseTeam('just some prose')).toBeNull()
     expect(parseTeam('')).toBeNull()
     expect(parseTeam('--8<-- orchestrator\nalone')).toBeNull()
+  })
+})
+
+describe('an agent on a model of its own', () => {
+  it('rides the section header, and only when there is one', () => {
+    const team = {
+      orchestrator: 'Brief them.',
+      agents: [agent('Review'), { ...agent('Triage'), model: 'gemma-4-e4b' }],
+    }
+    const text = serializeTeam(team)
+    expect(text).toContain('--8<-- Review\n')
+    expect(text).toContain('--8<-- Triage @gemma-4-e4b\n')
+    expect(parseTeam(text)?.agents.map(({ name, model }) => ({ name, model }))).toEqual([
+      { name: 'Review' },
+      { name: 'Triage', model: 'gemma-4-e4b' },
+    ])
+  })
+
+  it('reads a hand-written header, spaced either way', () => {
+    const back = parseTeam(
+      '--8<-- orchestrator\nBrief.\n--8<-- Scan @ qwen-coder-3b\nRead.\n--8<-- Check@builtin\nRule.',
+    )
+    expect(back?.agents.map(({ name, model }) => ({ name, model }))).toEqual([
+      { name: 'Scan', model: 'qwen-coder-3b' },
+      { name: 'Check', model: 'builtin' },
+    ])
+  })
+
+  it('keeps a model the catalogue does not know, for the pane to say so', () => {
+    const back = parseTeam('--8<-- orchestrator\nBrief.\n--8<-- Scan @no-such-model\nRead.')
+    expect(back?.agents[0]!.model).toBe('no-such-model')
+  })
+
+  it('makes the shipped team a rewritten one', () => {
+    const team = defaultTeam()
+    team.agents[1]!.model = 'gemma-4-e4b'
+    expect(isDefaultTeam(team)).toBe(false)
+  })
+
+  it('is stripped from a name that would otherwise read as one', () => {
+    const team = normalizeTeam({ orchestrator: 'x', agents: [agent('Ask @ me')] })
+    expect(team.agents[0]!.name).toBe('Ask me')
+    expect(team.agents[0]!.model).toBeUndefined()
+    // And the round trip now holds: the name comes back as the name.
+    expect(parseTeam(serializeTeam(team))?.agents[0]!.name).toBe('Ask me')
+  })
+
+  it('is dropped by normalisation when blank, and kept when set', () => {
+    const team = normalizeTeam({
+      orchestrator: 'x',
+      agents: [
+        { ...agent('A'), model: '  ' },
+        { ...agent('B'), model: 'builtin' },
+      ],
+    })
+    expect(team.agents[0]).not.toHaveProperty('model')
+    expect(team.agents[1]!.model).toBe('builtin')
+  })
+
+  it('is what the team asks the host to keep, each model once', () => {
+    expect(
+      teamModels({
+        orchestrator: 'x',
+        agents: [
+          agent('A'),
+          { ...agent('B'), model: 'gemma-4-e4b' },
+          { ...agent('C'), model: 'gemma-4-e4b' },
+          { ...agent('D'), model: 'builtin' },
+        ],
+      }),
+    ).toEqual(['gemma-4-e4b', 'builtin'])
+    expect(teamModels(defaultTeam())).toEqual([])
   })
 })
 

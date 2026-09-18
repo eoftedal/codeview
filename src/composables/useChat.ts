@@ -8,7 +8,7 @@ import {
 } from '../lib/chat'
 import type { CodeFile } from '../lib/files'
 import { decodeShare, parseParams } from '../lib/share'
-import { isAbort, messageOf, streamAnswer } from '../lib/stream'
+import { isAbort, messageOf, streamAnswer, withTruncatedNote } from '../lib/stream'
 import type { ModelHost } from './useModel'
 
 /** Only written when the reader has actually rewritten the brief: an absent key means the default,
@@ -142,11 +142,10 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
     pending.value = ''
     messages.value = [...messages.value, { id: nextId++, role: 'user', text: trimmed }]
 
-    let answer = ''
     try {
       const active = await ensureSession()
       controller = new AbortController()
-      answer = await streamAnswer(
+      const answer = await streamAnswer(
         active,
         trimmed,
         { signal: controller.signal, thinking: model.thinkingNow() },
@@ -156,14 +155,22 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
       )
       messages.value = [
         ...messages.value,
-        { id: nextId++, role: 'assistant', text: answer.trim() || '(the model returned nothing)' },
+        {
+          id: nextId++,
+          role: 'assistant',
+          // Cut off at the provider's ceiling, the answer says so: it is otherwise a reply that
+          // simply stops mid-sentence, which reads as the model's doing.
+          text: withTruncatedNote(answer) || '(the model returned nothing)',
+        },
       ]
     } catch (caught) {
       const aborted = isAbort(caught)
-      if (aborted && answer.trim()) {
+      // What streamed before the stop is in `pending`, not in a return value that never came.
+      const partial = pending.value.trim()
+      if (aborted && partial) {
         messages.value = [
           ...messages.value,
-          { id: nextId++, role: 'assistant', text: `${answer.trim()}\n\n[stopped]` },
+          { id: nextId++, role: 'assistant', text: `${partial}\n\n[stopped]` },
         ]
       } else if (!aborted) {
         messages.value = [

@@ -30,6 +30,13 @@ export interface AskOptions {
   signal?: AbortSignal
   /** Let a reasoning model think before answering. Ignored by models without a thinking mode. */
   thinking?: boolean
+  /**
+   * Told, before the stream closes, that the answer ended at the provider's own generation ceiling
+   * rather than at the model's end of turn — so a reply cut off mid-sentence is not passed off as
+   * one that finished. Only a provider with such a ceiling ever calls it; the reader's own stop
+   * is an abort, not this.
+   */
+  onTruncated?: () => void
 }
 
 /** One conversation. Providers keep the turns; the pane only ever sees deltas. */

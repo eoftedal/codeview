@@ -94,6 +94,10 @@ team you wrote yourself. Both can be written out in the clear, spaces and all:
 
     #agents=--8%3C--+orchestrator%0AYou+brief+them.%0A--8%3C--+Scan%0ARead+the+routes.
 
+An agent's header may name the model it runs on — `--8<-- Scan @gemma-4-e4b`, using the id from
+the picker's catalogue — and one that does not runs on the model picked for the run. `@` is
+reserved for this and is stripped from names.
+
 `hideHeader` needs no value, though `=false`/`=0`/`=no`/`=off` turns it off. It leaves the
 tab strip alone, so an embed can still say which file it is showing:
 
@@ -384,6 +388,13 @@ The model picker is **the chat's own**: one selection, one set of weights on the
 tabs. Switching between them costs nothing, and changing the model in one changes it in the other —
 which also drops the conversation and the transcript, because both were produced by weights that
 are about to be unloaded.
+
+Each agent can be put on a model of its own, from the same catalogue, in the team editor; the blank
+choice puts it back on the run's. The orchestrator always runs on the picked model. A second model
+is a second set of weights on the GPU, loaded on the first hop that needs it and kept for the next
+run for as long as the team names it — so two agents on the same model share one load, and taking
+the last agent off a model unloads it. A team from a link may name a model this browser cannot run;
+the roster says so, and a run stops at that agent rather than quietly running it on another.
 
 ## How the panes stay in sync
 

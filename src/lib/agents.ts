@@ -22,6 +22,13 @@ export interface AgentSpec {
   name: string
   /** This agent's half of its system prompt. The open files are appended to it. */
   role: string
+  /**
+   * A `ModelChoice.id` this agent runs on instead of the run's own — the picker's model, which
+   * the orchestrator always uses. Absent means the run's. It is kept as an id rather than
+   * resolved, so a team written on a machine that can run a model survives being opened on one
+   * that cannot; whether it can is the run's question, and the pane's to show.
+   */
+  model?: string
 }
 
 export interface AgentTeam {
@@ -53,7 +60,7 @@ When you are asked to brief an agent, reply with the instruction for that agent 
 When you are asked for the final summary, write the result of the review as an answer to the reader's task: what the agents found, each finding in the terms they reported it — if they traced a path through the code, give the path — and then a one-line verdict. Say plainly when nothing was found; an empty review is a result, not a failure. Never report a finding no agent reported, and never cite a file or line number no agent cited.`
 
 /** The second agent's brief: not a second look for bugs, but a ruling on the first look. */
-export const DEFAULT_TRIAGE = `You are a skeptical security reviewer, and your job is triage: deciding which of the findings another reviewer has just reported are real. You are not here to agree. A reviewer who confirms everything is worth nothing, and so is one who dismisses everything.
+export const DEFAULT_TRIAGE = `You are an adversarial security reviewer, and your job is triage: deciding which of the findings another reviewer has just reported are real. You are not here to agree. A reviewer who confirms everything is worth nothing, and so is one who dismisses everything.
 
 You have the code in front of you. Take the findings one at a time:
 
@@ -63,6 +70,8 @@ You have the code in front of you. Take the findings one at a time:
 
 Be hard on vague claims. "User input could be dangerous here", with no source, no sink and no path, is not a finding and does not become one by being repeated. Do not soften a verdict to be agreeable, and do not confirm a finding because it was stated confidently.
 
+You are able to separate a weakness in the code from a real exploitable vulnerability. You will still flag the weakness, but note that it is mitigated in the current state.
+
 Report one entry per finding: the claim in a few words, the verdict in bold, and one or two sentences of reasoning citing file and line. Then, at the end, note anything genuinely dangerous you saw that the first reviewer did not report.`
 
 /** The team a reader starts with: the chat pane's own reviewer, then triage over what it found. */
@@ -71,7 +80,7 @@ export function defaultTeam(): AgentTeam {
     orchestrator: DEFAULT_ORCHESTRATOR,
     agents: [
       { id: createAgentId(), name: 'Review', role: DEFAULT_ROLE },
-      { id: createAgentId(), name: 'Triage', role: DEFAULT_TRIAGE },
+      { id: createAgentId(), name: 'Adversarial Triage', role: DEFAULT_TRIAGE },
     ],
   }
 }
@@ -90,7 +99,9 @@ export function isDefaultTeam(team: AgentTeam): boolean {
   if (team.agents.length !== shipped.agents.length) return false
   return team.agents.every(
     (agent, index) =>
-      agent.name === shipped.agents[index]!.name && agent.role === shipped.agents[index]!.role,
+      agent.name === shipped.agents[index]!.name &&
+      agent.role === shipped.agents[index]!.role &&
+      !agent.model,
   )
 }
 
@@ -99,14 +110,26 @@ export function isDefaultTeam(team: AgentTeam): boolean {
 const ORCHESTRATOR_SECTION = 'orchestrator'
 
 /**
+ * What separates an agent's name from its model in a section header: `--8<-- Triage @gemma-4-e4b`.
+ * Reserved, which is why `normalizeTeam` strips it from names — a name carrying one would be read
+ * back as a shorter name on a model nobody chose.
+ */
+const MODEL_MARK = '@'
+const MODEL_HEADER = /^(.*?)\s*@\s*(\S+)$/
+
+function agentHeader(agent: AgentSpec): string {
+  return agent.model ? `${agent.name} ${MODEL_MARK}${agent.model}` : agent.name
+}
+
+/**
  * The team as one text, in the same `--8<--` bundle format the files travel in, so a link can be
  * written or read by hand. The orchestrator goes first; every section after it is an agent, in the
- * order they run.
+ * order they run. An agent on a model of its own says so in its header.
  */
 export function serializeTeam(team: AgentTeam): string {
   return serializeSections([
     { name: ORCHESTRATOR_SECTION, text: team.orchestrator },
-    ...team.agents.map((agent) => ({ name: agent.name, text: agent.role })),
+    ...team.agents.map((agent) => ({ name: agentHeader(agent), text: agent.role })),
   ])
 }
 
@@ -121,36 +144,55 @@ export function parseTeam(payload: string): AgentTeam | null {
   const [orchestrator, ...agents] = sections
   return {
     orchestrator: orchestrator!.text,
-    agents: agents.map((agent) => ({
-      id: createAgentId(),
-      name: agent.name,
-      role: agent.text,
-    })),
+    agents: agents.map((agent) => {
+      const header = MODEL_HEADER.exec(agent.name)
+      return {
+        id: createAgentId(),
+        name: header ? header[1]! : agent.name,
+        role: agent.text,
+        ...(header ? { model: header[2]! } : {}),
+      }
+    }),
   }
 }
 
 /**
- * The team as it is actually kept: names trimmed to one line, blanks named, duplicates numbered.
+ * The team as it is actually kept: names trimmed to one line, blanks named, duplicates numbered,
+ * and a model kept only where one was actually chosen.
  *
  * A name is not decoration — it goes into the orchestrator's roster, into every brief, and into the
- * link as a section header — so a name with a newline in it would quietly break a bundle, and two
- * agents answering to one name would leave the orchestrator briefing whichever it meant.
+ * link as a section header — so a name with a newline in it would quietly break a bundle, two
+ * agents answering to one name would leave the orchestrator briefing whichever it meant, and a
+ * name holding the model mark would come back out of a link as a different agent on a model of
+ * its own.
  */
 export function normalizeTeam(team: AgentTeam): AgentTeam {
   const taken: string[] = []
   const agents = (team.agents.length > 0 ? team.agents : defaultTeam().agents).map(
     (agent, index) => {
-      const cleaned = agent.name.replace(/\s+/g, ' ').trim() || `Agent ${index + 1}`
+      const cleaned =
+        agent.name.replaceAll(MODEL_MARK, '').replace(/\s+/g, ' ').trim() || `Agent ${index + 1}`
       let name = cleaned
       for (let n = 2; taken.includes(name); n += 1) name = `${cleaned} ${n}`
       taken.push(name)
-      return { id: agent.id || createAgentId(), name, role: agent.role }
+      const model = agent.model?.trim()
+      return {
+        id: agent.id || createAgentId(),
+        name,
+        role: agent.role,
+        ...(model ? { model } : {}),
+      }
     },
   )
   return {
     orchestrator: team.orchestrator.trim() ? team.orchestrator : DEFAULT_ORCHESTRATOR,
     agents,
   }
+}
+
+/** The models a team names for its agents, each once — what has to be loadable for it to run. */
+export function teamModels(team: AgentTeam): string[] {
+  return [...new Set(team.agents.flatMap((agent) => (agent.model ? [agent.model] : [])))]
 }
 
 /** A name for a new agent that is not already on the roster. */

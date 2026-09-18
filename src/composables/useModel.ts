@@ -14,6 +14,14 @@ const THINKING_KEY = 'codeview:chat-thinking'
  * conversation with it, which is why it lives out here where both the chat and the agents can
  * share it. Two composables each loading their own engine would mean the same multi-gigabyte
  * weights sitting on the GPU twice.
+ *
+ * One picked model, then, and everything runs on it — except an agent the reader has put on a
+ * model of its own. Those are the *extras*: loaded here too, so that no other composable ever
+ * holds weights, and kept between runs for the same reason the picked one is kept between
+ * conversations — reloading gigabytes onto the GPU for the next run would be as absurd as doing it
+ * for the next chat. What bounds them is `retain`: the team names the models it uses, and an
+ * extra nobody names any more is unloaded. A reader who assigns a second model has chosen to hold
+ * two; the host's job is to make sure it is never three by accident.
  */
 export interface ModelHost {
   /** The models this browser can actually run, built-in first. Empty means none can. */
@@ -30,14 +38,24 @@ export interface ModelHost {
   probe: () => void
   /** The loaded engine, loading it the first time. */
   engine: () => Promise<ModelEngine>
+  /**
+   * The engine for a given model: the picked one when it is the picked model, otherwise an extra,
+   * loaded the first time and kept. Throws, naming the model, for one this browser cannot run —
+   * a team from a link may name a model this machine has no GPU for, and running the agent on
+   * something else instead would quietly hand the reader a different review than they asked for.
+   */
+  engineFor: (id: string) => Promise<ModelEngine>
+  /** The model ids worth keeping loaded beside the picked one. Any extra not among them is
+   *  unloaded; none of them is loaded by this — that waits for `engineFor`. */
+  retain: (ids: readonly string[]) => void
   /** Say a session was built on it: the status line stops guessing at a download. */
   markAvailable: () => void
   /** Called when the chosen model changes, before the old engine is destroyed, so whoever built a
    *  session on it can drop that session first. */
   onChange: (fn: () => void) => void
-  /** Whether this model has a thinking mode *and* the reader asked for it — what rides a
-   *  question. */
-  thinkingNow: () => boolean
+  /** Whether a model has a thinking mode *and* the reader asked for it — what rides a question.
+   *  The picked model unless another is named. */
+  thinkingNow: (id?: string) => boolean
 }
 
 export function useModel(): ModelHost {
@@ -63,6 +81,12 @@ export function useModel(): ModelHost {
   const progress = ref(0)
 
   let loaded: ModelEngine | null = null
+  /** Engines for the models agents were put on, by id. Never holds the picked model: that is
+   *  `loaded`, and an id is one or the other. */
+  const extras = new Map<string, ModelEngine>()
+  /** What `retain` last asked for, so a picked model on its way out can be kept as an extra when
+   *  an agent still runs on it rather than unloaded and loaded again. */
+  let wanted = new Set<string>()
   let probed = false
   const listeners: (() => void)[] = []
 
@@ -94,6 +118,12 @@ export function useModel(): ModelHost {
         status.value = 'unavailable'
         return
       }
+      // An engine already up — an agent's extra just promoted to the picked model — is available
+      // whatever the provider would say about downloading it.
+      if (loaded) {
+        status.value = 'available'
+        return
+      }
       try {
         status.value = await providerFor(selected.provider).availability()
       } catch {
@@ -102,20 +132,25 @@ export function useModel(): ModelHost {
     })()
   }
 
+  /** Weights onto the GPU, with the download — whichever model's — shown on the one status line. */
+  async function load(selected: ModelChoice): Promise<ModelEngine> {
+    return providerFor(selected.provider).load({
+      model: selected.model,
+      thinking: selected.thinking,
+      dtype: selected.dtype,
+      onProgress: (fraction) => {
+        progress.value = fraction
+        if (fraction < 1) status.value = 'downloading'
+      },
+    })
+  }
+
   async function engine(): Promise<ModelEngine> {
     if (loaded) return loaded
     const selected = choice.value
     if (!selected) throw new Error('No language model is selected.')
     try {
-      loaded = await providerFor(selected.provider).load({
-        model: selected.model,
-        thinking: selected.thinking,
-        dtype: selected.dtype,
-        onProgress: (fraction) => {
-          progress.value = fraction
-          if (fraction < 1) status.value = 'downloading'
-        },
-      })
+      loaded = await load(selected)
     } catch (caught) {
       // A model that will not load is worth saying plainly, but the pane keeps its picker so
       // another one can be tried.
@@ -123,6 +158,38 @@ export function useModel(): ModelHost {
       throw caught
     }
     return loaded
+  }
+
+  async function engineFor(id: string): Promise<ModelEngine> {
+    if (id === model.value) return engine()
+    const held = extras.get(id)
+    if (held) return held
+    const selected = models.value.find((entry) => entry.id === id)
+    if (!selected) {
+      const named = modelById(id)
+      throw new Error(
+        named ? `${named.label} cannot run in this browser.` : `There is no model called “${id}”.`,
+      )
+    }
+    // An extra's download borrows the status line, and gives it back: the line describes the
+    // picked model, which is not what just finished — or failed.
+    const before = status.value
+    try {
+      const extra = await load(selected)
+      extras.set(id, extra)
+      return extra
+    } finally {
+      status.value = before
+    }
+  }
+
+  function retain(ids: readonly string[]): void {
+    wanted = new Set(ids)
+    for (const [id, extra] of extras) {
+      if (wanted.has(id)) continue
+      extra.destroy()
+      extras.delete(id)
+    }
   }
 
   function markAvailable(): void {
@@ -133,18 +200,24 @@ export function useModel(): ModelHost {
     listeners.push(fn)
   }
 
-  function thinkingNow(): boolean {
-    return thinking.value && choice.value?.thinking === true
+  function thinkingNow(id: string = model.value): boolean {
+    return thinking.value && modelById(id)?.thinking === true
   }
 
   // A different model is a different engine and a different conversation: weights, context budget
   // and system prompt all change, and carrying the turns across would be a lie about who said them.
   // Consumers are told first, so their sessions are gone before the engine under them is.
-  watch(model, (id) => {
+  //
+  // The engines themselves change hands rather than being reloaded where they can: the model
+  // picked next may already be loaded as an agent's extra, and the one on its way out may still
+  // be an agent's — `wanted` says so — in which case it becomes an extra instead of being freed.
+  watch(model, (id, previous) => {
     localStorage.setItem(MODEL_KEY, id)
     for (const listener of listeners) listener()
-    loaded?.destroy()
-    loaded = null
+    if (loaded && wanted.has(previous)) extras.set(previous, loaded)
+    else loaded?.destroy()
+    loaded = extras.get(id) ?? null
+    extras.delete(id)
     progress.value = 0
     probed = false
     status.value = 'checking'
@@ -154,6 +227,7 @@ export function useModel(): ModelHost {
   onScopeDispose(() => {
     loaded?.destroy()
     loaded = null
+    retain([])
   })
 
   return {
@@ -165,6 +239,8 @@ export function useModel(): ModelHost {
     progress,
     probe,
     engine,
+    engineFor,
+    retain,
     markAvailable,
     onChange,
     thinkingNow,

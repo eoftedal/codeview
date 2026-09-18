@@ -1,4 +1,4 @@
-import { computed, onScopeDispose, ref, type Ref } from 'vue'
+import { computed, onScopeDispose, ref, watch, type Ref } from 'vue'
 import {
   DEFAULT_TASK,
   defaultTeam,
@@ -11,14 +11,21 @@ import {
   relayMessage,
   serializeTeam,
   summaryMessage,
+  teamModels,
   type AgentSpec,
   type AgentTeam,
 } from '../lib/agents'
-import { buildCodeMessage, buildSystemPrompt, promptFiles, type ChatSession } from '../lib/chat'
+import {
+  buildCodeMessage,
+  buildSystemPrompt,
+  modelById,
+  promptFiles,
+  type ChatSession,
+} from '../lib/chat'
 import type { CodeFile } from '../lib/files'
 import { withoutThoughts } from '../lib/providers/thoughts'
 import { decodeShare, parseParams } from '../lib/share'
-import { isAbort, messageOf, streamAnswer } from '../lib/stream'
+import { isAbort, messageOf, streamAnswer, withTruncatedNote } from '../lib/stream'
 import type { ModelHost } from './useModel'
 
 /** Written only while the team differs from the shipped one, the same rule the chat's brief
@@ -101,6 +108,9 @@ export interface Agents {
  *
  * The model underneath all of them is `useModel`'s one engine, shared with the chat — a run and a
  * conversation are two uses of the same loaded weights, and loading them twice would be absurd.
+ * Unless an agent has been put on a model of its own: then that one runs on the host's extra for
+ * it, loaded on the first hop that needs it and kept by the host for as long as the team names it.
+ * The orchestrator has no such setting — it runs on the picked model, always.
  */
 export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<string>): Agents {
   const params = parseParams(location.search, location.hash)
@@ -126,6 +136,10 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
     else localStorage.setItem(TEAM_KEY, serializeTeam(team.value))
     clear()
   }
+
+  // The models the team names are the ones worth holding on the GPU between runs; an agent taken
+  // off a model, or a team that no longer has it, is what lets the host unload it.
+  watch(team, (current) => model.retain(teamModels(current)), { immediate: true })
 
   /**
    * A team carried by the link, which wins over the stored one — the same order the buffer follows.
@@ -165,14 +179,24 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
    * thinking stripped: it is the model reasoning its way towards the answer, not the answer, and
    * feeding it to the next agent spends a small context window on working-out while inviting the
    * agent to treat a discarded line of thought as a finding.
+   *
+   * One thing *is* the same in both: an answer the provider cut off at its ceiling carries the
+   * note saying so, in the transcript and in what the next hop is handed. The relay is verbatim
+   * precisely so that nothing is lost between agents, and "this report is incomplete" is the last
+   * thing that should be.
    */
-  async function speak(session: ChatSession, step: PendingStep, input: string): Promise<string> {
+  async function speak(
+    session: ChatSession,
+    step: PendingStep,
+    input: string,
+    thinking: boolean = model.thinkingNow(),
+  ): Promise<string> {
     pendingStep.value = step
     pending.value = ''
     const answer = await streamAnswer(
       session,
       input,
-      { signal: controller?.signal, thinking: model.thinkingNow() },
+      { signal: controller?.signal, thinking },
       (text) => {
         pending.value = text
       },
@@ -181,12 +205,13 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
     pendingStep.value = null
     steps.value = [
       ...steps.value,
-      { id: nextId++, ...step, text: answer.trim() || '(this agent returned nothing)' },
+      { id: nextId++, ...step, text: withTruncatedNote(answer) || '(this agent returned nothing)' },
     ]
     // An answer that is *only* thinking — a stopped one, or a model that ran out of room before it
-    // concluded — leaves nothing to pass on, and nothing is what the next hop should get. A brief
-    // falls back to the reader's task; a report relays as the empty report it was.
-    return withoutThoughts(answer)
+    // concluded — leaves nothing to pass on, and nothing is what the next hop should get: a note
+    // on an empty answer would be handed on as the whole of it. A brief falls back to the
+    // reader's task; a report relays as the empty report it was.
+    return withTruncatedNote({ text: withoutThoughts(answer.text), truncated: answer.truncated })
   }
 
   /** Whatever was streamed before a stop or a failure is still worth keeping: half a report says
@@ -228,6 +253,7 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
     pending.value = ''
     pendingStep.value = null
     controller = new AbortController()
+    const { signal } = controller
 
     let orchestrator: ChatSession | null = null
     try {
@@ -241,11 +267,14 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
 
       // One snapshot of the buffer for the whole run: a run takes minutes, and agents disagreeing
       // about what line 12 says because the reader typed in between would be worse than either of
-      // them being a little behind.
-      const code = buildCodeMessage({
-        files: promptFiles(files.value, activeId.value),
-        maxCodeChars: model.choice.value?.maxCodeChars ?? 12_000,
-      })
+      // them being a little behind. The listing is built per agent all the same, because the
+      // budget is the model's — an agent on a model of its own may fit more, or less, of it.
+      const snapshot = promptFiles(files.value, activeId.value)
+      const codeFor = (id: string) =>
+        buildCodeMessage({
+          files: snapshot,
+          maxCodeChars: modelById(id)?.maxCodeChars ?? 12_000,
+        })
 
       // An orchestrator that says nothing would otherwise hand the first agent an empty prompt.
       // The reader's own task is the honest thing to fall back to.
@@ -259,13 +288,22 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
 
       for (let index = 0; index < roster.length; index += 1) {
         const agent = roster[index]!
+        const step: PendingStep = { kind: 'agent', who: agent.name }
+        // Named before its model is asked for, so that a model which will not load — or one this
+        // browser cannot run at all — is filed against the agent that needed it.
+        pendingStep.value = step
+        const modelId = agent.model ?? model.model.value
+        const own = await model.engineFor(modelId)
+        // Loading can take long enough for the reader to have stopped the run in the meantime,
+        // and a signal that was aborted before a question is asked never fires for it.
+        if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
         // A fresh session per agent, and gone as soon as it has answered: an agent is one question
         // asked of the files, not a conversation to come back to.
-        const session = await engine.chat(buildSystemPrompt(agent.role), code)
+        const session = await own.chat(buildSystemPrompt(agent.role), codeFor(modelId))
         const handoff = handoffMessage(brief, previous)
         let output: string
         try {
-          output = await speak(session, { kind: 'agent', who: agent.name }, handoff)
+          output = await speak(session, step, handoff, model.thinkingNow(modelId))
         } finally {
           session.destroy()
         }
@@ -296,6 +334,9 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
       pending.value = ''
       pendingStep.value = null
       controller = null
+      // The team may have changed under a run — a model loaded for a hop is not one it still
+      // names — and what the host keeps should follow the team, not the run.
+      model.retain(teamModels(team.value))
     }
   }
 

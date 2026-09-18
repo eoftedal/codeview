@@ -6,9 +6,16 @@ import {
   defaultTeam,
   serializeTeam,
   untitledAgentName,
+  type AgentSpec,
   type AgentTeam,
 } from '../lib/agents'
-import { DEFAULT_ROLE, describeStatus, type ModelChoice, type ModelStatus } from '../lib/chat'
+import {
+  DEFAULT_ROLE,
+  describeStatus,
+  modelById,
+  type ModelChoice,
+  type ModelStatus,
+} from '../lib/chat'
 import type { AgentStep, PendingStep } from '../composables/useAgents'
 
 const props = defineProps<{
@@ -81,11 +88,37 @@ function removeAgent(id: string): void {
   draft.value.agents = draft.value.agents.filter((agent) => agent.id !== id)
 }
 
+/** Put an agent on a model of its own, or — the blank choice — back on the run's. */
+function setAgentModel(agent: AgentSpec, id: string): void {
+  if (id) agent.model = id
+  else delete agent.model
+}
+
+/** A model's name for the roster and the editor; the bare id when the catalogue no longer has it,
+ *  which a hand-written link can do. */
+function labelFor(id: string): string {
+  return modelById(id)?.label ?? id
+}
+
+/** Whether a model an agent names is one this browser offers. A team from a link, or from a
+ *  session on another machine, may name one it does not — that is shown, not silently swapped. */
+function usable(id: string): boolean {
+  return props.models.some((option) => option.id === id)
+}
+
 const draftChanged = computed(() => serializeTeam(draft.value) !== serializeTeam(props.team))
 const draftIsDefault = computed(() => serializeTeam(draft.value) === serializeTeam(defaultTeam()))
 
 const statusLabel = computed(() =>
   describeStatus(props.status, props.choice, props.running, props.progress, 'running…'),
+)
+
+/** The thinking switch is offered when any model in the run can think — the picked one, or one
+ *  an agent was put on. It applies to each hop whose model has the mode. */
+const offersThinking = computed(
+  () =>
+    props.choice?.thinking === true ||
+    props.team.agents.some((agent) => agent.model && modelById(agent.model)?.thinking === true),
 )
 
 /** What a row says about itself beside the name: who a brief is for, that a summary is one, that
@@ -158,7 +191,7 @@ watch(
             </option>
           </select>
           <label
-            v-if="choice?.thinking"
+            v-if="offersThinking"
             class="reason"
             title="Let the model reason before it answers. Slower, and the reasoning is kept out of the way."
           >
@@ -202,7 +235,8 @@ watch(
         <p class="hint">
           The orchestrator is briefed on the roster, never on the code — it only ever sees what the
           agents report. Every agent below is given all the open files, line-numbered, under its own
-          brief.
+          brief, and runs on the orchestrator's model unless given one of its own — which is a
+          second model held on the GPU.
         </p>
 
         <div class="scroll">
@@ -224,6 +258,28 @@ watch(
                 aria-label="Agent name"
                 :placeholder="`Agent ${index + 1}`"
               />
+              <!-- The blank choice is the way back: an agent on the run's model has no model of
+                   its own, rather than a copy of the picker's that would go stale when it moves. -->
+              <select
+                class="agent-model"
+                :class="{ own: agent.model }"
+                :value="agent.model ?? ''"
+                :title="
+                  agent.model
+                    ? 'This agent runs on a model of its own'
+                    : 'This agent runs on the orchestrator’s model'
+                "
+                aria-label="Model for this agent"
+                @change="setAgentModel(agent, ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="">Same model as the orchestrator</option>
+                <option v-if="agent.model && !usable(agent.model)" :value="agent.model">
+                  {{ labelFor(agent.model) }} · not available here
+                </option>
+                <option v-for="option in models" :key="option.id" :value="option.id">
+                  {{ option.label }} · {{ option.size }}
+                </option>
+              </select>
               <span class="role-note">sees all files</span>
               <button
                 class="remove"
@@ -267,6 +323,10 @@ watch(
             <li v-for="agent in team.agents" :key="agent.id">
               <span class="who">{{ agent.name }}</span>
               <span class="role-note">sees every open file</span>
+              <span v-if="agent.model" class="role-note" :class="{ missing: !usable(agent.model) }">
+                · on {{ labelFor(agent.model)
+                }}{{ usable(agent.model) ? '' : ', which this browser cannot run' }}
+              </span>
             </li>
           </ol>
         </div>
@@ -590,6 +650,34 @@ button:disabled {
 .remove {
   padding: 2px 7px;
   line-height: 1.4;
+}
+
+.agent-model {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 180px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--dim);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 4px;
+  cursor: pointer;
+}
+
+.agent-model.own {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.agent-model:hover {
+  border-color: var(--accent);
+}
+
+.role-note.missing {
+  color: var(--danger);
+  opacity: 1;
 }
 
 .card .prompt-text {

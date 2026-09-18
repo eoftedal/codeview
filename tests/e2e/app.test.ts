@@ -1619,6 +1619,104 @@ describe('the agents pane runs a line of agents', () => {
       await fresh.close()
     }
   })
+
+  it('puts an agent on a model of its own, and takes it off again', async () => {
+    const fresh = await agentsPage()
+    const pick = async (index: number, id: string) => {
+      await fresh.$$eval(
+        '.team-editor .agent-model',
+        (nodes, i, value) => {
+          const select = nodes[i] as HTMLSelectElement
+          select.value = value
+          select.dispatchEvent(new Event('change', { bubbles: true }))
+        },
+        index,
+        id,
+      )
+      await fresh.click('.team-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+    try {
+      await fresh.click('.prompt')
+      // Every agent starts on the run's model — the blank choice — with the GPU's whole
+      // catalogue on offer beside it.
+      expect(
+        await fresh.$$eval('.team-editor .agent-model', (nodes) =>
+          nodes.map((node) => (node as HTMLSelectElement).value),
+        ),
+      ).toEqual(['', ''])
+      expect(
+        await fresh.$eval('.team-editor .agent-model', (node) =>
+          [...(node as HTMLSelectElement).options].map((option) => option.value),
+        ),
+      ).toContain('qwen-coder-1.5b')
+
+      await pick(1, 'qwen-coder-1.5b')
+      const rows = await pipelineRows(fresh)
+      expect(rows[1]).toMatch(/sees every open file$/)
+      expect(rows[2]).toMatch(/sees every open file · on Qwen2\.5-Coder 1\.5B$/)
+      // It travels in the header of the agent's section, so a stored or linked team keeps it.
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:agents'))).toMatch(
+        /^--8<-- [^\n]+ @qwen-coder-1\.5b$/m,
+      )
+      // And a model alone makes the team worth a link: Copy link carries it, and a fresh page
+      // opened on that link — the reader's own storage empty — shows the same roster.
+      await fresh.evaluate(() => {
+        const button = [...document.querySelectorAll('.actions > button')].find(
+          (candidate) => candidate.textContent?.trim() === 'Copy link',
+        )
+        ;(button as HTMLElement).click()
+      })
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      const hash = await fresh.evaluate(() => location.hash)
+      expect(hash).toMatch(/agents=z\./)
+      const opened = await agentsPage(hash)
+      try {
+        expect((await pipelineRows(opened))[2]).toMatch(
+          /sees every open file · on Qwen2\.5-Coder 1\.5B$/,
+        )
+        expect(await opened.evaluate(() => localStorage.getItem('codeview:agents'))).toBeNull()
+      } finally {
+        await opened.close()
+      }
+
+      // Back to the run's model: the team is the shipped one again, and is not stored as such.
+      await fresh.click('.prompt')
+      expect(
+        await fresh.$$eval('.team-editor .agent-model', (nodes) =>
+          nodes.map((node) => (node as HTMLSelectElement).value),
+        ),
+      ).toEqual(['', 'qwen-coder-1.5b'])
+      await pick(1, '')
+      expect((await pipelineRows(fresh))[2]).toMatch(/sees every open file$/)
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:agents'))).toBeNull()
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('shows a linked model this browser cannot run rather than swapping it', async () => {
+    const hash =
+      '#agents=--8%3C--+orchestrator%0AYou+brief+them.%0A--8%3C--+Scan+%40no-such-model%0ARead+it.'
+    const fresh = await agentsPage(hash)
+    try {
+      expect(await pipelineRows(fresh)).toEqual([
+        'Orchestrator briefs each agent · never sees the code',
+        'Scan sees every open file · on no-such-model, which this browser cannot run',
+      ])
+      await fresh.click('.prompt')
+      expect(
+        await fresh.$eval('.team-editor .agent-model', (node) => (node as HTMLSelectElement).value),
+      ).toBe('no-such-model')
+      expect(
+        await fresh.$eval('.team-editor .agent-model', (node) =>
+          (node as HTMLSelectElement).selectedOptions[0]?.textContent?.trim(),
+        ),
+      ).toBe('no-such-model · not available here')
+    } finally {
+      await fresh.close()
+    }
+  })
 })
 
 describe('runtime health', () => {

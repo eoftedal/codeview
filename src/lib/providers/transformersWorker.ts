@@ -8,6 +8,7 @@
 
 import {
   InterruptableStoppingCriteria,
+  StoppingCriteria,
   TextStreamer,
   pipeline,
   type DataType,
@@ -24,13 +25,31 @@ export type FromWorker =
   | { type: 'progress'; loaded: number }
   | { type: 'ready' }
   | { type: 'token'; text: string }
-  | { type: 'done' }
+  /** `truncated`: the answer ended at `MAX_NEW_TOKENS`, not at the model's own end of turn. */
+  | { type: 'done'; truncated: boolean }
   | { type: 'error'; message: string }
 
-const MAX_NEW_TOKENS = 640
-/** A thought is spent before the answer begins, so thinking gets its own, larger budget — a model
- *  cut off mid-reasoning has said nothing at all. */
-const MAX_THINKING_TOKENS = 1280
+/**
+ * A ceiling, not a target. A model that has finished emits its end of turn long before this, so
+ * the figure only matters for one that never does — looping, or reasoning past all use — and it is
+ * set where reaching it means exactly that. One number whether thinking or not: the thought is
+ * spent from the same budget as the answer, so a ceiling roomy enough for either is roomy enough
+ * for both. Reaching it is reported rather than swallowed — an answer cut off mid-sentence is
+ * otherwise indistinguishable from one that finished, and it is the pane's job to say which.
+ */
+const MAX_NEW_TOKENS = 4096
+
+/** Counts what the model generated. It stops nothing: a stopping criterion is simply the one hook
+ *  `generate` offers per token, and the count is how the worker knows, afterwards, whether a run
+ *  ended at the ceiling or at the model's own end of turn. */
+class TokenCounter extends StoppingCriteria {
+  generated = 0
+
+  override _call(input_ids: number[][]): boolean[] {
+    this.generated += 1
+    return input_ids.map(() => false)
+  }
+}
 
 let generator: TextGenerationPipeline | null = null
 let stopper: InterruptableStoppingCriteria | null = null
@@ -73,17 +92,21 @@ async function ask(
     },
   })
 
+  const counter = new TokenCounter()
   await generator(messages as Parameters<TextGenerationPipeline>[0], {
-    max_new_tokens: thinking ? MAX_THINKING_TOKENS : MAX_NEW_TOKENS,
+    max_new_tokens: MAX_NEW_TOKENS,
     // A security answer should be the same twice running, so no sampling.
     do_sample: false,
     streamer,
-    stopping_criteria: stopper,
+    stopping_criteria: [stopper, counter],
     // The pipeline hands these to `apply_chat_template`, which is where a model's thinking mode is
     // turned on — a template without the variable simply ignores it.
     ...(thinking ? { tokenizer_encode_kwargs: { enable_thinking: true } } : {}),
   })
-  post({ type: 'done' })
+  // Generation ends three ways — the model's end of turn, the reader's stop, or the ceiling — and
+  // only the last is a cut-off. The reader's stop is an abort on the other side of the worker
+  // boundary, whatever the count says.
+  post({ type: 'done', truncated: !stopper.interrupted && counter.generated >= MAX_NEW_TOKENS })
 }
 
 self.onmessage = async (event: MessageEvent<ToWorker>) => {

@@ -229,8 +229,23 @@ without being persisted, and written into `copyShareLink` by `App.vue` (never re
 `useBuffer`, which knows nothing about models). It is a `--8<--` bundle — the same text format as
 `files=`, through the same `serializeSections`/`parseSections` — with the orchestrator as the first
 section, whatever its header says. `normalizeTeam` is not cosmetic: a name with a newline in it
-would break the bundle, and two agents answering to one name would leave the orchestrator briefing
-whichever it meant.
+would break the bundle, two agents answering to one name would leave the orchestrator briefing
+whichever it meant, and a name holding `@` would come back out of a link as a shorter name on a
+model nobody chose — because **an agent's model rides its header**: `--8<-- Triage @gemma-4-e4b`.
+`AgentSpec.model` is a catalogue id, absent for "the run's model", and it is kept as an id rather
+than resolved so a team survives a machine that cannot run what it names; `engineFor` then throws
+naming the model, filed against the agent, rather than running it on something else.
+
+**Per-agent models are the one exception to "one loaded model", and `useModel` still owns every
+engine.** The picked engine is `loaded`; an agent's is an _extra_, loaded by `engineFor` on the
+first hop that needs it and kept across runs for the same reason the picked one is kept across
+chats. What bounds the extras is `retain`: `useAgents` watches the team and hands the host
+`teamModels(team)`, and an extra nobody names is unloaded — re-asserted in `run`'s `finally`, since
+a team can change under a run. Engines change hands rather than reloading where they can: the
+`model` watcher promotes an extra that becomes the picked model and demotes a picked model that an
+agent still names (`wanted`). The orchestrator has no model setting and never will — it runs on the
+picked model, and the picker is still the chat's own. `thinkingNow(id)` and `maxCodeChars` are
+looked up per agent for the same reason; the code _snapshot_ is still one per run.
 
 Answers are Markdown, rendered by `markdown.ts` → `MarkdownText.vue` → `MarkdownSpans.vue` as
 real elements — never `v-html`, which is what keeps model output from becoming markup. The parser's
@@ -258,7 +273,15 @@ unit-tested over fixture strings — the analyzer's fixtures are now _sets_ of f
 cross-file resolution and cross-file traces are tested; everything else is browser-bound and covered only by the e2e suites.
 `chat.ts` is the mixed case: `buildSystemPrompt`/`numberLines`/`promptFiles`/`describeStatus` are
 pure, the `MODELS` catalogue is data, and only the provider seam is not. `stream.ts` is the shared
-read loop both panes accumulate an answer with.
+read loop both panes accumulate an answer with, and it is where an answer learns it was **cut off**:
+the ONNX worker caps generation at one `MAX_NEW_TOKENS` — a ceiling against a model that never
+emits its end of turn, not a per-model figure and not a target, so it is deliberately generous and
+shared between thinking and answer — and reports reaching it on `done`. The stream stays
+`ReadableStream<string>` (the built-in provider hands Chrome's own through untouched), so the flag
+travels beside it as `AskOptions.onTruncated`, which `streamAnswer` installs and returns as
+`Answer.truncated`; both panes append `TRUNCATED_NOTE`, and the agents pane relays it to the next
+hop for the same reason the code listing states its clip. An answer that is only thinking gets no
+note, or the note would be handed on as the whole report.
 
 ## Things that will bite
 
