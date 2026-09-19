@@ -217,7 +217,7 @@ function onFilePicked(event: Event): void {
   <div class="app">
     <header v-if="!hideHeader" class="app-bar">
       <h1>codeview</h1>
-      <p class="tagline">cursor ↔ AST, definitions, traces, and a local model</p>
+      <p class="tagline">AST, tracing, and local models</p>
 
       <div class="actions">
         <div class="languages">
