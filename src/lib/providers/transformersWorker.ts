@@ -15,10 +15,18 @@ import {
   type TextGenerationPipeline,
 } from '@huggingface/transformers'
 import { MAX_NEW_TOKENS } from './ceiling'
+import { sessionDevices } from './devices'
 import { foldChannels } from './thoughts'
 
 export type ToWorker =
-  | { type: 'load'; model: string; dtype?: DataType; repetitionPenalty?: number }
+  | {
+      type: 'load'
+      model: string
+      dtype?: DataType
+      repetitionPenalty?: number
+      /** Put `embed_tokens` on the CPU, leaving the GPU to the decoder alone. */
+      cpuEmbeddings?: boolean
+    }
   | { type: 'ask'; messages: { role: string; content: string }[]; thinking?: boolean }
   | { type: 'stop' }
 
@@ -51,10 +59,15 @@ function post(message: FromWorker): void {
   self.postMessage(message)
 }
 
-async function load(model: string, dtype: DataType, penalty?: number): Promise<void> {
+async function load(
+  model: string,
+  dtype: DataType,
+  penalty?: number,
+  cpuEmbeddings = false,
+): Promise<void> {
   repetitionPenalty = penalty
   generator = await pipeline('text-generation', model, {
-    device: 'webgpu',
+    device: sessionDevices(cpuEmbeddings),
     // q4f16 is the usual WebGPU build, but it is the model's call, not ours: a repo whose
     // `transformers_js_config` asks for q4 means its fp16 path was never sound.
     dtype,
@@ -108,7 +121,12 @@ self.onmessage = async (event: MessageEvent<ToWorker>) => {
   const message = event.data
   try {
     if (message.type === 'load') {
-      await load(message.model, message.dtype ?? 'q4f16', message.repetitionPenalty)
+      await load(
+        message.model,
+        message.dtype ?? 'q4f16',
+        message.repetitionPenalty,
+        message.cpuEmbeddings,
+      )
     } else if (message.type === 'ask') {
       await ask(message.messages, message.thinking === true)
     } else if (message.type === 'stop') stopper?.interrupt()

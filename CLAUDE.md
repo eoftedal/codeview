@@ -175,7 +175,19 @@ instantiates `Gemma4ForCausalLM` against weights whose architecture is
 `embed_tokens` plus `decoder_model_merged` alone — never the vision or audio encoder. Nothing in
 the provider knows this; it falls out of the repo's own config, which is also where the external
 data chunk counts come from. Their size figures are those two files, and it is the per-layer
-embeddings, not the 2.3B effective parameters, that make an "E2B" a 3 GB download.
+embeddings, not the 2.3B effective parameters, that make an "E2B" a 3 GB download. That split is also
+a **lever on GPU memory**, and the only one those entries have: at q4f16 `embed_tokens` is 1.59 GB
+against the decoder's 1.52 on E2B (2.02 against 2.89 on E4B), and it is a lookup table rather than
+arithmetic, so `ModelChoice.cpuEmbeddings` runs it on the CPU and leaves the GPU to the decoder
+alone. It is **off everywhere** — what it costs is `inputs_embeds` and `per_layer_inputs` crossing
+from CPU to GPU on every token, and that has not been measured — so it exists to be flipped on an
+entry and timed, not as a default. The record it builds lives in `providers/devices.ts`, its own
+module for `ceiling.ts`'s reason, and the rule it encodes is the trap: Transformers.js dispatches a
+device record per session **file**, and a file the record does not name falls back to the library's
+default, which in a browser is `wasm` — so `SPLIT_SESSIONS` names _both_ sessions, or moving the
+embeddings would take the decoder to the CPU with them. That is also why the field is only
+meaningful on the Gemma 4 entries: every other ONNX model here is single-session (`model`), with
+nothing to split and nothing to name. `tests/chat.test.ts` holds both halves.
 
 The thinking prefill comes back in the answer, so `markdown.ts` parses `<think>` as a block kind: empty means protocol and is
 dropped, non-empty is folded into a `<details>`, and an unterminated one is thinking-in-progress. `useChat` lives in `App.vue`, not in `ChatPane.vue`,
@@ -264,6 +276,21 @@ model nobody chose — because **an agent's model rides its header**: `--8<-- Tr
 `AgentSpec.model` is a catalogue id, absent for "the run's model", and it is kept as an id rather
 than resolved so a team survives a machine that cannot run what it names; `engineFor` then throws
 naming the model, filed against the agent, rather than running it on something else.
+
+**The hunters are a shelf, not a mode.** `src/lib/hunters.ts` is one `Record<string, string>` —
+the name the picker shows, the complete system prompt — built from a shared opening and closing
+around the per-class half in `FOCUS`, so a change to how a finding is reported is one edit rather
+than fifteen. Both panes offer them (`ChatPane`'s settings panel, and every agent card in
+`AgentsPane`, where the two shipped briefs sit in the same select), and picking one **only writes
+the textarea**: there is no hunter id kept, no new key in a link and nothing downstream that knows
+a brief came from here — an edited hunter is simply a brief of the reader's own, which is why the
+select shows a name only while the text still equals that brief exactly and says _your own wording_
+otherwise. They are deliberately shorter than `DEFAULT_ROLE` and capped at `HUNTER_CHAR_CAP`: brief
+and code share one window, and a reviewer that already knows the class it is hunting does not need
+`REVIEWER_BRIEF`'s vocabulary lesson. Two invariants `tests/hunters.test.ts` holds: each carries the
+citation-and-honesty rules (check the name is on the line, one numbered step per hop, say plainly
+when nothing is found) and hunts one class only — and none may contain a `--8<--` line, since a
+hunter usually ends up as an agent's role and rides a team bundle.
 
 **The context window is a catalogue field, and the budgets follow it.** WebLLM's MLC list compiles
 every model here to a 4 096-token override, and `ModelChoice.contextTokens` is what it actually runs

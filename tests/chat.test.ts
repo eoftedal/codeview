@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { SPLIT_SESSIONS, sessionDevices } from '../src/lib/providers/devices'
 import {
   DEFAULT_ROLE,
   MODELS,
@@ -97,6 +98,32 @@ describe('the model catalogue', () => {
     expect(modelById('qwen3.5-4b')?.contextTokens).toBeGreaterThan(
       modelById('qwen-coder-3b')?.contextTokens ?? 0,
     )
+  })
+
+  it('splits sessions across devices only where there are sessions to split', () => {
+    // `cpuEmbeddings` builds a per-session device record, and only a Gemma 4 text-only load has
+    // the two sessions that record names. A single-session model (`model`) given one would have
+    // every session fall through to the default device and land on the CPU entire.
+    for (const choice of MODELS) {
+      if (!choice.cpuEmbeddings) continue
+      expect(choice.provider).toBe('transformers')
+      expect(choice.model).toMatch(/gemma-4/i)
+    }
+  })
+
+  it('names every session in the split, since an unnamed one silently falls back to the CPU', () => {
+    // The trap in Transformers.js: a record is dispatched per session file, and a file the record
+    // does not name goes to the library's default device — `wasm` in a browser — with only an
+    // info log. Moving the embeddings must not take the decoder with them.
+    expect(sessionDevices(false)).toBe('webgpu')
+    expect(sessionDevices(true)).toEqual({
+      embed_tokens: 'wasm',
+      decoder_model_merged: 'webgpu',
+    })
+    expect(Object.keys(SPLIT_SESSIONS).sort()).toEqual(['decoder_model_merged', 'embed_tokens'])
+    // One on each side, or it is not a split.
+    expect(Object.values(SPLIT_SESSIONS)).toContain('webgpu')
+    expect(Object.values(SPLIT_SESSIONS)).toContain('wasm')
   })
 
   it('gives a model more code the wider its window', () => {

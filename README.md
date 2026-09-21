@@ -297,6 +297,18 @@ one to add, and nothing when the brief is the shipped one, which every reader ha
 end can be written by hand — see [Parameters](#parameters) — so one link can hand someone the code
 and the question to ask about it.
 
+**Start from** beside the box is a shelf of briefs to begin with: the shipped one, and fifteen
+**hunters** — one per classic class, from SQL injection and XSS through SSRF, path traversal,
+BOLA/IDOR, mass assignment and prototype pollution to unsafe deserialization, open redirect, CSRF,
+authentication and weak crypto (`src/lib/hunters.ts`). Each is a complete brief naming that class's
+sinks, what actually removes the problem, and the traps on both sides — the pattern that hides a
+real finding, and the one that turns a safe line into a false report. They are deliberately
+_shorter_ than the shipped brief: a reviewer that already knows what it is hunting needs no
+vocabulary lesson, and the characters saved are characters of your code that fit in the window
+instead. Picking one only writes the box; what you do to it afterwards is yours, and it is stored
+and shared like any brief you typed. The picker shows a name only while the text is still exactly
+that brief — edit a word and it says _your own wording_, because by then it is.
+
 The 12 000-character budget covers them together, spent in order with the file on screen first,
 so what gets clipped is code you are not looking at. A clip is stated in the prompt — a model
 shown half a file should know it — and a file the budget could not reach is named rather than
@@ -378,7 +390,9 @@ one's findings would be a different run wearing the same transcript. **Clear** h
 and drops the transcript it would have been appended to.
 
 The **⚙ Agents** button opens the team: the orchestrator's brief, each agent's brief and name, and
-buttons to add or remove one. The last agent cannot be removed — an orchestrator with nobody to
+buttons to add or remove one. Each agent's brief has the same **Start from** shelf the chat pane
+has, with the two shipped briefs beside the hunters — which is how a team is built out of both: an
+agent hunting one class, and triage ruling on what it reported. The last agent cannot be removed — an orchestrator with nobody to
 brief has no run to make. A rewritten team is remembered between visits, marked on the button, and
 rides **Copy link** as an `agents=` bundle; the shipped team is carried by neither, so a later edit
 to the defaults reaches everyone who never wrote their own. Saving clears the transcript, since it

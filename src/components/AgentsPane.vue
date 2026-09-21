@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
 import {
   DEFAULT_REVIEW,
+  DEFAULT_TRIAGE,
   createAgentId,
   defaultTeam,
   serializeTeam,
@@ -11,6 +12,7 @@ import {
   type AgentTeam,
 } from '../lib/agents'
 import { describeStatus, type ModelChoice, type ModelStatus } from '../lib/chat'
+import { HUNTERS, HUNTER_NAMES } from '../lib/hunters'
 import { findModel } from '../lib/providers'
 import type { AgentStep, PendingStep } from '../composables/useAgents'
 
@@ -82,6 +84,27 @@ function addAgent(): void {
 function removeAgent(id: string): void {
   if (draft.value.agents.length < 2) return
   draft.value.agents = draft.value.agents.filter((agent) => agent.id !== id)
+}
+
+// Starting points for an agent's brief, keyed by the name the picker shows. The two shipped
+// briefs are here beside the hunters because a team is built out of both: a hunter that reads the
+// code for one class, and triage that rules on what it reported. Picking one only *writes* the
+// box — nothing remembers which, since an edited brief is the reader's own.
+const SHIPPED_TEMPLATES = ['Full taint review', 'Adversarial triage']
+const TEMPLATES: Record<string, string> = {
+  'Full taint review': DEFAULT_REVIEW,
+  'Adversarial triage': DEFAULT_TRIAGE,
+  ...HUNTERS,
+}
+
+/** The template this agent's brief still *is*, for its picker to show. */
+function templateFor(agent: AgentSpec): string {
+  return Object.keys(TEMPLATES).find((name) => TEMPLATES[name] === agent.role) ?? ''
+}
+
+function applyTemplate(agent: AgentSpec, name: string): void {
+  const text = TEMPLATES[name]
+  if (text) agent.role = text
 }
 
 /** Put an agent on a model of its own, or — the blank choice — back on the run's. */
@@ -299,6 +322,32 @@ watch(
               >
                 ✕
               </button>
+            </div>
+            <!-- A brief is the one thing in this card that has to be written rather than
+                 chosen, so the picker is a starting point and nothing more: it writes the box,
+                 and everything after that is the reader's. The hunters are short on purpose —
+                 an agent that already knows what it is looking for leaves more of a small
+                 window for the code it has to read. -->
+            <div class="template-row">
+              <label :for="`agent-template-${agent.id}`">Start from</label>
+              <select
+                :id="`agent-template-${agent.id}`"
+                class="template"
+                :value="templateFor(agent)"
+                @change="applyTemplate(agent, ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="">
+                  {{ templateFor(agent) ? 'Start from…' : 'Your own wording' }}
+                </option>
+                <optgroup label="Shipped">
+                  <option v-for="name in SHIPPED_TEMPLATES" :key="name" :value="name">
+                    {{ name }}
+                  </option>
+                </optgroup>
+                <optgroup label="Hunt one vulnerability class">
+                  <option v-for="name in HUNTER_NAMES" :key="name" :value="name">{{ name }}</option>
+                </optgroup>
+              </select>
             </div>
             <textarea v-model="agent.role" class="prompt-text" spellcheck="false" />
           </section>
@@ -704,6 +753,32 @@ button:disabled {
 .role-note.missing {
   color: var(--danger);
   opacity: 1;
+}
+
+.template-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--dim);
+  min-width: 0;
+}
+
+.template {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 5px;
+  cursor: pointer;
+}
+
+.template:hover {
+  border-color: var(--accent);
 }
 
 .card .prompt-text {

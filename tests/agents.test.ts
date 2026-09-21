@@ -44,6 +44,14 @@ describe('the shipped team', () => {
     expect(DEFAULT_REVIEW).toMatch(/in full/i)
   })
 
+  it('keeps triage to the findings it was handed', () => {
+    // A model given the code and a security brief hunts by default; a fresh claim in a triage
+    // report is one nobody has ruled on, which is the whole point of the pass.
+    expect(DEFAULT_TRIAGE).toMatch(/open none of your own/i)
+    expect(DEFAULT_TRIAGE).toMatch(/not yours to report/i)
+    expect(DEFAULT_TRIAGE).not.toMatch(/did not report/i)
+  })
+
   it('gives a thinking orchestrator nothing to count', () => {
     // "Under 120 words" was a number a reasoning model spent minutes on, tallying and redrafting.
     // Shape is asked for; a figure is not.

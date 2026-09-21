@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
 import { DEFAULT_ROLE, describeStatus, type ModelChoice, type ModelStatus } from '../lib/chat'
+import { HUNTERS, HUNTER_NAMES } from '../lib/hunters'
 import type { CustomOpenRouterModel } from '../lib/providers/openrouterModels'
 import type { ChatMessage } from '../composables/useChat'
 
@@ -58,6 +59,25 @@ const editingPrompt = ref(false)
 const promptDraft = ref(props.role)
 const keyDraft = ref(props.openrouterKey)
 const modelsDraft = ref<CustomOpenRouterModel[]>(props.openrouterModels)
+
+// Starting points for the brief, keyed by the name the picker shows. The shipped one is here
+// beside the hunters, so the picker answers "what else could this say" on its own rather than
+// leaving half the answer behind the Restore button. Picking one only *writes* it: from there it
+// is the reader's text, edited, stored and shared like any brief they typed themselves, which is
+// why nothing here remembers which one it came from.
+const SHIPPED_TEMPLATE = 'General taint review'
+const TEMPLATES: Record<string, string> = { [SHIPPED_TEMPLATE]: DEFAULT_ROLE, ...HUNTERS }
+
+/** The template the draft still *is*, for the picker to show — no stored choice, since an edited
+ *  template is no longer that template and the select must not claim otherwise. */
+const templateName = computed(
+  () => Object.keys(TEMPLATES).find((name) => TEMPLATES[name] === promptDraft.value) ?? '',
+)
+
+function applyTemplate(name: string): void {
+  const text = TEMPLATES[name]
+  if (text) promptDraft.value = text
+}
 
 // A second model of the same slug would just be a confusing duplicate in the picker — checked
 // against the catalogue too, not only the draft, so adding one already shipped is refused the
@@ -223,6 +243,26 @@ watch(
           What the model is told before the code. Every open file is appended below this,
           line-numbered — you write the brief, the editor supplies the code.
         </p>
+        <!-- A template is a starting point and nothing more: it writes the box, and what you do
+             with it afterwards is yours. The hunters are short on purpose — a brief that already
+             knows what it is looking for leaves more of a small window for the code. -->
+        <div class="template-row">
+          <label for="chat-template">Start from</label>
+          <select
+            id="chat-template"
+            class="template"
+            :value="templateName"
+            @change="applyTemplate(($event.target as HTMLSelectElement).value)"
+          >
+            <option value="">{{ templateName ? 'Start from…' : 'Your own wording' }}</option>
+            <optgroup label="Shipped">
+              <option :value="SHIPPED_TEMPLATE">{{ SHIPPED_TEMPLATE }}</option>
+            </optgroup>
+            <optgroup label="Hunt one vulnerability class">
+              <option v-for="name in HUNTER_NAMES" :key="name" :value="name">{{ name }}</option>
+            </optgroup>
+          </select>
+        </div>
         <textarea v-model="promptDraft" class="prompt-text" spellcheck="false" />
         <p v-if="messages.length > 0" class="hint warn">
           Saving starts a new chat: a conversation keeps the prompt it began with.
@@ -484,6 +524,32 @@ button:disabled {
 
 .warn {
   color: var(--gold);
+}
+
+.template-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--dim);
+  min-width: 0;
+}
+
+.template {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 6px;
+  cursor: pointer;
+}
+
+.template:hover {
+  border-color: var(--accent);
 }
 
 .prompt-text {

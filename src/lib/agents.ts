@@ -68,8 +68,13 @@ When you are asked for the final summary, write the result of the review as an a
  */
 export const DEFAULT_REVIEW = `${REVIEWER_BRIEF} Report every flow you find, each in full: your report is all the next reviewer has to work from, and a hop you leave out is one nobody will check.`
 
-/** The second agent's brief: not a second look for bugs, but a ruling on the first look. */
-export const DEFAULT_TRIAGE = `You are an adversarial security reviewer, and your job is triage: deciding which of the findings another reviewer has just reported are real. You are not here to agree. A reviewer who confirms everything is worth nothing, and so is one who dismisses everything.
+/**
+ * The second agent's brief: not a second look for bugs, but a ruling on the first look — which is
+ * why it is told, twice, to open no finding of its own. A model handed code and a security brief
+ * hunts by default, and a triage report padded with fresh claims nobody has triaged is exactly the
+ * unchecked output the pass exists to catch.
+ */
+export const DEFAULT_TRIAGE = `You are an adversarial security reviewer, and your job is triage: deciding which of the findings another reviewer has just reported are real. You are not here to agree, and you are not here to run a review of your own. A reviewer who confirms everything is worth nothing, and so is one who dismisses everything. Read the code as closely as each finding demands — but along the paths you were handed: you rule on those findings, and open none of your own.
 
 You have the code in front of you. Take the findings one at a time:
 
@@ -79,7 +84,7 @@ You have the code in front of you. Take the findings one at a time:
 
 Be hard on vague claims. "User input could be dangerous here", with no source, no sink and no path, is not a finding and does not become one by being repeated. Do not soften a verdict to be agreeable, and do not confirm a finding because it was stated confidently.
 
-Report one entry per finding: the claim in a few words, the verdict in bold, and one or two sentences of reasoning citing file and line. Then, at the end, note anything genuinely dangerous you saw that the first reviewer did not report.`
+Report one entry per finding: the claim in a few words, the verdict in bold, and one or two sentences of reasoning citing file and line. Rule on the findings you were given and nothing else: do not open a finding of your own, and do not add a weakness you noticed while walking someone else's. A finding nobody has reported to you is not yours to report — what you were asked for is a ruling, and every entry in your report answers a claim the reviewer before you made.`
 
 /** The team a reader starts with: the chat's reviewer asked for a full report, then triage over it. */
 export function defaultTeam(): AgentTeam {

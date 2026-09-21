@@ -171,6 +171,7 @@ export function useModel(): ModelHost {
       model: selected.model,
       thinking: selected.thinking,
       dtype: selected.dtype,
+      cpuEmbeddings: selected.cpuEmbeddings,
       sampling: selected.sampling,
       thinkingSampling: selected.thinkingSampling,
       contextTokens: selected.contextTokens,

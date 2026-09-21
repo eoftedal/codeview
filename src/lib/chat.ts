@@ -87,6 +87,8 @@ export interface LoadOptions {
   thinking?: boolean
   /** ONNX quantisation, when the model asks for something other than the default. */
   dtype?: Quantisation
+  /** Keep the embedding table off the GPU — see `ModelChoice.cpuEmbeddings`. ONNX only. */
+  cpuEmbeddings?: boolean
   /** Sampling to apply over the model's own defaults, on a question asked without thinking. */
   sampling?: Sampling
   /** Sampling for a question asked *with* thinking, where the publisher names a different row.
@@ -161,6 +163,20 @@ export interface ModelChoice {
    *  free choice: a repo's `transformers_js_config` names what its weights were validated at, and
    *  fp16 compute is where small models go numerically wrong on WebGPU. */
   dtype?: Quantisation
+  /**
+   * Run the embedding table on the CPU and only the decoder on the GPU. ONNX (Transformers.js)
+   * only, and only for a model whose sessions are `embed_tokens` and `decoder_model_merged` —
+   * which, here, means the Gemma 4 entries. The others are single-session (`model`), with nothing
+   * to split.
+   *
+   * It exists for one reason: on those entries the embedding table is about *half* the weights —
+   * 1.59 GB against the decoder's 1.52 at q4f16 on E2B, 2.02 against 2.89 on E4B — and it is a
+   * lookup, not arithmetic, so the GPU is not what it needs. A machine that cannot fit both can
+   * often fit one. What it costs is a copy per decode step: `inputs_embeds` and
+   * `per_layer_inputs` then cross from CPU to GPU on every token, so this is a trade rather than
+   * a free win, and it is off everywhere until measured on a machine that needs it.
+   */
+  cpuEmbeddings?: boolean
   /** Sampling the publisher recommends over the weights' own defaults, where it does. Where a
    *  `thinkingSampling` row sits beside it, this one is the *non-thinking* answer's. */
   sampling?: Sampling
@@ -379,6 +395,12 @@ export const MODELS: readonly ModelChoice[] = [
   // top_k 64` across all use cases, which is sampling, and this pipeline runs greedy on purpose.
   // It names no repetition penalty. If a thought is ever seen looping under greedy decoding, the
   // card's row is the thing to try — at the cost of the same answer twice running.
+  //
+  // These two are also the only entries `cpuEmbeddings` applies to, and the only ones whose weights
+  // split in half: the embedding table is 1.59 GB against the decoder's 1.52 on E2B, 2.02 against
+  // 2.89 on E4B, all at q4f16. A machine that runs out of GPU memory on one of these has that
+  // lever and no other — set the field on the entry and measure it; it is off here because the
+  // copy it costs per token has not been.
   {
     id: 'gemma-4-e2b',
     provider: 'transformers',

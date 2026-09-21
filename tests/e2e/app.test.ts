@@ -909,6 +909,55 @@ describe('the chat pane picks a model honestly', () => {
     }
   })
 
+  it('writes a hunting brief into the box, and stops claiming it once it is edited', async () => {
+    const fresh = await chatPageWith(function () {
+      localStorage.clear()
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async () => ({
+          promptStreaming: () => new ReadableStream({ start: (c) => c.close() }),
+          destroy: () => {},
+        }),
+      }
+    })
+    try {
+      await fresh.click('.prompt')
+      // The shipped brief is in the shelf too, so the picker names it rather than going blank on
+      // a prompt nobody has touched.
+      expect(await fresh.$eval('.template', (el) => (el as HTMLSelectElement).value)).toBe(
+        'General taint review',
+      )
+
+      await fresh.$eval('.template', (el) => {
+        const select = el as HTMLSelectElement
+        select.value = 'Prototype pollution'
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+      })
+      const picked = await fresh.$eval('.prompt-text', (el) => (el as HTMLTextAreaElement).value)
+      expect(picked).toContain('__proto__')
+      // A hunter is brief on purpose: the code and the brief share one window.
+      expect(picked.length).toBeLessThan(4_000)
+
+      // Picking only writes the box — the choice itself is not kept, so an edited hunter is
+      // the reader's own wording and the picker says so.
+      await fresh.$eval('.prompt-text', (el) => {
+        const box = el as HTMLTextAreaElement
+        box.value = `${box.value}\n\nAlso check the merge helpers.`
+        box.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      expect(await fresh.$eval('.template', (el) => (el as HTMLSelectElement).value)).toBe('')
+
+      await fresh.click('.prompt-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(await fresh.$eval('.prompt', (el) => el.className)).toContain('custom')
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:chat-role'))).toContain(
+        'Also check the merge helpers.',
+      )
+    } finally {
+      await fresh.close()
+    }
+  })
+
   it('drops the button’s label when the pane is dragged narrow, keeping the cogwheel', async () => {
     const fresh = await chatPageWith(function () {
       ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
@@ -1883,6 +1932,52 @@ describe('the agents pane runs a line of agents', () => {
         'Orchestrator briefs each agent · never sees the code',
         'Agent 3 sees every open file',
       ])
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('starts an agent from a hunting brief, which then travels as its own', async () => {
+    const fresh = await agentsPage()
+    try {
+      await fresh.click('.prompt')
+      // Both shipped briefs are in the same shelf as the hunters: a team is built out of both —
+      // one agent hunting a class, another ruling on what it reported.
+      expect(
+        await fresh.$$eval('.team-editor .template', (nodes) =>
+          nodes.map((node) => (node as HTMLSelectElement).value),
+        ),
+      ).toEqual(['Full taint review', 'Adversarial triage'])
+
+      await fresh.$$eval('.team-editor .template', (nodes) => {
+        const select = nodes[0] as HTMLSelectElement
+        select.value = 'SQL & NoSQL injection'
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+      })
+      expect(
+        await fresh.$$eval('.team-editor .prompt-text', (nodes) =>
+          (nodes[1] as HTMLTextAreaElement).value.slice(0, 120),
+        ),
+      ).toContain('SQL & NoSQL injection')
+
+      await fresh.$$eval('.team-editor .name', (nodes) => {
+        const box = nodes[0] as HTMLInputElement
+        box.value = 'SQLi'
+        box.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await fresh.click('.team-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(await pipelineRows(fresh)).toEqual([
+        'Orchestrator briefs each agent · never sees the code',
+        'SQLi sees every open file',
+        'Adversarial Triage sees every open file',
+      ])
+
+      // From here it is an ordinary brief of the reader's: stored, and round-tripped through the
+      // `--8<--` bundle a team link is made of.
+      const stored = await fresh.evaluate(() => localStorage.getItem('codeview:agents'))
+      expect(stored).toContain('--8<-- SQLi\n')
+      expect(stored).toContain('bound value')
     } finally {
       await fresh.close()
     }
