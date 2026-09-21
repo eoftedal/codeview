@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { foldChannels, withoutThoughts } from '../src/lib/providers/thoughts'
+import { foldChannels, foldReasoning, withoutThoughts } from '../src/lib/providers/thoughts'
 
 /** The chunks a `TextStreamer` hands over for a thinking answer: every special token alone, the
  *  ordinary text split wherever it likes. */
@@ -79,5 +79,37 @@ describe('the history a follow-up is asked against', () => {
 
   it('leaves an answer that never thought alone', () => {
     expect(withoutThoughts('The sink is on line 5.')).toBe('The sink is on line 5.')
+  })
+})
+
+describe('foldReasoning', () => {
+  // OpenRouter streams a thought beside the answer (`delta.reasoning`), not inside it. The fold
+  // turns that into the one `<think>` syntax the pane already handles.
+  it('opens a think block on the first reasoning and closes it on the first content', () => {
+    const fold = foldReasoning()
+    const out = [
+      fold.delta('The source', undefined),
+      fold.delta(' is req.body.', undefined),
+      fold.delta(undefined, 'Found '),
+      fold.delta(undefined, 'one flow.'),
+      fold.end(),
+    ].join('')
+    expect(out).toBe('<think>The source is req.body.</think>Found one flow.')
+    expect(withoutThoughts(out)).toBe('Found one flow.')
+  })
+
+  it('passes an answer with no reasoning through untouched', () => {
+    const fold = foldReasoning()
+    expect(fold.delta(undefined, 'Plain ') + fold.delta(undefined, 'answer.') + fold.end()).toBe(
+      'Plain answer.',
+    )
+    expect(fold.delta(undefined, undefined)).toBe('')
+    expect(fold.delta('', '')).toBe('')
+  })
+
+  it('closes a thought the stream ended inside, so it is not shown as still in progress', () => {
+    const fold = foldReasoning()
+    expect(fold.delta('cut off mid', undefined) + fold.end()).toBe('<think>cut off mid</think>')
+    expect(fold.end()).toBe('')
   })
 })

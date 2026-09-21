@@ -58,6 +58,49 @@ export function foldChannels(): (chunk: string) => string {
   }
 }
 
+/**
+ * The same translation for an OpenAI-compatible stream, where a reasoning model's thinking does not
+ * arrive in the text at all: OpenRouter hands it back as a separate `delta.reasoning` beside
+ * `delta.content`. Read only the content and the thought is simply gone — the pane shows nothing
+ * for as long as the model thinks, and there is no block for `withoutThoughts` to drop.
+ *
+ * Each delta is given as the pair it arrived as, and what comes back is text in the one syntax
+ * the pane folds: the first reasoning opens a `<think>`, the first content after it closes the
+ * block. `end()` closes a block still open when the stream ends — an answer that was all thought
+ * and ran out of room — so it is filed as a finished thought, not one still in progress.
+ */
+export function foldReasoning(): {
+  delta(reasoning: string | undefined, content: string | undefined): string
+  end(): string
+} {
+  let thinking = false
+  return {
+    delta(reasoning, content) {
+      let out = ''
+      if (reasoning) {
+        if (!thinking) {
+          thinking = true
+          out += '<think>'
+        }
+        out += reasoning
+      }
+      if (content) {
+        if (thinking) {
+          thinking = false
+          out += '</think>'
+        }
+        out += content
+      }
+      return out
+    },
+    end() {
+      if (!thinking) return ''
+      thinking = false
+      return '</think>'
+    },
+  }
+}
+
 const THOUGHT = /<think>[\s\S]*?(?:<\/think>|$)/g
 
 /**

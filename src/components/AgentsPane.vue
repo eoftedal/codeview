@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
 import {
+  DEFAULT_REVIEW,
   createAgentId,
   defaultTeam,
   serializeTeam,
@@ -9,13 +10,8 @@ import {
   type AgentSpec,
   type AgentTeam,
 } from '../lib/agents'
-import {
-  DEFAULT_ROLE,
-  describeStatus,
-  modelById,
-  type ModelChoice,
-  type ModelStatus,
-} from '../lib/chat'
+import { describeStatus, type ModelChoice, type ModelStatus } from '../lib/chat'
+import { findModel } from '../lib/providers'
 import type { AgentStep, PendingStep } from '../composables/useAgents'
 
 const props = defineProps<{
@@ -77,7 +73,7 @@ function addAgent(): void {
     {
       id: createAgentId(),
       name: untitledAgentName(draft.value.agents.map((agent) => agent.name)),
-      role: DEFAULT_ROLE,
+      role: DEFAULT_REVIEW,
     },
   ]
 }
@@ -97,7 +93,7 @@ function setAgentModel(agent: AgentSpec, id: string): void {
 /** A model's name for the roster and the editor; the bare id when the catalogue no longer has it,
  *  which a hand-written link can do. */
 function labelFor(id: string): string {
-  return modelById(id)?.label ?? id
+  return findModel(id)?.label ?? id
 }
 
 /** Whether a model an agent names is one this browser offers. A team from a link, or from a
@@ -118,8 +114,22 @@ const statusLabel = computed(() =>
 const offersThinking = computed(
   () =>
     props.choice?.thinking === true ||
-    props.team.agents.some((agent) => agent.model && modelById(agent.model)?.thinking === true),
+    props.team.agents.some((agent) => agent.model && findModel(agent.model)?.thinking === true),
 )
+
+/** A distinct hue per agent, stable for the run: `who` is unique within a team (`normalizeTeam`
+ *  refuses a duplicate), so hashing the name is enough to keep an agent's color the same across
+ *  every step it produced, without threading an id through `AgentStep`. Picked to read against
+ *  both the panel background and each other, and kept out of `--accent`/`--gold`/`--danger`, which
+ *  already mean the orchestrator, a custom team and a failure. */
+const AGENT_COLORS = ['#9ece6a', '#bb9af7', '#7dcfff', '#ff9e64', '#73daca']
+
+function agentColor(name: string): string {
+  let hash = 0
+  for (let index = 0; index < name.length; index += 1)
+    hash = (hash * 31 + name.charCodeAt(index)) | 0
+  return AGENT_COLORS[Math.abs(hash) % AGENT_COLORS.length]!
+}
 
 /** What a row says about itself beside the name: who a brief is for, that a summary is one, that
  *  something failed. The task needs none — it is the reader's own line. */
@@ -336,15 +346,23 @@ watch(
           :key="step.id"
           class="step"
           :class="[step.kind, { failed: step.failed }]"
+          :style="step.kind === 'agent' ? { '--agent': agentColor(step.who) } : {}"
         >
-          <!-- An agent's report: pages of it, so it arrives folded. What it was handed is not
-               repeated under it — that is the brief above and the report before, both already rows
-               of their own. A failure is never folded: it is the one thing you must not have to go
-               looking for. -->
-          <details v-if="step.kind === 'agent' && !step.failed" class="fold report">
+          <!-- An agent's report is the bulk of the run, so it stays open rather than folded — a
+               reader watching a review wants to see what was found, not a row of summaries. Only
+               the model's own thinking, inside it, collapses (MarkdownText's doing). What it was
+               handed is not repeated under it — that is the brief above and the report before, both
+               already rows of their own. A failure is never folded: it is the one thing you must
+               not have to go looking for. -->
+          <details v-if="step.kind === 'agent' && !step.failed" class="fold report" open>
             <summary>
               <span class="who">{{ step.who }}</span>
               <span class="role-note">report</span>
+              <!-- This agent did not see all the code, and its report has to be read as one
+                   written over part of it. The model was told; this tells the reader. -->
+              <span v-if="step.clipped" class="clipped" :title="step.clipped">
+                ⚠ saw part of the code — {{ step.clipped }}
+              </span>
             </summary>
             <div class="text"><MarkdownText :text="step.text" /></div>
           </details>
@@ -363,12 +381,20 @@ watch(
         </article>
 
         <!-- The hop in flight is shown open whatever kind it is: a run is slow, and watching the
-             text arrive is how a reader knows it is still going. It folds when it lands. -->
-        <article v-if="pending && pendingStep" class="step" :class="pendingStep.kind">
+             text arrive is how a reader knows it is still going. -->
+        <article
+          v-if="pending && pendingStep"
+          class="step"
+          :class="pendingStep.kind"
+          :style="pendingStep.kind === 'agent' ? { '--agent': agentColor(pendingStep.who) } : {}"
+        >
           <span class="who">
             {{ pendingStep.who }}
             <span v-if="pendingStep.to" class="role-note">→ {{ pendingStep.to }}</span>
             <span v-else-if="pendingStep.kind === 'summary'" class="role-note">summary</span>
+            <span v-if="pendingStep.clipped" class="clipped" :title="pendingStep.clipped">
+              ⚠ saw part of the code — {{ pendingStep.clipped }}
+            </span>
           </span>
           <div class="text"><MarkdownText :text="pending" streaming /></div>
         </article>
@@ -751,6 +777,9 @@ button:disabled {
 
 .step {
   display: grid;
+  /* As in the chat log: a step holding a code block has to be allowed to be narrower than the
+     block's longest line, or the transcript scrolls sideways rather than the block. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 3px;
 }
 
@@ -769,12 +798,34 @@ button:disabled {
   background: color-mix(in srgb, var(--accent) 8%, var(--bg));
 }
 
+/* The orchestrator's own words — a brief and the closing summary — share one color throughout the
+   transcript, so they read as one voice threading between the agents it briefs. */
+.step.brief .who,
 .step.summary .who {
   color: var(--accent);
 }
 
+.step.brief .text {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg));
+}
+
+/* Each agent gets a color of its own (`--agent`, set per step from its name), carried by its report
+   and its row in flight, so a run of several agents reads as several distinct voices rather than
+   one long undifferentiated scroll — and so it is visually obvious which parts are the orchestrator's
+   and which are an agent answering it. */
+.step.agent .who {
+  color: var(--agent, var(--dim));
+}
+
+.step.agent .text {
+  border-color: color-mix(in srgb, var(--agent, var(--border)) 45%, var(--border));
+  background: color-mix(in srgb, var(--agent, var(--bg)) 6%, var(--bg));
+}
+
 .text {
   margin: 0;
+  min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.65;
@@ -792,6 +843,23 @@ button:disabled {
 .failed .text {
   border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
   color: var(--danger);
+}
+
+.clipped {
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: normal;
+  text-transform: none;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A report is a grid item too, and the <details> in it holds the same wide blocks. */
+.fold {
+  min-width: 0;
 }
 
 .fold > summary {

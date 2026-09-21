@@ -15,6 +15,8 @@ import { useModel } from './composables/useModel'
 import { findNodeAtOffset } from './lib/astTree'
 import type { DefinitionResult, Span } from './lib/definitions'
 import { isExternalOrigin, type FlowTarget, type FlowTrace } from './lib/flow'
+import { useOpenRouterKey } from './lib/providers/openrouterKey'
+import { useOpenRouterModels } from './lib/providers/openrouterModels'
 
 const SPLIT_KEY = 'codeview:split'
 
@@ -65,6 +67,18 @@ const tracedHover = ref<FlowTarget | null>(null)
 /** One loaded model for the whole app: a conversation and an agent run are two uses of the same
  *  weights, and a second engine would put the same gigabytes on the GPU twice. */
 const model = useModel()
+
+/** The reader's OpenRouter key, if any — kept out here rather than in `useChat`, since it is a
+ *  model-provider setting, not a conversation one, and `useAgents` needs the same catalogue
+ *  gating `useModel` already reads it for. */
+const openrouterKey = useOpenRouterKey()
+
+/** OpenRouter models the reader has added themselves, beyond the shipped three. `usableModels()`
+ *  reads these from `localStorage` directly, so `model.refreshModels()` is what tells the picker
+ *  a fresh one just showed up — the reactive list here exists for the settings panel to edit, not
+ *  for `useModel` to watch on its own. */
+const openrouterModels = useOpenRouterModels()
+watch(openrouterModels.models, () => model.refreshModels(), { deep: true })
 
 /** Held here, not in the panes: a pane unmounts whenever another tab is shown, and neither a
  *  conversation nor a run should survive only as long as a glance at the tree. */
@@ -325,15 +339,20 @@ function onFilePicked(event: Event): void {
               :thinking="model.thinking.value"
               :role="chat.role.value"
               :role-is-default="chat.roleIsDefault.value"
+              :openrouter-key="openrouterKey.key.value"
+              :openrouter-models="openrouterModels.models.value"
               :status="model.status.value"
               :progress="model.progress.value"
               :messages="chat.messages.value"
               :pending="chat.pending.value"
               :busy="chat.busy.value"
               :stale="chat.stale.value"
+              :clipped="chat.clipped.value"
               @update:model="model.model.value = $event"
               @update:thinking="model.thinking.value = $event"
               @update:role="chat.setRole($event)"
+              @update:openrouter-key="openrouterKey.key.value = $event"
+              @update:openrouter-models="openrouterModels.models.value = $event"
               @ask="chat.ask($event)"
               @stop="chat.stop()"
               @new-chat="chat.newChat()"

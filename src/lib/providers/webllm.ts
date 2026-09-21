@@ -15,9 +15,10 @@ import { MAX_NEW_TOKENS } from './ceiling'
 import { withoutThoughts } from './thoughts'
 import { hasGpuAdapter } from './webgpu'
 
-/** The catalogue defaults these models to 4096 tokens — less than the browser's own model, and too
- *  tight for a file plus a conversation. Qwen2.5-Coder itself goes far beyond this. */
-const CONTEXT_WINDOW = 8192
+/** Where the catalogue names no window: the MLC list compiles every model here to 4096 tokens,
+ *  which is less than the browser's own model and too tight for a file plus a conversation. What
+ *  a model actually runs at is `ModelChoice.contextTokens`; this is only the floor beneath it. */
+const DEFAULT_CONTEXT_WINDOW = 8192
 
 type Message = { role: 'system' | 'user' | 'assistant'; content: string }
 
@@ -34,6 +35,8 @@ export const webllm: Provider = {
     onProgress,
     thinking: reasons,
     sampling,
+    thinkingSampling,
+    contextTokens = DEFAULT_CONTEXT_WINDOW,
   }: LoadOptions): Promise<ModelEngine> {
     if (!model) throw new Error('WebLLM needs a model id.')
 
@@ -46,7 +49,7 @@ export const webllm: Provider = {
         ...prebuiltAppConfig,
         model_list: prebuiltAppConfig.model_list.map((record) =>
           record.model_id === model
-            ? { ...record, overrides: { ...record.overrides, context_window_size: CONTEXT_WINDOW } }
+            ? { ...record, overrides: { ...record.overrides, context_window_size: contextTokens } }
             : record,
         ),
       },
@@ -74,6 +77,11 @@ export const webllm: Provider = {
           promptStreaming(input, options) {
             messages.push({ role: 'user', content: input })
             let answer = ''
+            // A publisher that names a row for thinking names a different one for answering
+            // plainly, and which applies is settled per question, not per load. Falls back to the
+            // one row where there is only one.
+            const row =
+              (options?.thinking === true ? thinkingSampling : undefined) ?? sampling ?? {}
 
             return new ReadableStream<string>({
               async start(controller) {
@@ -86,15 +94,13 @@ export const webllm: Provider = {
                     max_tokens: MAX_NEW_TOKENS,
                     // Left out rather than sent as null, so the weights' own config still decides
                     // whatever the catalogue does not.
-                    ...(sampling?.temperature !== undefined
-                      ? { temperature: sampling.temperature }
+                    ...(row.temperature !== undefined ? { temperature: row.temperature } : {}),
+                    ...(row.topP !== undefined ? { top_p: row.topP } : {}),
+                    ...(row.presencePenalty !== undefined
+                      ? { presence_penalty: row.presencePenalty }
                       : {}),
-                    ...(sampling?.topP !== undefined ? { top_p: sampling.topP } : {}),
-                    ...(sampling?.presencePenalty !== undefined
-                      ? { presence_penalty: sampling.presencePenalty }
-                      : {}),
-                    ...(sampling?.repetitionPenalty !== undefined
-                      ? { repetition_penalty: sampling.repetitionPenalty }
+                    ...(row.repetitionPenalty !== undefined
+                      ? { repetition_penalty: row.repetitionPenalty }
                       : {}),
                     // Only a model with a thinking mode is asked about it either way: WebLLM turns
                     // thinking off by prefilling an empty block, which would corrupt one without.

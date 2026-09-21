@@ -1,6 +1,7 @@
 import { computed, onScopeDispose, ref, watch, type Ref } from 'vue'
-import { modelById, type ModelChoice, type ModelEngine, type ModelStatus } from '../lib/chat'
-import { providerFor, usableModels } from '../lib/providers'
+import type { ModelChoice, ModelEngine, ModelStatus } from '../lib/chat'
+import { findModel, providerFor, usableModels } from '../lib/providers'
+import { getOpenRouterKey } from '../lib/providers/openrouterKey'
 import { hasGpuAdapter } from '../lib/providers/webgpu'
 
 const MODEL_KEY = 'codeview:chat-model'
@@ -36,6 +37,9 @@ export interface ModelHost {
   progress: Ref<number>
   /** Settle what can run here. Idempotent, and deliberately not run on load. */
   probe: () => void
+  /** Rebuild `models` after the reader adds or removes a custom OpenRouter model — the GPU/builtin
+   *  side of the catalogue is untouched, since nothing about the browser changed. */
+  refreshModels: () => void
   /** The loaded engine, loading it the first time. */
   engine: () => Promise<ModelEngine>
   /**
@@ -69,7 +73,7 @@ export function useModel(): ModelHost {
       'builtin',
   )
 
-  const choice = computed(() => modelById(model.value))
+  const choice = computed(() => findModel(model.value))
 
   // Off by default: thinking is slower and most questions here do not need it. The setting is
   // remembered, and applies from the next question — it is a per-request flag, not a session one,
@@ -89,6 +93,21 @@ export function useModel(): ModelHost {
   let wanted = new Set<string>()
   let probed = false
   const listeners: (() => void)[] = []
+  /** Settled once, the first time `probe` runs — `null` beforehand, when `usableModels()`'s own
+   *  optimistic list (every provider that merely *might* work) is still what `models` holds. Kept
+   *  so `refreshModels` can reapply the same verdict later without probing the GPU a second time. */
+  let gpuAvailable: boolean | null = null
+
+  /** Reapplies whatever `probe` last found — or, before it has run once, `usableModels()`'s own
+   *  optimistic list — to a freshly rebuilt catalogue. The one place both `probe` and a change to
+   *  the reader's own added models go through, so the two can never compute this differently. */
+  function recomputeModels(): void {
+    const all = usableModels()
+    models.value =
+      gpuAvailable === false
+        ? all.filter((entry) => entry.provider === 'builtin' || entry.provider === 'openrouter')
+        : all
+  }
 
   /** Asking what can run here is a pane's first cost, so it waits for a pane to be opened rather
    *  than running on load for everyone who never uses one.
@@ -101,8 +120,11 @@ export function useModel(): ModelHost {
     if (probed) return
     probed = true
     void (async () => {
-      if (!(await hasGpuAdapter())) {
-        models.value = models.value.filter((entry) => entry.provider === 'builtin')
+      gpuAvailable = await hasGpuAdapter()
+      if (!gpuAvailable) {
+        // OpenRouter needs no GPU either, so losing the adapter should not hide it alongside the
+        // on-device models that do.
+        recomputeModels()
         if (models.value.length === 0) {
           status.value = 'unavailable'
           return
@@ -132,13 +154,26 @@ export function useModel(): ModelHost {
     })()
   }
 
-  /** Weights onto the GPU, with the download — whichever model's — shown on the one status line. */
+  /** Weights onto the GPU, with the download — whichever model's — shown on the one status line.
+   *
+   *  OpenRouter is refused here rather than let through to fail inside a `fetch`: a stop-and-say
+   *  loudly about a missing key is the point, not a generic "cannot run in this browser" (this
+   *  model *can* run here; the browser is not what is missing) or a raw HTTP error from the
+   *  provider itself. Both `engine()` (the chat pane) and `engineFor()` (an agent's own model) go
+   *  through this one place, so the complaint reaches either caller the same way. */
   async function load(selected: ModelChoice): Promise<ModelEngine> {
+    if (selected.provider === 'openrouter' && getOpenRouterKey() === null) {
+      throw new Error(
+        `${selected.label} needs an OpenRouter API key — add one in the chat settings.`,
+      )
+    }
     return providerFor(selected.provider).load({
       model: selected.model,
       thinking: selected.thinking,
       dtype: selected.dtype,
       sampling: selected.sampling,
+      thinkingSampling: selected.thinkingSampling,
+      contextTokens: selected.contextTokens,
       onProgress: (fraction) => {
         progress.value = fraction
         if (fraction < 1) status.value = 'downloading'
@@ -167,7 +202,7 @@ export function useModel(): ModelHost {
     if (held) return held
     const selected = models.value.find((entry) => entry.id === id)
     if (!selected) {
-      const named = modelById(id)
+      const named = findModel(id)
       throw new Error(
         named ? `${named.label} cannot run in this browser.` : `There is no model called “${id}”.`,
       )
@@ -202,7 +237,14 @@ export function useModel(): ModelHost {
   }
 
   function thinkingNow(id: string = model.value): boolean {
-    return thinking.value && modelById(id)?.thinking === true
+    return thinking.value && findModel(id)?.thinking === true
+  }
+
+  /** The reader added or removed a model of their own in the settings panel: rebuild the
+   *  catalogue `models` offers, respecting whatever `probe` already settled about the GPU. Unlike
+   *  `probe`, always safe to call again — there is nothing async to redo. */
+  function refreshModels(): void {
+    recomputeModels()
   }
 
   // A different model is a different engine and a different conversation: weights, context budget
@@ -239,6 +281,7 @@ export function useModel(): ModelHost {
     status,
     progress,
     probe,
+    refreshModels,
     engine,
     engineFor,
     retain,

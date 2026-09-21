@@ -19,7 +19,7 @@ const blocks = computed(() => parseMarkdown(props.text))
 
       <details v-else-if="block.kind === 'think'" class="think">
         <summary>thinking</summary>
-        <p>{{ block.text }}</p>
+        <MarkdownText :text="block.text" />
       </details>
 
       <component :is="`h${block.level}`" v-else-if="block.kind === 'heading'">
@@ -52,6 +52,34 @@ const blocks = computed(() => parseMarkdown(props.text))
 
       <hr v-else-if="block.kind === 'rule'" />
 
+      <!-- Wrapped so a wide table scrolls on its own rather than widening the bubble. -->
+      <div v-else-if="block.kind === 'table'" class="table">
+        <table>
+          <thead>
+            <tr>
+              <th
+                v-for="(cell, cellIndex) in block.header"
+                :key="cellIndex"
+                :style="{ textAlign: block.align[cellIndex] ?? undefined }"
+              >
+                <MarkdownSpans :spans="cell" />
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, rowIndex) in block.rows" :key="rowIndex">
+              <td
+                v-for="(cell, cellIndex) in row"
+                :key="cellIndex"
+                :style="{ textAlign: block.align[cellIndex] ?? undefined }"
+              >
+                <MarkdownSpans :spans="cell" />
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
       <p v-else><MarkdownSpans :spans="block.spans" /></p>
     </template>
   </div>
@@ -61,6 +89,11 @@ const blocks = computed(() => parseMarkdown(props.text))
 /* The bubble around this sets `pre-wrap`, which would otherwise inherit into every block. */
 .md {
   white-space: normal;
+  /* A grid or flex item is `min-width: auto` by default, which means "at least as wide as my
+     content" — and a `pre` that does not wrap has a min-content width of its longest line. Without
+     this the column grows to fit the code and the whole pane scrolls sideways; with it the column
+     keeps the reader's width and the code block scrolls inside itself. */
+  min-width: 0;
 }
 
 .md > * {
@@ -100,6 +133,13 @@ li {
   overflow-wrap: anywhere;
 }
 
+/* Both of the blocks that can be wider than the pane: they scroll inside their own box, and
+   `max-width` is what stops them widening it in the first place. */
+.code,
+.table {
+  max-width: 100%;
+}
+
 .code {
   margin: 0 0 8px;
   padding: 7px 9px;
@@ -123,6 +163,35 @@ hr {
   border-top: 1px solid var(--border);
 }
 
+.table {
+  overflow-x: auto;
+}
+
+/* A wide table's own box must not be stretched by the row inside it either. */
+table {
+  max-width: none;
+}
+
+table {
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+th,
+td {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+th {
+  font-weight: 600;
+  background: var(--panel);
+}
+
 /* Reasoning is folded away: it is how the answer was reached, not the answer. */
 .think {
   border-left: 2px solid var(--border);
@@ -138,9 +207,8 @@ hr {
   font-size: 10px;
 }
 
-.think p {
-  margin: 6px 0 0;
-  white-space: pre-line;
+.think :deep(.md) {
+  margin-top: 6px;
 }
 
 /* A thinking block stays collapsed while it fills, so the caret goes on the summary — otherwise

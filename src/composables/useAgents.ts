@@ -8,6 +8,7 @@ import {
   normalizeTeam,
   orchestratorPrompt,
   parseTeam,
+  relayLimit,
   relayMessage,
   serializeTeam,
   summaryMessage,
@@ -18,11 +19,13 @@ import {
 import {
   buildCodeMessage,
   buildSystemPrompt,
-  modelById,
+  describeClip,
   promptFiles,
   type ChatSession,
+  type CodeContext,
 } from '../lib/chat'
 import type { CodeFile } from '../lib/files'
+import { findModel } from '../lib/providers'
 import { withoutThoughts } from '../lib/providers/thoughts'
 import { decodeShare, parseParams } from '../lib/share'
 import { isAbort, messageOf, streamAnswer, withTruncatedNote } from '../lib/stream'
@@ -39,13 +42,27 @@ export const ORCHESTRATOR_LABEL = 'Orchestrator'
 /** What the reader's own task is filed under in the transcript. */
 export const READER_LABEL = 'You'
 
+/** The least code an agent is shown, however large the handoff it was given: a report with no
+ *  code to check it against is not a review, so past this point the answer is what gives, and the
+ *  provider's truncation note says so. */
+const MIN_AGENT_CODE_CHARS = 4_000
+
 /**
- * The four kinds of row a run leaves behind, and the pane shows them at two depths on purpose.
- *
- * The **task** the reader wrote and the orchestrator's own messages — a **brief** for each agent,
- * then the closing **summary** — are the spine of the run and are always open: between them they
- * say what was asked and what came of it. An **agent**'s report is the bulk of the text and arrives
- * folded, since a run of three agents over a file is pages of it; opening one shows the report.
+ * Whether the orchestrator thinks before it speaks, whatever the reader's switch says. It does
+ * not: it never sees the code, so it has nothing to reason *about* — a brief is a pointer, and the
+ * summary is the agents' reports restated in their own terms, which it is forbidden to improve on.
+ * A reasoning model given either spends minutes weighing wording that the run does not get back.
+ * The switch still governs the agents, which are the ones with something to think through.
+ */
+const ORCHESTRATOR_THINKS = false
+
+/**
+ * The four kinds of row a run leaves behind. All of them are shown open — the **task** the reader
+ * wrote, the orchestrator's own messages (a **brief** for each agent, then the closing
+ * **summary**), and an **agent**'s report, which is the bulk of the run's text. The pane still tells
+ * them apart, by color rather than by folding: each agent's rows get a hue of their own, hashed from
+ * its name (`agentColor` in `AgentsPane.vue`), and the orchestrator's rows share a separate one — so
+ * a run of several agents reads as several distinct voices rather than one long scroll.
  *
  * What an agent was *handed* is deliberately not kept here. It is the brief above it plus the
  * previous agent's report, and both are already rows of their own in the same transcript — showing
@@ -63,6 +80,10 @@ export interface AgentStep {
   text: string
   /** A step that failed rather than one a model produced — rendered as a warning, not as speech. */
   failed?: boolean
+  /** For an agent: what of the code it was *not* shown, in a line. Absent when it saw all of it. A
+   *  report written over half the files has to be read as one, and nothing in the report itself
+   *  says so — the model was told, the reader was not. */
+  clipped?: string
 }
 
 /** The hop in flight: what is streaming, and who it will belong to when it lands. */
@@ -70,6 +91,7 @@ export interface PendingStep {
   kind: StepKind
   who: string
   to?: string
+  clipped?: string
 }
 
 export interface Agents {
@@ -269,12 +291,20 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
       // about what line 12 says because the reader typed in between would be worse than either of
       // them being a little behind. The listing is built per agent all the same, because the
       // budget is the model's — an agent on a model of its own may fit more, or less, of it.
+      //
+      // The handoff is spent from the same budget. `maxCodeChars` was sized for a chat — brief,
+      // code, a short question — and an agent's question is a brief plus a whole report, which on
+      // a small model is most of what the code was leaving room for. Taking it off the code means
+      // the agent sees less of the listing and is told so, rather than running out of window
+      // mid-answer with nothing said and nothing to relay.
       const snapshot = promptFiles(files.value, activeId.value)
-      const codeFor = (id: string) =>
-        buildCodeMessage({
-          files: snapshot,
-          maxCodeChars: modelById(id)?.maxCodeChars ?? 12_000,
-        })
+      const budgetOf = (id: string) => findModel(id)?.maxCodeChars ?? 12_000
+      const contextFor = (id: string, handoff: string): CodeContext => ({
+        files: snapshot,
+        maxCodeChars: Math.max(MIN_AGENT_CODE_CHARS, budgetOf(id) - handoff.length),
+      })
+      // The orchestrator reads its relays on the picked model, so its clip follows that budget.
+      const orchestratorLimit = relayLimit(budgetOf(model.model.value))
 
       // An orchestrator that says nothing would otherwise hand the first agent an empty prompt.
       // The reader's own task is the honest thing to fall back to.
@@ -283,6 +313,7 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
           orchestrator,
           { kind: 'brief', who: ORCHESTRATOR_LABEL, to: roster[0]!.name },
           kickoffMessage(asked, roster[0]!),
+          ORCHESTRATOR_THINKS,
         )) || asked
       let previous: { from: AgentSpec; output: string } | null = null
 
@@ -299,11 +330,17 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
         if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
         // A fresh session per agent, and gone as soon as it has answered: an agent is one question
         // asked of the files, not a conversation to come back to.
-        const session = await own.chat(buildSystemPrompt(agent.role), codeFor(modelId))
-        const handoff = handoffMessage(brief, previous)
+        const handoff = handoffMessage(brief, previous, relayLimit(budgetOf(modelId)))
+        const context = contextFor(modelId, handoff)
+        // Marked on the step before it speaks, so the cue is on the row while it streams and stays
+        // on the report after: what this agent did not see is a fact about its whole answer.
+        const clipped = describeClip(context)
+        const spoken: PendingStep = clipped ? { ...step, clipped } : step
+        pendingStep.value = spoken
+        const session = await own.chat(buildSystemPrompt(agent.role), buildCodeMessage(context))
         let output: string
         try {
-          output = await speak(session, step, handoff, model.thinkingNow(modelId))
+          output = await speak(session, spoken, handoff, model.thinkingNow(modelId))
         } finally {
           session.destroy()
         }
@@ -315,13 +352,15 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
             (await speak(
               orchestrator,
               { kind: 'brief', who: ORCHESTRATOR_LABEL, to: next.name },
-              relayMessage(asked, agent, output, next),
+              relayMessage(asked, agent, output, next, orchestratorLimit),
+              ORCHESTRATOR_THINKS,
             )) || asked
         } else {
           await speak(
             orchestrator,
             { kind: 'summary', who: ORCHESTRATOR_LABEL },
-            summaryMessage(asked, agent, output),
+            summaryMessage(asked, agent, output, orchestratorLimit),
+            ORCHESTRATOR_THINKS,
           )
         }
       }

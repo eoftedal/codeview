@@ -3,8 +3,10 @@ import {
   DEFAULT_ROLE,
   buildCodeMessage,
   buildSystemPrompt,
+  describeClip,
   promptFiles,
   type ChatSession,
+  type CodeContext,
 } from '../lib/chat'
 import type { CodeFile } from '../lib/files'
 import { decodeShare, parseParams } from '../lib/share'
@@ -36,6 +38,9 @@ export interface Chat {
   busy: Ref<boolean>
   /** The open files have changed since this conversation's system prompt was built. */
   stale: Ref<boolean>
+  /** What of the code this conversation's model was *not* shown, in a line — or null when it saw
+   *  all of it. Set when the session is built, since that is when the budget is spent. */
+  clipped: Ref<string | null>
   ask: (question: string) => Promise<void>
   stop: () => void
   newChat: () => void
@@ -101,6 +106,7 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
   const pending = ref('')
   const busy = ref(false)
   const sessionFiles = ref<string | null>(null)
+  const clipped = ref<string | null>(null)
 
   // The session is only a system prompt and its turns; the engine that runs it belongs to
   // `useModel` and outlives every conversation held with it.
@@ -122,14 +128,13 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
     // Read after the load, not before: a first download can take minutes, and the code the reader
     // asks about is what is open when they ask. The brief is the system prompt; the code is seeded
     // as an opening turn behind it, so instructions and data stay separable.
-    session = await loaded.chat(
-      buildSystemPrompt(role.value),
-      buildCodeMessage({
-        files: promptFiles(files.value, activeId.value),
-        maxCodeChars: model.choice.value?.maxCodeChars ?? 12_000,
-      }),
-    )
+    const context: CodeContext = {
+      files: promptFiles(files.value, activeId.value),
+      maxCodeChars: model.choice.value?.maxCodeChars ?? 12_000,
+    }
+    session = await loaded.chat(buildSystemPrompt(role.value), buildCodeMessage(context))
     sessionFiles.value = signatureOf(files.value)
+    clipped.value = describeClip(context)
     model.markAvailable()
     return session
   }
@@ -196,6 +201,7 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
     session?.destroy()
     session = null
     sessionFiles.value = null
+    clipped.value = null
     messages.value = []
     pending.value = ''
   }
@@ -216,6 +222,7 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
     pending,
     busy,
     stale,
+    clipped,
     ask,
     stop,
     newChat,

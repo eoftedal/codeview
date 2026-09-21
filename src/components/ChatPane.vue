@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
 import { DEFAULT_ROLE, describeStatus, type ModelChoice, type ModelStatus } from '../lib/chat'
+import type { CustomOpenRouterModel } from '../lib/providers/openrouterModels'
 import type { ChatMessage } from '../composables/useChat'
 
 const props = defineProps<{
@@ -14,6 +15,10 @@ const props = defineProps<{
   role: string
   /** Whether that is still the shipped one, which is all a rewritten prompt is marked by. */
   roleIsDefault: boolean
+  /** The reader's OpenRouter key, or '' if none is set. Only OpenRouter models need it. */
+  openrouterKey: string
+  /** OpenRouter models the reader has added themselves, beyond the shipped three. */
+  openrouterModels: CustomOpenRouterModel[]
   status: ModelStatus
   progress: number
   messages: ChatMessage[]
@@ -21,12 +26,16 @@ const props = defineProps<{
   pending: string
   busy: boolean
   stale: boolean
+  /** What of the code the model was not shown, or null when it saw all of it. */
+  clipped: string | null
 }>()
 
 const emit = defineEmits<{
   'update:model': [string]
   'update:thinking': [boolean]
   'update:role': [string]
+  'update:openrouterKey': [string]
+  'update:openrouterModels': [CustomOpenRouterModel[]]
   ask: [string]
   stop: []
   newChat: []
@@ -41,20 +50,74 @@ const PROMPTS = [
 const draft = ref('')
 const body = ref<HTMLElement>()
 
-// The prompt editor takes over the pane while it is open: a brief is several paragraphs, and a
-// textarea squeezed above the conversation is no place to read one. Its draft is a copy, so
-// closing without saving leaves the live prompt alone.
+// The settings panel takes over the pane while it is open: a brief is several paragraphs, and a
+// textarea squeezed above the conversation is no place to read one. Every draft here is a copy, so
+// closing without saving leaves the prompt, the key and the added models alone. One panel and one
+// Save, because they are all settings for this pane rather than three separate features.
 const editingPrompt = ref(false)
 const promptDraft = ref(props.role)
+const keyDraft = ref(props.openrouterKey)
+const modelsDraft = ref<CustomOpenRouterModel[]>(props.openrouterModels)
+
+// A second model of the same slug would just be a confusing duplicate in the picker — checked
+// against the catalogue too, not only the draft, so adding one already shipped is refused the
+// same way.
+const newModelSlug = ref('')
+const newModelLabel = ref('')
+const newModelThinking = ref(false)
+const newModelTaken = computed(() => {
+  const slug = newModelSlug.value.trim()
+  if (!slug) return false
+  return (
+    modelsDraft.value.some((entry) => entry.model === slug) ||
+    props.models.some((entry) => entry.provider === 'openrouter' && entry.model === slug)
+  )
+})
+
+function addModel(): void {
+  const model = newModelSlug.value.trim()
+  if (!model || newModelTaken.value) return
+  const label = newModelLabel.value.trim()
+  modelsDraft.value = [
+    ...modelsDraft.value,
+    { model, label: label || model, thinking: newModelThinking.value },
+  ]
+  newModelSlug.value = ''
+  newModelLabel.value = ''
+  newModelThinking.value = false
+}
+
+function removeModel(model: string): void {
+  modelsDraft.value = modelsDraft.value.filter((entry) => entry.model !== model)
+}
+
+const settingsChanged = computed(
+  () =>
+    promptDraft.value !== props.role ||
+    keyDraft.value !== props.openrouterKey ||
+    JSON.stringify(modelsDraft.value) !== JSON.stringify(props.openrouterModels),
+)
+
+/** Whether the toolbar's dot and gold tint are earned: any setting away from what shipped. */
+const settingsCustomized = computed(
+  () => !props.roleIsDefault || props.openrouterKey !== '' || props.openrouterModels.length > 0,
+)
 
 function editPrompt(): void {
   promptDraft.value = props.role
+  keyDraft.value = props.openrouterKey
+  modelsDraft.value = props.openrouterModels
+  newModelSlug.value = ''
+  newModelLabel.value = ''
+  newModelThinking.value = false
   editingPrompt.value = true
 }
 
 function savePrompt(): void {
   // An emptied box means the shipped brief, not a model with no instructions at all.
   emit('update:role', promptDraft.value.trim() ? promptDraft.value : DEFAULT_ROLE)
+  emit('update:openrouterKey', keyDraft.value)
+  emit('update:openrouterModels', modelsDraft.value)
   editingPrompt.value = false
 }
 
@@ -124,18 +187,14 @@ watch(
           <button v-if="busy" @click="emit('stop')">Stop</button>
           <button
             class="prompt"
-            :class="{ custom: !roleIsDefault, open: editingPrompt }"
-            :title="
-              roleIsDefault
-                ? 'Edit the system prompt the model is given'
-                : 'A rewritten system prompt is in use — click to edit or restore it'
-            "
-            aria-label="System prompt"
+            :class="{ custom: settingsCustomized, open: editingPrompt }"
+            title="System prompt, OpenRouter API key and added models"
+            aria-label="Chat settings"
             @click="editingPrompt ? (editingPrompt = false) : editPrompt()"
           >
             <span class="cog" aria-hidden="true">⚙</span>
-            <span class="label">System prompt</span>
-            <span v-if="!roleIsDefault" class="edited" aria-hidden="true">·</span>
+            <span class="label">Settings</span>
+            <span v-if="settingsCustomized" class="edited" aria-hidden="true">·</span>
           </button>
         </div>
         <div v-if="status === 'downloading'" class="bar">
@@ -151,6 +210,11 @@ watch(
           >
             code has changed — start a new chat
           </button>
+          <!-- The model was told what it cannot see; this is where the reader is. An answer over
+               part of the code reads exactly like one over all of it otherwise. -->
+          <span v-else-if="clipped" class="clipped" :title="clipped">
+            ⚠ the model sees part of the code — {{ clipped }}
+          </span>
         </div>
       </header>
 
@@ -163,16 +227,77 @@ watch(
         <p v-if="messages.length > 0" class="hint warn">
           Saving starts a new chat: a conversation keeps the prompt it began with.
         </p>
+        <button
+          class="restore"
+          :disabled="promptDraft === DEFAULT_ROLE"
+          @click="promptDraft = DEFAULT_ROLE"
+        >
+          Restore default prompt
+        </button>
+
+        <label class="key-label" for="openrouter-key">OpenRouter API key</label>
+        <p class="hint">
+          Needed only for an OpenRouter-hosted model. Stored in this browser only, and never
+          included in a share link — the key stays out of the URL the way the prompt above does not
+          have to.
+        </p>
+        <div class="key-row">
+          <input
+            id="openrouter-key"
+            v-model="keyDraft"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="sk-or-…"
+            class="key-input"
+          />
+          <button :disabled="!keyDraft" @click="keyDraft = ''">Clear</button>
+        </div>
+
+        <label class="key-label">OpenRouter models</label>
+        <p class="hint">
+          Beyond the three shipped above — any model OpenRouter itself lists. Enter the slug from
+          its model page (for example <code>mistralai/mistral-large</code>).
+        </p>
+        <ul v-if="modelsDraft.length > 0" class="models-list">
+          <li v-for="entry in modelsDraft" :key="entry.model" class="models-row">
+            <span class="models-label" :title="entry.model">{{ entry.label }}</span>
+            <span v-if="entry.thinking" class="models-thinking" title="Has a thinking mode">
+              thinks
+            </span>
+            <button class="models-remove" @click="removeModel(entry.model)">Remove</button>
+          </li>
+        </ul>
+        <div class="models-add">
+          <input
+            v-model="newModelSlug"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="vendor/model-slug"
+            class="models-input"
+            @keydown.enter.prevent="addModel"
+          />
+          <input
+            v-model="newModelLabel"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Label (optional)"
+            class="models-input"
+            @keydown.enter.prevent="addModel"
+          />
+          <label class="models-think" title="Offers the thinking checkbox and asks it to reason">
+            <input v-model="newModelThinking" type="checkbox" />
+            thinks
+          </label>
+          <button :disabled="!newModelSlug.trim() || newModelTaken" @click="addModel">Add</button>
+        </div>
+        <p v-if="newModelTaken" class="hint warn">Already on the list.</p>
+
         <div class="prompt-actions">
-          <button class="save" :disabled="promptDraft === role" @click="savePrompt">Save</button>
+          <button class="save" :disabled="!settingsChanged" @click="savePrompt">Save</button>
           <button @click="editingPrompt = false">Cancel</button>
-          <button
-            class="restore"
-            :disabled="promptDraft === DEFAULT_ROLE"
-            @click="promptDraft = DEFAULT_ROLE"
-          >
-            Restore default
-          </button>
         </div>
       </section>
 
@@ -218,7 +343,10 @@ watch(
         <button type="submit" class="send" :disabled="busy || !draft.trim()">Ask</button>
       </form>
 
-      <footer>Runs on this machine — weights come down, the code never goes up.</footer>
+      <footer v-if="choice?.provider === 'openrouter'">
+        Hosted by OpenRouter for this model — the code goes to their API, not only this machine.
+      </footer>
+      <footer v-else>Runs on this machine — weights come down, the code never goes up.</footer>
     </template>
   </section>
 </template>
@@ -342,6 +470,9 @@ button:disabled {
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px 12px;
+  /* Three settings now share this panel, and the added-models list has no fixed size — without
+     this, a reader with several of their own models, or a short pane, could not reach Save. */
+  overflow-y: auto;
 }
 
 .hint {
@@ -357,7 +488,9 @@ button:disabled {
 
 .prompt-text {
   flex: 1;
-  min-height: 0;
+  /* A floor, not `0`: the panel scrolls past this rather than squeezing the prompt itself away to
+     fit the models list below it. */
+  min-height: 120px;
   resize: none;
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
@@ -375,7 +508,107 @@ button:disabled {
 }
 
 .restore {
+  align-self: flex-start;
+}
+
+.key-label {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.key-row {
+  display: flex;
+  gap: 6px;
+}
+
+.key-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.key-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.models-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.models-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.models-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.models-thinking {
+  color: var(--dim);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.models-remove {
   margin-left: auto;
+}
+
+.models-add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.models-input {
+  flex: 1 1 140px;
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.models-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.models-think {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--dim);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.models-think input {
+  accent-color: var(--accent);
+  margin: 0;
+  cursor: pointer;
 }
 
 .model {
@@ -462,6 +695,14 @@ button:disabled {
   text-decoration: underline;
 }
 
+.clipped {
+  color: var(--gold);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .body {
   flex: 1;
   min-height: 0;
@@ -494,6 +735,10 @@ button:disabled {
 
 .message {
   display: grid;
+  /* `minmax(0, …)` rather than the implicit `auto`: a bubble holding a code block must be allowed
+     to be narrower than that block's longest line, or the log scrolls sideways instead of the
+     block doing it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 3px;
 }
 
@@ -506,6 +751,7 @@ button:disabled {
 
 .text {
   margin: 0;
+  min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.65;

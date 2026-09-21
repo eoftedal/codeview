@@ -110,12 +110,33 @@ the tree and the Monaco editor instance live in `shallowRef`s. Tree rows get sha
 `provide`/`inject` (`src/components/astContext.ts`), not prop drilling.
 
 **The chat tab is a third question with a third cost.** `src/lib/chat.ts` is a provider contract,
-not a client: `providers/{builtin,webllm,transformers}.ts` implement `availability` / `load`, and nothing above
-them knows which model is answering. **Two lifetimes, and conflating them is the bug that keeps
-coming back**: a `ModelEngine` owns the loaded weights and outlives conversations, while a
-`ChatSession` is a system prompt and its turns. `newChat` drops the session and keeps the engine —
-destroying the engine per conversation means reloading the model onto the GPU on every "New chat". No key, no
-server, no hosted fallback — every model runs on the reader's machine. That engine is now
+not a client: `providers/{builtin,webllm,transformers,openrouter}.ts` implement `availability` /
+`load`, and nothing above them knows which model is answering. **Two lifetimes, and conflating
+them is the bug that keeps coming back**: a `ModelEngine` owns the loaded weights and outlives
+conversations, while a `ChatSession` is a system prompt and its turns. `newChat` drops the session
+and keeps the engine — destroying the engine per conversation means reloading the model onto the
+GPU on every "New chat". Three of the four providers keep the rule stated everywhere else: no key,
+no server, no hosted fallback — every model runs on the reader's machine. `openrouter` is the one
+deliberate exception, clearly labelled wherever it's offered: it sends the system prompt, the open
+files and every question to OpenRouter's API using a key the reader supplies themselves
+(`providers/openrouterKey.ts`, `localStorage` key `codeview:openrouter-key` — the first _secret_
+kept there, under the same unencrypted trust model as every other persisted preference in this
+app), and it is never included in a share link (`copyShareLink`/`buildFragment` in
+`useBuffer.ts`/`App.vue` hand-pick exactly which fields go into the fragment; the key is never one
+of them). An OpenRouter entry with no key configured stays visible in the picker rather than
+disappearing — `Availability`'s `'needs-key'` — and `useModel`'s `engine()`/`engineFor()` refuse to
+load one without a key, throwing a message that names the missing key specifically, before ever
+attempting a request. The three shipped OpenRouter entries are not the whole story: a reader can
+add any OpenRouter-hosted slug of their own from the same settings panel
+(`providers/openrouterModels.ts`, `localStorage` key `codeview:openrouter-models`, turned into an
+ordinary `ModelChoice` by `toModelChoice` so nothing downstream treats it differently). `MODELS` in
+`chat.ts` is a static list, so `providers/index.ts`'s `allModels()` is what actually merges the
+shipped catalogue with the reader's own — `usableModels()` and the new `findModel()` (the one
+lookup `useModel`, `useAgents` and the agents pane use in place of `chat.ts`'s own `modelById`,
+which only knows the shipped three) both go through it. Adding or removing one does not touch the
+GPU/builtin side of the picker, so `useModel.refreshModels()` exists as a narrow escape hatch —
+called from `App.vue`'s watch on the reader's list — that reapplies whatever `probe` already
+settled about the GPU without re-probing it. That engine is now
 `useModel`'s and not the chat's: **one loaded model for the whole app**, one picker, one `thinking`
 flag, shared with the agents tab, because a conversation and a run are two uses of the same weights
 and a second engine would put the same gigabytes on the GPU twice. Consumers register through
@@ -126,8 +147,11 @@ Both WebGPU libraries are **dynamically imported inside workers** (`worker: { fo
 `optimizeDeps.exclude`), so they land in their own chunks and the main bundle is unchanged; check
 that with a build before believing an edit. A GPU **adapter** is a fact about the browser, not the
 model — Chrome exposes `navigator.gpu` on machines that hand back nothing — so `useChat.probe`
-settles it once and drops every downloadable model when there is none. That is what leaves the pane
-with the bare "no language model" message rather than a picker full of things that cannot run.
+settles it once and drops every downloadable model when there is none — **except OpenRouter's**,
+which needs no GPU and stays listed either way; what it needs instead is a key, which is a fact
+about the reader's own settings, not the browser, so it is gated separately. That is what leaves the
+pane with the bare "no language model" message only when neither a browser capability nor a key
+can be had, rather than a picker full of things that cannot run.
 `enable_thinking` is sent only for models flagged `thinking`, and its value is per _question_, not
 per session — it rides `AskOptions`, because `extra_body` is a request field. WebLLM turns thinking
 off by prefilling an empty `<think>` block, which would corrupt a model that has none. **Each
@@ -213,12 +237,17 @@ spends a small context window on working-out and invites the next agent to treat
 thought as a finding. An answer that is _only_ thinking therefore returns nothing, which a brief
 recovers from by falling back to the reader's task.
 
-`StepKind` is a rendering contract as much as a data one: `task` and the orchestrator's `brief` /
-`summary` are the spine and always open, an `agent` report arrives folded, and the hop in flight is
-always open — a run is slow, and the streaming text is the only sign it is alive. A step does
-**not** keep what it was handed: a handoff is the brief above it plus the report before it, and both
-are already rows in the same transcript, so storing it would only render the same text twice.
-`tests/e2e/app.test.ts` asserts that shape over `.step.task`, `.step.brief` and `details.report`,
+`StepKind` is a rendering contract as much as a data one: `task`, the orchestrator's `brief` /
+`summary`, an `agent` report, and the hop in flight are all shown open — a run is read for its
+findings, not clicked through, and the only thing that folds on its own is a model's `<think>` block
+inside whichever step produced it. Every agent still gets a color of its own (`AGENT_COLORS` in
+`AgentsPane.vue`, hashed from its name into a `--agent` custom property on the step), so a run of
+several agents reads as several distinct voices rather than one undifferentiated scroll, and the
+orchestrator's own steps (`brief`, `summary`) share a separate, single color throughout so they read
+as one voice threading between the agents it briefs. A step does **not** keep what it was handed: a
+handoff is the brief above it plus the report before it, and both are already rows in the same
+transcript, so storing it would only render the same text twice. `tests/e2e/app.test.ts` asserts
+that shape over `.step.task`, `.step.brief` and `details.report` (open by default, per the above),
 and checks the relay against what actually reached the model (`__inputs`) rather than against the
 DOM — along with the invariant itself, that the orchestrator's system prompt carries the roster and
 no code while every agent's carries the file.
@@ -236,6 +265,29 @@ model nobody chose — because **an agent's model rides its header**: `--8<-- Tr
 than resolved so a team survives a machine that cannot run what it names; `engineFor` then throws
 naming the model, filed against the agent, rather than running it on something else.
 
+**The context window is a catalogue field, and the budgets follow it.** WebLLM's MLC list compiles
+every model here to a 4 096-token override, and `ModelChoice.contextTokens` is what it actually runs
+at — Qwen2.5-Coder 16k, Qwen3.5 32k (a full-attention layer only every fourth, so the KV cache is
+cheap), Gemma 2 8k because its weights stop there. It is WebLLM-only the way `dtype` is ONNX-only:
+neither the ONNX pipeline nor Chrome's model takes such a figure, and `tests/chat.test.ts` refuses
+one on their entries. `maxCodeChars` is sized from it — ~3 chars a token of numbered code, ~7.5k
+tokens held back for brief, handoff and generation — and the 8k entries are knowingly over-committed
+at 14 000. **The agents pane spends the handoff from the code budget**: `maxCodeChars` was sized for
+a chat, and an agent's question is a brief plus a whole report, so `useAgents` passes
+`maxCodeChars − handoff.length` (floored at `MIN_AGENT_CODE_CHARS`) to `buildCodeMessage`, which
+clips the listing and says so instead of the answer dying at the window with nothing to relay. The
+relay clip scales too — `relayLimit(maxCodeChars)`, a third of the code budget and never under
+`MAX_RELAY_CHARS` — with the orchestrator's two messages clipped at the picked model's limit and each
+handoff at the receiving agent's. **OpenRouter has its own ceiling**, `MAX_HOSTED_TOKENS`, not
+`ceiling.ts`'s: on that API `max_tokens` also pays for the reasoning, and nothing hosted is looping.
+Its thought does not arrive in the text either — it is `delta.reasoning` beside `delta.content` —
+so `foldReasoning` in `providers/thoughts.ts` turns it into the `<think>` block everything else
+already handles, on every stream regardless of the thinking flag, since a custom slug may reason
+unasked. The shipped Review agent runs on `DEFAULT_REVIEW`, not `DEFAULT_ROLE`: the same
+`REVIEWER_BRIEF` closed with "report every flow in full" instead of the chat's "keep answers
+short", because an agent's report is the next agent's entire input and a system prompt asking for
+brevity would beat any orchestrator brief asking for more.
+
 **Per-agent models are the one exception to "one loaded model", and `useModel` still owns every
 engine.** The picked engine is `loaded`; an agent's is an _extra_, loaded by `engineFor` on the
 first hop that needs it and kept across runs for the same reason the picked one is kept across
@@ -245,13 +297,21 @@ a team can change under a run. Engines change hands rather than reloading where 
 `model` watcher promotes an extra that becomes the picked model and demotes a picked model that an
 agent still names (`wanted`). The orchestrator has no model setting and never will — it runs on the
 picked model, and the picker is still the chat's own. `thinkingNow(id)` and `maxCodeChars` are
-looked up per agent for the same reason; the code _snapshot_ is still one per run.
+looked up per agent for the same reason; the code _snapshot_ is still one per run. **The
+orchestrator never thinks** (`ORCHESTRATOR_THINKS` in `useAgents`), whatever the reader's switch
+says: it has no code to reason about, a brief is a pointer, and the summary is reports it is
+forbidden to improve on — Qwen3.5 4B spent minutes weighing the wording of each, and an earlier
+"keep it under 120 words" gave it a number to count on top. The brief asks for a shape and says
+outright not to count or redraft; `tests/agents.test.ts` refuses a word figure.
 
 Answers are Markdown, rendered by `markdown.ts` → `MarkdownText.vue` → `MarkdownSpans.vue` as
 real elements — never `v-html`, which is what keeps model output from becoming markup. The parser's
 odd-looking rules are deliberate: an unterminated fence is code (a streaming answer is always
 mid-block), emphasis is `*`-only (`_` would italicise `snake_case`), and only `http(s)` targets
-become links.
+become links. A model reaching for LaTeX mid-sentence gets one concession: a `$…$` run
+holding nothing _but_ arrow macros is spelled as the character (`SYMBOLS` in `markdown.ts`,
+and adding a symbol means adding a row). Nothing but — which is what leaves `$5 to $10`, and
+any macro the table has no character for, exactly as written.
 
 **The brief is the system prompt; the code is a turn.** `buildSystemPrompt(role)` now returns the
 brief and nothing else, and `buildCodeMessage({files, maxCodeChars})` returns the listing, which
@@ -289,7 +349,20 @@ hop for the same reason the code listing states its clip. An answer that is only
 note, or the note would be handed on as the whole report. Both providers keep
 `withoutThoughts(answer)` in the history, not the thought: Qwen's and Gemma's own templates drop a
 past turn's reasoning, and in an 8 k window it would otherwise crowd out the next question.
-**Sampling is a catalogue field, not a knob**: `ModelChoice.sampling` carries what a model's
+**Sampling is chosen per question, not only per model**: `ModelChoice.sampling` is the row for a
+plain answer and `thinkingSampling` the one for a thinking question, and the provider picks between
+them from `AskOptions.thinking` (falling back to `sampling` where there is only one row). Qwen3.5
+publishes four rows and needs two of them: thinking runs the card's **precise-coding** row
+(`0.6 / 0.95 / presence 0`), not its general one (`1.0 / 0.95 / presence 1.5`), because every row on
+that card assumes `top_k=20` and WebLLM has no field for it — at temperature 1.0 over a 0.95 nucleus
+the leftover tail is far fatter than Qwen intends, which is where a long thought circles. The lower
+temperature is the nearest substitute WebLLM has for the missing top-k; the general row's presence
+penalty was tried first as Qwen's own anti-loop remedy and looped anyway, and pushing a reviewer
+away from what it has already said fits badly with citing the code's identifiers. A `repetition_penalty` of **1.05 on both rows is the one figure with no row behind it** — the card
+leaves every row at 1.0 — added because a thought still circled at 0.6; it is deliberately milder
+than Qwen2.5-Coder's shipped 1.1, because the penalty falls on the code's own identifiers, which a
+citation has to repeat. Non-thinking runs the card's instruct row (`0.7 / 0.8 / presence 1.5`),
+which is what the agents' orchestrator now uses throughout. **Sampling is a catalogue field, not a knob**: `ModelChoice.sampling` carries what a model's
 publisher recommends over its weights' own defaults, rides `LoadOptions` like `dtype`, and is
 applied on every question. It exists because **MLC builds do not carry the publisher's
 `generation_config.json`**: Qwen3.5's and Qwen2.5-Coder's `mlc-chat-config.json` ship `top_p 1.0`

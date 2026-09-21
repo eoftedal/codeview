@@ -576,7 +576,7 @@ describe('the chat pane picks a model honestly', () => {
     return fresh
   }
 
-  it('says only that nothing is available when the browser can run neither', async () => {
+  it('still offers OpenRouter when the browser can run neither of the others', async () => {
     const fresh = await chatPageWith(() => {
       delete (window as unknown as { LanguageModel?: unknown }).LanguageModel
       Object.defineProperty(navigator, 'gpu', {
@@ -585,10 +585,19 @@ describe('the chat pane picks a model honestly', () => {
       })
     })
     try {
-      expect(await fresh.$eval('.chat-pane', (el) => el.textContent?.trim())).toBe(
+      // Nothing on-device can run, but OpenRouter needs neither a browser model nor a GPU — only a
+      // key, which is what the status line says is missing rather than the pane going empty.
+      const options = await fresh.$$eval('.model option', (nodes) =>
+        nodes.map((node) => node.textContent?.trim()),
+      )
+      expect(options).toEqual([
+        'GPT-4o mini (OpenRouter) · no download',
+        'Claude 3.5 Haiku (OpenRouter) · no download',
+        'GLM-5.3 Flash (OpenRouter) · no download',
+      ])
+      expect(await fresh.$eval('.chat-pane', (el) => el.textContent)).not.toContain(
         'No language model is available in this browser.',
       )
-      expect(await fresh.$('.model')).toBeNull()
     } finally {
       await fresh.close()
     }
@@ -612,7 +621,14 @@ describe('the chat pane picks a model honestly', () => {
       const options = await fresh.$$eval('.model option', (nodes) =>
         nodes.map((node) => node.textContent?.trim()),
       )
-      expect(options).toEqual(['Browser built-in · no download'])
+      // OpenRouter needs no GPU, so it survives losing the adapter alongside builtin — it is a
+      // key, not a browser capability, that these three are missing.
+      expect(options).toEqual([
+        'Browser built-in · no download',
+        'GPT-4o mini (OpenRouter) · no download',
+        'Claude 3.5 Haiku (OpenRouter) · no download',
+        'GLM-5.3 Flash (OpenRouter) · no download',
+      ])
     } finally {
       await fresh.close()
     }
@@ -620,6 +636,7 @@ describe('the chat pane picks a model honestly', () => {
 
   it('offers the whole catalogue on a GPU, with the browser’s own model as the default', async () => {
     const fresh = await chatPageWith(function () {
+      localStorage.clear()
       ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
         availability: async () => 'available',
         create: async () => ({
@@ -641,6 +658,195 @@ describe('the chat pane picks a model honestly', () => {
       expect(options).toContain('Qwen3.5 4B · ~3.9 GB')
       // The one with nothing to download is what a first visit lands on.
       expect(await fresh.$eval('.model', (el) => (el as HTMLSelectElement).value)).toBe('builtin')
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('keeps an OpenRouter model selectable with no key, and stops and complains when asked', async () => {
+    const fresh = await chatPageWith(function () {
+      localStorage.clear()
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+    })
+    try {
+      // Unlike a GPU-only model on a GPU-less browser, this one is not hidden: what it is missing
+      // is a key the reader can supply here, not a browser capability.
+      await fresh.select('.model', 'openrouter-gpt-4o-mini')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(await fresh.$eval('.status .muted', (el) => el.textContent)).toContain(
+        'add an OpenRouter API key',
+      )
+
+      await fresh.type('.composer textarea', 'What does this do?')
+      await fresh.click('.composer .send')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      const failed = await fresh.$eval('.message.failed .text', (el) => el.textContent)
+      expect(failed).toContain('needs an OpenRouter API key')
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('lets an OpenRouter key be entered, used, persisted and cleared — and never shared', async () => {
+    // Its own storage partition and browser context, for the same reason the system-prompt reload
+    // test uses one: what survives a reload is the point, and `chatPageWith`'s pages share an
+    // origin with every other test in this file.
+    const context = await browser.createBrowserContext()
+    const fresh = await context.newPage()
+    try {
+      await fresh.evaluateOnNewDocument(function () {
+        Object.defineProperty(navigator, 'gpu', {
+          value: { requestAdapter: async () => ({}) },
+          configurable: true,
+        })
+        const originalFetch = window.fetch.bind(window)
+        window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = typeof input === 'string' ? input : input.toString()
+          if (!url.includes('openrouter.ai')) return originalFetch(input, init)
+          const encoder = new TextEncoder()
+          const body = new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode('data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'),
+              )
+              controller.enqueue(
+                encoder.encode(
+                  'data: {"choices":[{"delta":{"content":" there"},"finish_reason":"stop"}]}\n\n',
+                ),
+              )
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+              controller.close()
+            },
+          })
+          return new Response(body, { status: 200 })
+        }) as typeof window.fetch
+      })
+
+      await fresh.goto(URL, { waitUntil: 'networkidle0' })
+      await fresh.waitForSelector('.row')
+      const tabs = await fresh.$$('.tabs button')
+      await tabs[2]!.click()
+      await fresh.waitForSelector('.chat-pane')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      await fresh.click('.prompt')
+      await fresh.type('.key-input', 'sk-or-test-key')
+      await fresh.click('.prompt-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+
+      expect(await fresh.$eval('.prompt', (el) => el.className)).toContain('custom')
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:openrouter-key'))).toBe(
+        'sk-or-test-key',
+      )
+
+      // A question against a keyed OpenRouter model now streams a real reply rather than
+      // complaining.
+      await fresh.select('.model', 'openrouter-gpt-4o-mini')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      await fresh.type('.composer textarea', 'What does this do?')
+      await fresh.click('.composer .send')
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(await fresh.$eval('.message.assistant .text', (el) => el.textContent)).toContain(
+        'Hello there',
+      )
+
+      // The key is never in the address bar: Copy link only ever hand-picks the prompt and the
+      // agent team into the fragment.
+      await fresh.evaluate(() => {
+        const button = [...document.querySelectorAll('.actions > button')].find(
+          (candidate) => candidate.textContent?.trim() === 'Copy link',
+        )
+        ;(button as HTMLElement | undefined)?.click()
+      })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      const hash = await fresh.evaluate(() => location.hash)
+      expect(hash).not.toContain('sk-or-test-key')
+      expect(hash).not.toContain('openrouter')
+
+      // Persists across a reload, since nothing here clears storage on navigation…
+      await fresh.reload({ waitUntil: 'networkidle0' })
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:openrouter-key'))).toBe(
+        'sk-or-test-key',
+      )
+
+      // …and clearing it removes the stored value rather than writing an empty one.
+      const reloadedTabs = await fresh.$$('.tabs button')
+      await reloadedTabs[2]!.click()
+      await fresh.waitForSelector('.chat-pane')
+      await fresh.click('.prompt')
+      await fresh.click('.prompt-editor .key-row button')
+      await fresh.click('.prompt-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:openrouter-key'))).toBeNull()
+    } finally {
+      await context.close()
+    }
+  })
+
+  it('lets a reader add and remove their own OpenRouter model', async () => {
+    const fresh = await chatPageWith(function () {
+      localStorage.clear()
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+    })
+    try {
+      await fresh.click('.prompt')
+      await fresh.type('.models-add .models-input', 'mistralai/mistral-large')
+      // The second text input is the optional label.
+      const labelInput = await fresh.$$('.models-add .models-input')
+      await labelInput[1]!.type('Mistral Large')
+      await fresh.click('.models-add button')
+      await fresh.click('.prompt-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 150))
+
+      // It shows up in the picker under the label given it, alongside the shipped three.
+      const options = await fresh.$$eval('.model option', (nodes) =>
+        nodes.map((node) => node.textContent?.trim()),
+      )
+      expect(options).toContain('Mistral Large · no download')
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:openrouter-models'))).toBe(
+        JSON.stringify([
+          { model: 'mistralai/mistral-large', label: 'Mistral Large', thinking: false },
+        ]),
+      )
+
+      // It behaves exactly like a shipped OpenRouter entry: no key yet, so it stops and complains.
+      await fresh.select(
+        '.model',
+        await fresh.$$eval(
+          '.model option',
+          (nodes) =>
+            (nodes.find((n) => n.textContent?.includes('Mistral Large')) as HTMLOptionElement)
+              .value,
+        ),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(await fresh.$eval('.status .muted', (el) => el.textContent)).toContain(
+        'add an OpenRouter API key',
+      )
+
+      // Removing it again takes it back out of the picker and out of storage.
+      await fresh.click('.prompt')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(await fresh.$$eval('.models-remove', (nodes) => nodes.length)).toBe(1)
+      await fresh.click('.models-remove')
+      expect(await fresh.$$eval('.models-remove', (nodes) => nodes.length)).toBe(0)
+      await fresh.click('.prompt-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      expect(
+        await fresh.evaluate(() => localStorage.getItem('codeview:openrouter-models')),
+      ).toBeNull()
+      expect(
+        await fresh.$$eval('.model option', (nodes) =>
+          nodes.map((node) => node.textContent?.trim()),
+        ),
+      ).not.toContain('Mistral Large · no download')
     } finally {
       await fresh.close()
     }
@@ -751,6 +957,72 @@ describe('the chat pane picks a model honestly', () => {
       expect(cog!.left).toBeGreaterThanOrEqual(pane!.left)
       await fresh.click('.prompt')
       expect(await fresh.$('.prompt-editor')).not.toBeNull()
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('scrolls a wide code block inside itself rather than widening the log', async () => {
+    // A model answering about code answers *with* code, and a fenced line is as long as it is. The
+    // bubble must keep the reader's width and let the block scroll — a log that scrolls sideways
+    // moves the text out from under the eye that is reading it.
+    const fresh = await chatPageWith(function () {
+      // A default-width pane: an earlier case in this file drags the divider and the split is
+      // remembered, and this one is about the code block's width, not the pane's.
+      localStorage.clear()
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async () => ({
+          promptStreaming: () =>
+            new ReadableStream({
+              start(controller) {
+                const wide = `const query = \`SELECT * FROM users WHERE id = '${'x'.repeat(400)}'\``
+                controller.enqueue('```ts\n' + wide + '\n```\n\n')
+                // Many columns rather than one long cell: a cell's prose wraps (which is what a
+                // reader wants), so what a table cannot do is fit twelve columns into a narrow pane.
+                const columns = Array.from({ length: 12 }, (_, i) => `column ${i + 1}`)
+                controller.enqueue(`| ${columns.join(' | ')} |\n`)
+                controller.enqueue(`|${columns.map(() => '---').join('|')}|\n`)
+                controller.enqueue(`| ${columns.map((_, i) => `value ${i + 1}`).join(' | ')} |\n`)
+                controller.close()
+              },
+            }),
+          destroy: () => {},
+        }),
+      }
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+    })
+    try {
+      await fresh.type('.composer textarea', 'show me')
+      await fresh.click('.composer .send')
+      await fresh.waitForSelector('.message.assistant .md .code')
+
+      const measured = await fresh.evaluate(() => {
+        const pick = (selector: string) => document.querySelector(selector)!
+        const box = (selector: string) => {
+          const el = pick(selector)
+          return { scroll: el.scrollWidth, client: el.clientWidth }
+        }
+        return {
+          pane: box('.chat-pane'),
+          log: box('.chat-pane .body'),
+          bubble: box('.message.assistant .text'),
+          code: box('.message.assistant .md .code'),
+          table: box('.message.assistant .md .table'),
+        }
+      })
+
+      // The block and the table are each wider than their box — that is the point of the line we
+      // put in — and each is the one thing that scrolls.
+      expect(measured.code.scroll).toBeGreaterThan(measured.code.client)
+      expect(measured.table.scroll).toBeGreaterThan(measured.table.client)
+      // Nothing above them overflows: not the bubble, not the log, not the pane.
+      expect(measured.bubble.scroll).toBeLessThanOrEqual(measured.bubble.client)
+      expect(measured.log.scroll).toBeLessThanOrEqual(measured.log.client)
+      expect(measured.pane.scroll).toBeLessThanOrEqual(measured.pane.client)
     } finally {
       await fresh.close()
     }
@@ -1400,7 +1672,7 @@ describe('the agents pane runs a line of agents', () => {
       expect(await pipelineRows(fresh)).toEqual([
         'Orchestrator briefs each agent · never sees the code',
         'Review sees every open file',
-        'Triage sees every open file',
+        'Adversarial Triage sees every open file',
       ])
     } finally {
       await fresh.close()
@@ -1427,16 +1699,14 @@ describe('the agents pane runs a line of agents', () => {
       expect(await stepText(fresh, '.step.brief .text')).toEqual(['reply 1', 'reply 3'])
       expect(await stepText(fresh, '.step.summary .text')).toEqual(['reply 5'])
 
-      // An agent's report is the bulk of the run, so it arrives folded — and opens.
+      // An agent's report is the bulk of the run, so it arrives open rather than folded — a reader
+      // watching a review wants to see the findings, not a row of summaries to click through.
       expect(
         await fresh.$$eval('.step.agent details.report', (nodes) =>
           nodes.map((node) => (node as HTMLDetailsElement).open),
         ),
-      ).toEqual([false, false])
+      ).toEqual([true, true])
 
-      await fresh.$$eval('.step.agent details.report', (nodes) => {
-        for (const node of nodes) (node as HTMLDetailsElement).open = true
-      })
       expect(await stepText(fresh, '.step.agent details.report > .text')).toEqual([
         'reply 2',
         'reply 4',
@@ -1511,10 +1781,8 @@ describe('the agents pane runs a line of agents', () => {
       expect(inputs[3]).toContain('reply 2')
       expect(inputs[3]).toContain('reply 3')
 
-      // The reader loses nothing — the thinking is folded into the row that produced it.
-      await fresh.$$eval('.step.agent details.report', (nodes) => {
-        for (const node of nodes) (node as HTMLDetailsElement).open = true
-      })
+      // The reader loses nothing — the thinking is folded into the row that produced it, itself
+      // rendered as markdown now rather than as a raw block of text.
       const thoughts = await fresh.$$eval('.step details.think', (nodes) =>
         nodes.map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
       )
@@ -1594,10 +1862,10 @@ describe('the agents pane runs a line of agents', () => {
         fresh.$$eval('.team-editor .name', (nodes) =>
           nodes.map((node) => (node as HTMLInputElement).value),
         )
-      expect(await names()).toEqual(['Review', 'Triage'])
+      expect(await names()).toEqual(['Review', 'Adversarial Triage'])
 
       await fresh.click('.team-editor .add')
-      expect(await names()).toEqual(['Review', 'Triage', 'Agent 3'])
+      expect(await names()).toEqual(['Review', 'Adversarial Triage', 'Agent 3'])
 
       await fresh.$$eval('.team-editor .remove', (nodes) => {
         ;(nodes[0] as HTMLElement).click()
@@ -1713,6 +1981,35 @@ describe('the agents pane runs a line of agents', () => {
           (node as HTMLSelectElement).selectedOptions[0]?.textContent?.trim(),
         ),
       ).toBe('no-such-model · not available here')
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('stops and complains about a missing OpenRouter key rather than a generic failure', async () => {
+    const fresh = await agentsPage()
+    try {
+      await fresh.click('.prompt')
+      await fresh.$$eval('.team-editor .agent-model', (nodes) => {
+        const select = nodes[1] as HTMLSelectElement
+        select.value = 'openrouter-gpt-4o-mini'
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+      })
+      await fresh.click('.team-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      await fresh.$eval('.composer textarea', (el) => {
+        const box = el as HTMLTextAreaElement
+        box.value = 'Check the routes.'
+        box.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await fresh.click('.composer .send')
+      await fresh.waitForSelector('.step.failed', { timeout: 15_000 })
+
+      // Specific to the missing key — not "cannot run in this browser" (it can, once one is set)
+      // and not a raw fetch error, since the key is checked before any request is attempted.
+      const failed = await fresh.$eval('.step.failed .text', (el) => el.textContent)
+      expect(failed).toContain('needs an OpenRouter API key')
     } finally {
       await fresh.close()
     }

@@ -2,10 +2,13 @@
  * The chat pane's contract with a language model, plus the prompt that turns one into a reviewer of
  * the current buffer.
  *
- * Every model runs on the reader's own machine — the browser's built-in one, or weights fetched
- * once and cached and then executed on the GPU. There is no backend, and the promise everywhere
- * else in this app is that pasted code never leaves the machine: weights come down, the buffer
- * never goes up. Where nothing is usable the pane says so and stops.
+ * Three of the four providers run entirely on the reader's own machine — the browser's built-in
+ * one, or weights fetched once and cached and then executed on the GPU — and for those the promise
+ * holds: no key, no server, weights come down, the buffer never goes up. `openrouter` is the one
+ * deliberate exception: a hosted, opt-in provider that sends the open files to OpenRouter's API,
+ * clearly labelled as such wherever it appears, and only ever reachable with a reader-supplied key
+ * (`providers/openrouterKey.ts`) that itself never leaves this browser's `localStorage` — never
+ * bundled into a share link. Where nothing is usable the pane says so and stops.
  *
  * The provider implementations live in `providers/`; this file is the seam they share.
  */
@@ -14,8 +17,11 @@ import type { Language } from './analyzer'
 import type { CodeFile } from './files'
 
 /** Chrome's own wording, reused for every provider: `downloadable` still creates, after a
- *  download; only `unavailable` is a dead end. */
-export type Availability = 'unavailable' | 'downloadable' | 'downloading' | 'available'
+ *  download; only `unavailable` is a dead end. `needs-key` is OpenRouter's own equivalent of
+ *  `downloadable` — a link from "won't work yet" to "will work" — except what resolves it is a
+ *  key typed into the settings panel, not a wait for bytes. */
+export type Availability =
+  'unavailable' | 'downloadable' | 'downloading' | 'available' | 'needs-key'
 
 /**
  * Two lifetimes, deliberately separated.
@@ -81,8 +87,13 @@ export interface LoadOptions {
   thinking?: boolean
   /** ONNX quantisation, when the model asks for something other than the default. */
   dtype?: Quantisation
-  /** Sampling to apply over the model's own defaults, on every question. */
+  /** Sampling to apply over the model's own defaults, on a question asked without thinking. */
   sampling?: Sampling
+  /** Sampling for a question asked *with* thinking, where the publisher names a different row.
+   *  Falls back to `sampling` when absent — see `ModelChoice.thinkingSampling`. */
+  thinkingSampling?: Sampling
+  /** The context window to run at, in tokens. WebLLM only — see `ModelChoice.contextTokens`. */
+  contextTokens?: number
 }
 
 /**
@@ -121,7 +132,7 @@ export interface Provider {
   load(options: LoadOptions): Promise<ModelEngine>
 }
 
-export type ProviderId = 'builtin' | 'webllm' | 'transformers'
+export type ProviderId = 'builtin' | 'webllm' | 'transformers' | 'openrouter'
 
 /** The ONNX builds worth offering: 4-bit weights, with fp16 or fp32 compute. */
 export type Quantisation = 'q4f16' | 'q4'
@@ -133,7 +144,14 @@ export interface ModelChoice {
   label: string
   /** Rough memory the model needs, for the picker. Empty for the browser's own. */
   size: string
-  /** How much of the buffer fits alongside a conversation in this model's context. */
+  /**
+   * How much of the buffer fits alongside a conversation in this model's context. Sized from the
+   * window: line-numbered code runs about three characters a token, and roughly 7.5k tokens are
+   * held back for the brief (~1k), the conversation or an agent's handoff (~2.5k) and generation
+   * (`MAX_NEW_TOKENS`). So a 16k window gives 24 000 characters, 32k gives 60 000, and an 8k
+   * window — Gemma 2, Chrome's own — is already over-committed at 14 000; neither is a thinking
+   * model, so the shortfall shows as a clipped answer with its note rather than an empty one.
+   */
   maxCodeChars: number
   /** The provider's own model id, where it has one. */
   model?: string
@@ -143,25 +161,70 @@ export interface ModelChoice {
    *  free choice: a repo's `transformers_js_config` names what its weights were validated at, and
    *  fp16 compute is where small models go numerically wrong on WebGPU. */
   dtype?: Quantisation
-  /** Sampling the publisher recommends over the weights' own defaults, where it does. */
+  /** Sampling the publisher recommends over the weights' own defaults, where it does. Where a
+   *  `thinkingSampling` row sits beside it, this one is the *non-thinking* answer's. */
   sampling?: Sampling
+  /**
+   * Sampling for a question asked with thinking, where the publisher names a row of its own for
+   * it. A thinking answer and a plain one are different enough that Qwen publishes four rows;
+   * whether a question thinks is decided per question, so the row has to be too. Only meaningful
+   * on a `thinking` entry, and only WebLLM applies either — `tests/chat.test.ts` refuses the rest.
+   */
+  thinkingSampling?: Sampling
+  /**
+   * The context window to run at, in tokens. WebLLM only: the MLC catalogue compiles every model
+   * here to a 4096 override, and the KV cache is sized from whatever this says, so it is a trade
+   * between what the model can hold and what the GPU can — a per-model fact, like `dtype`. Qwen's
+   * attention layers are cheap (Qwen3.5 has a full-attention layer only every fourth), Gemma 2's
+   * are not and its weights stop at 8k regardless. Neither the ONNX pipeline nor Chrome's model
+   * takes such a figure, so an entry of theirs must not carry one; `tests/chat.test.ts` refuses it.
+   */
+  contextTokens?: number
   note: string
 }
 
 /**
- * The Qwen3.5 model card's row for thinking mode on general tasks, as far as WebLLM can carry it
- * (`top_k=20, min_p=0` have no field): `temperature=1.0, top_p=0.95, presence_penalty=1.5,
- * repetition_penalty=1.0`. The presence penalty is Qwen's own remedy for a reasoning model that
- * never stops, with the card's warning that the top of its 0–2 range costs some quality and can
- * mix languages; the repetition penalty is left where every row of the card leaves it. The card's
- * other thinking row, for "precise coding", is `temperature=0.6, presence_penalty=0` — closer to
- * what a review is, but it gives up the anti-loop penalty, and looping is the problem observed.
+ * Qwen3.5's card publishes four sampling rows, and which one applies depends on whether the
+ * question was asked with thinking — so the catalogue carries two and the provider picks.
+ *
+ * **Thinking: the card's "precise coding" row**, `temperature=0.6, top_p=0.95, presence_penalty=0,
+ * repetition_penalty=1.0`, rather than its "general tasks" row (`temperature=1.0,
+ * presence_penalty=1.5`). This is a reversal, and the reason is `top_k`: every row on that card
+ * assumes `top_k=20`, WebLLM has no field for it, and at temperature 1.0 with only a 0.95 nucleus
+ * the tail left over is far fatter than Qwen intends — which is where a long thought wanders and
+ * comes back round. The lower temperature is the closest thing WebLLM has to the missing top-k.
+ * The general row's presence penalty was chosen here first, on the reasoning that 1.5 is Qwen's
+ * own anti-loop remedy; it was observed looping anyway, and a penalty that pushes a model away
+ * from what it has already said is a poor fit for a review that must repeat the code's own
+ * identifiers to cite them.
+ *
+ * The **repetition penalty is the one figure here with no source on the card**, which leaves every
+ * row at 1.0. A thought that circles was still observed at the lower temperature, and this is the
+ * blunt instrument against it: multiplicative, applied to every token already seen, so it
+ * discourages the code's own identifiers too — which an answer has to repeat to cite them. Hence
+ * 1.05 rather than the 1.1 Qwen2.5-Coder ships: enough to make going round again cost something,
+ * little enough that naming `req.params.id` a fourth time still wins. It is on the thinking row
+ * only; a plain answer was not the one spinning.
+ */
+const QWEN3_THINKING_SAMPLING: Sampling = {
+  temperature: 0.6,
+  topP: 0.95,
+  presencePenalty: 0,
+  repetitionPenalty: 1.05,
+}
+
+/**
+ * **Not thinking: the card's "instruct (non-thinking) mode for general tasks" row**,
+ * `temperature=0.7, top_p=0.8, presence_penalty=1.5`, carrying the same 1.05 repetition penalty
+ * as the row above rather than the card's 1.0. It matters more than it looks: the agents'
+ * orchestrator never thinks now, and was running every brief and summary at the thinking row's
+ * temperature 1.0.
  */
 const QWEN3_SAMPLING: Sampling = {
-  temperature: 1.0,
-  topP: 0.95,
+  temperature: 0.7,
+  topP: 0.8,
   presencePenalty: 1.5,
-  repetitionPenalty: 1.0,
+  repetitionPenalty: 1.05,
 }
 
 /**
@@ -204,7 +267,8 @@ export const MODELS: readonly ModelChoice[] = [
     provider: 'webllm',
     label: 'Qwen2.5-Coder 1.5B',
     size: '~1.6 GB',
-    maxCodeChars: 14_000,
+    maxCodeChars: 24_000,
+    contextTokens: 16_384,
     model: 'Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC',
     sampling: QWEN25_CODER_SAMPLING,
     note: 'Code-trained weights. Runs on most integrated GPUs.',
@@ -215,6 +279,7 @@ export const MODELS: readonly ModelChoice[] = [
     label: 'Gemma 2 2B',
     size: '~1.9 GB',
     maxCodeChars: 14_000,
+    contextTokens: 8_192,
     model: 'gemma-2-2b-it-q4f16_1-MLC',
     sampling: GEMMA2_SAMPLING,
     note: 'Google’s, and the one Gemma WebLLM has a build for. Gemma 3 overflows fp16 on WebGPU.',
@@ -224,10 +289,12 @@ export const MODELS: readonly ModelChoice[] = [
     provider: 'webllm',
     label: 'Qwen3.5 2B',
     size: '~2.2 GB',
-    maxCodeChars: 14_000,
+    maxCodeChars: 60_000,
+    contextTokens: 32_768,
     model: 'Qwen3.5-2B-q4f16_1-MLC',
     thinking: true,
     sampling: QWEN3_SAMPLING,
+    thinkingSampling: QWEN3_THINKING_SAMPLING,
     note: 'Newer and general-purpose rather than code-trained. Can reason before answering.',
   },
   {
@@ -235,7 +302,8 @@ export const MODELS: readonly ModelChoice[] = [
     provider: 'webllm',
     label: 'Qwen2.5-Coder 3B',
     size: '~2.5 GB',
-    maxCodeChars: 14_000,
+    maxCodeChars: 24_000,
+    contextTokens: 16_384,
     model: 'Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC',
     sampling: QWEN25_CODER_SAMPLING,
     note: 'Better at following a value across functions.',
@@ -245,10 +313,12 @@ export const MODELS: readonly ModelChoice[] = [
     provider: 'webllm',
     label: 'Qwen3.5 4B',
     size: '~3.9 GB',
-    maxCodeChars: 14_000,
+    maxCodeChars: 60_000,
+    contextTokens: 32_768,
     model: 'Qwen3.5-4B-q4f16_1-MLC',
     thinking: true,
     sampling: QWEN3_SAMPLING,
+    thinkingSampling: QWEN3_THINKING_SAMPLING,
     note: 'The strongest reasoning per gigabyte here. Can reason before answering.',
   },
   {
@@ -256,7 +326,8 @@ export const MODELS: readonly ModelChoice[] = [
     provider: 'webllm',
     label: 'Qwen2.5-Coder 7B',
     size: '~5.1 GB',
-    maxCodeChars: 14_000,
+    maxCodeChars: 24_000,
+    contextTokens: 16_384,
     model: 'Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC',
     sampling: QWEN25_CODER_SAMPLING,
     note: 'Strongest here, and needs a discrete or Apple-silicon GPU.',
@@ -266,10 +337,12 @@ export const MODELS: readonly ModelChoice[] = [
     provider: 'webllm',
     label: 'Qwen3.5 9B',
     size: '~6.4 GB',
-    maxCodeChars: 14_000,
+    maxCodeChars: 60_000,
+    contextTokens: 32_768,
     model: 'Qwen3.5-9B-q4f16_1-MLC',
     thinking: true,
     sampling: QWEN3_SAMPLING,
+    thinkingSampling: QWEN3_THINKING_SAMPLING,
     note: 'The largest on offer. Wants a discrete GPU with memory to spare.',
   },
   {
@@ -328,6 +401,40 @@ export const MODELS: readonly ModelChoice[] = [
     thinking: true,
     note: 'The same model one size up. Wants a discrete or Apple-silicon GPU, and patience.',
   },
+  // OpenRouter is the one hosted, opt-in exception in this catalogue: nothing downloads, so `size`
+  // is `'no download'` the way `builtin`'s is, but unlike `builtin` a question sent to one of these
+  // leaves this machine for OpenRouter's API. Every entry's `label` says so on its face, not only
+  // in the tooltip `note`, since a tooltip is easy to miss. Kept to three for the same reason the
+  // on-device list is short: an entry here is a promise it works, not the whole OpenRouter
+  // catalogue. Needs a key (`providers/openrouterKey.ts`) — see `Availability`'s `'needs-key'`.
+  {
+    id: 'openrouter-gpt-4o-mini',
+    provider: 'openrouter',
+    label: 'GPT-4o mini (OpenRouter)',
+    size: 'no download',
+    maxCodeChars: 60_000,
+    model: 'openai/gpt-4o-mini',
+    note: 'Hosted by OpenRouter — code leaves this machine for this option only. Needs an API key.',
+  },
+  {
+    id: 'openrouter-claude-haiku',
+    provider: 'openrouter',
+    label: 'Claude 3.5 Haiku (OpenRouter)',
+    size: 'no download',
+    maxCodeChars: 60_000,
+    model: 'anthropic/claude-3.5-haiku',
+    note: 'Hosted by OpenRouter — code leaves this machine for this option only. Needs an API key.',
+  },
+  {
+    id: 'openrouter-glm-5.3-flash',
+    provider: 'openrouter',
+    label: 'GLM-5.3 Flash (OpenRouter)',
+    size: 'no download',
+    maxCodeChars: 60_000,
+    model: 'z-ai/glm-5.3-flash',
+    thinking: true,
+    note: 'Hosted by OpenRouter — code leaves this machine for this option only. Needs an API key.',
+  },
 ]
 
 export function modelById(id: string): ModelChoice | null {
@@ -354,6 +461,8 @@ export function describeStatus(
       return 'checking this model…'
     case 'unavailable':
       return 'this model will not load here'
+    case 'needs-key':
+      return 'add an OpenRouter API key in the chat settings to use this'
     case 'downloadable':
       return size && size !== 'no download'
         ? `${size} downloads on the first question, then it is cached`
@@ -361,7 +470,13 @@ export function describeStatus(
     case 'downloading':
       return `downloading the model… ${Math.round(progress * 100)}%`
     default:
-      return busy ? busyLabel : 'ready — running on this machine'
+      // `available` means different things for an on-device engine and a hosted one — this is the
+      // one place that distinction has to be stated plainly, or "running on this machine" would be
+      // a false claim for the one provider it doesn't hold for.
+      if (busy) return busyLabel
+      return choice?.provider === 'openrouter'
+        ? 'ready — questions are sent to OpenRouter'
+        : 'ready — running on this machine'
   }
 }
 
@@ -413,12 +528,13 @@ export interface CodeContext {
 const MIN_FILE_CHARS = 200
 
 /**
- * The reviewer's brief: everything the prompt says that is not the code itself. It is the half the
- * pane lets a reader rewrite — for another kind of review, another output shape, another language —
- * and the half a reset restores. The code half is appended by `buildSystemPrompt` regardless, since
- * it is generated from the open files rather than written.
+ * The reviewer's brief, short of its last sentence: who the model is, the taint vocabulary, how to
+ * walk and report a flow, and what it can and cannot see. Shared between the chat's brief and the
+ * agents' first reviewer, which differ only in how much they are asked to say — the chat wants a
+ * short answer to one question, while an agent's report is the whole of what the next agent works
+ * from. Exported so the two closings below are the only place they diverge.
  */
-export const DEFAULT_ROLE = `You are a senior security engineer and an expert in static code analysis. You read code the way a reviewer does: one path at a time, precisely, and you only claim what the code in front of you actually shows.
+export const REVIEWER_BRIEF = `You are a senior security engineer and an expert in static code analysis. You read code the way a reviewer does: one path at a time, precisely, and you only claim what the code in front of you actually shows.
 
 You reason about code the way a SAST tool does — taint flowing from sources to sinks — and you use these terms in exactly that sense:
 
@@ -431,9 +547,11 @@ You reason about code the way a SAST tool does — taint flowing from sources to
 
 Data from a source is tainted, and stays tainted through assignments, calls, returns and string building until a sanitiser fit for the sink removes the taint. A vulnerability is a tainted value reaching a sink along some path with no validation, encoding, parameterisation or escaping strong enough for that sink. Whenever you claim one, name the source, name the sink, and give the flow between them step by step.
 
+**Answer the question that was asked, at the level it was asked.** Asked to list the sources, the sinks or the sanitisers, list them — each with its file and line and a few words on what makes it one — and stop there: do not go on to trace flows between them unless asked. Asked whether something is vulnerable, whether a value reaches somewhere, or to review the code, then trace the flows, as follows.
+
 Walk a flow one hop at a time and leave nothing out: every assignment, every function call, every propagator, every sanitiser on the way. Crossing into a function is the hop most often missed, and it is often a hop into another file. A tainted value passed as an argument goes on flowing inside the callee **under the parameter's name** — so name the call, name the parameter it arrives as, and from there refer to the value by that parameter's name rather than the caller's. Before citing a line, check that the name you are citing actually appears on that line of that file.
 
-Report a flow as one numbered step per hop, in this shape:
+When you do report a flow, give one numbered step per hop, in this shape:
 
 1. \`req.body.name\` (routes.ts line 4) — source: the HTTP request body
 2. assigned to \`raw\` (routes.ts line 4)
@@ -441,7 +559,18 @@ Report a flow as one numbered step per hop, in this shape:
 4. \`text\` interpolated into \`html\` (render.ts line 10)
 5. \`el.innerHTML = html\` (render.ts line 11) — sink: DOM write, nothing encodes on the path
 
-You are looking at every file open in the reader's editor, each shown below with its own line numbers — line 1 is the first line of that file, so name the file whenever you cite a line. These files are all you have: you cannot run the code or search the rest of the repository, and where an answer depends on code you cannot see, say which file or symbol you would need. Cite line numbers when you point at code. Keep answers short: a few sentences or a short list. Say plainly when you are unsure, and say so when the code looks fine rather than inventing a finding.`
+You are looking at every file open in the reader's editor, each given to you with its own line numbers — line 1 is the first line of that file, so name the file whenever you cite a line. These files are all you have: you cannot run the code or search the rest of the repository, and where an answer depends on code you cannot see, say which file or symbol you would need. Cite line numbers when you point at code. Say plainly when you are unsure, and say so when the code looks fine rather than inventing a finding.`
+
+/**
+ * The chat's brief: everything the prompt says that is not the code itself. It is the half the
+ * pane lets a reader rewrite — for another kind of review, another output shape, another language —
+ * and the half a reset restores. The code half is not part of it: `buildCodeMessage` makes that
+ * from the open files, and it is seeded as a turn of its own.
+ *
+ * It closes by asking for brevity, which is right for a question asked in a chat and wrong for an
+ * agent's report — see `DEFAULT_REVIEW` in `agents.ts`, which closes the same brief the other way.
+ */
+export const DEFAULT_ROLE = `${REVIEWER_BRIEF} Keep answers short: a few sentences or a short list.`
 
 /**
  * The system prompt: the brief, and nothing else.
@@ -455,6 +584,55 @@ export function buildSystemPrompt(role?: string): string {
   return role?.trim() || DEFAULT_ROLE
 }
 
+/** How the budget was spent: which files went in whole, which were cut, which never made it. */
+export interface CodePlan {
+  shown: { file: PromptFile; body: string; clipped: boolean }[]
+  omitted: PromptFile[]
+}
+
+/**
+ * Spending the budget, in the order given — which is why the caller puts the file on screen
+ * first: what gets clipped is the code the reader is not looking at. The first file is shown
+ * whatever the budget, clipped if it has to be; a later one that will not fit is named instead
+ * once the tail left over could teach a model nothing.
+ */
+export function planCode({ files, maxCodeChars }: CodeContext): CodePlan {
+  const plan: CodePlan = { shown: [], omitted: [] }
+  let budget = maxCodeChars
+  for (const file of files) {
+    if (plan.shown.length > 0 && file.text.length > budget && budget < MIN_FILE_CHARS) {
+      plan.omitted.push(file)
+      continue
+    }
+    const clipped = file.text.length > budget
+    const body = clipped ? file.text.slice(0, budget) : file.text
+    budget -= body.length
+    plan.shown.push({ file, body, clipped })
+  }
+  return plan
+}
+
+/**
+ * The clip in one line, for a pane to show beside the answer — or null when every file went in
+ * whole. The model is told the same thing inside the message; this is so the *reader* is told too,
+ * since an answer about half a file is otherwise indistinguishable from one about the whole.
+ */
+export function describeClip(context: CodeContext): string | null {
+  const { shown, omitted } = planCode(context)
+  const parts: string[] = []
+  for (const { file, body, clipped } of shown) {
+    if (clipped) {
+      parts.push(
+        `${file.name} cut after ${body.length.toLocaleString('en')} of ${file.text.length.toLocaleString('en')} characters`,
+      )
+    }
+  }
+  if (omitted.length > 0) {
+    parts.push(`${omitted.map((file) => file.name).join(', ')} not shown`)
+  }
+  return parts.length > 0 ? parts.join('; ') : null
+}
+
 /**
  * The open files as one message, to be seeded ahead of the first question. A session is opened with
  * this once, so the code it carries is a snapshot — the pane says as much when the files move on.
@@ -463,33 +641,20 @@ export function buildSystemPrompt(role?: string): string {
  * supplied data rather than being addressed, both so it does not answer the listing as though it
  * were a question and so that an instruction written inside a comment reads as part of the code
  * rather than as part of the brief.
- *
- * The budget is spent in the order given, which is why the caller puts the file on screen first:
- * what gets clipped is the code the reader is not looking at.
  */
-export function buildCodeMessage({ files, maxCodeChars }: CodeContext): string {
-  const shown: string[] = []
-  const omitted: string[] = []
-  let budget = maxCodeChars
-
-  for (const file of files) {
-    if (shown.length > 0 && file.text.length > budget && budget < MIN_FILE_CHARS) {
-      omitted.push(file.name)
-      continue
-    }
-    const clipped = file.text.length > budget
-    const body = clipped ? file.text.slice(0, budget) : file.text
-    budget -= body.length
-    shown.push(
-      [
-        `\`${file.name}\`${clipped ? `, truncated after the first ${body.length} characters — the rest is not shown to you` : ''}:`,
-        '',
-        '```' + FENCE[file.language],
-        numberLines(body),
-        '```',
-      ].join('\n'),
-    )
-  }
+export function buildCodeMessage(context: CodeContext): string {
+  const { files } = context
+  const plan = planCode(context)
+  const shown = plan.shown.map(({ file, body, clipped }) =>
+    [
+      `\`${file.name}\`${clipped ? `, truncated after the first ${body.length} characters — the rest is not shown to you` : ''}:`,
+      '',
+      '```' + FENCE[file.language],
+      numberLines(body),
+      '```',
+    ].join('\n'),
+  )
+  const omitted = plan.omitted.map((file) => file.name)
 
   return [
     files.length > 1

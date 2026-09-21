@@ -3,6 +3,8 @@ import {
   DEFAULT_ROLE,
   MODELS,
   buildCodeMessage,
+  describeClip,
+  planCode,
   buildSystemPrompt,
   modelById,
   numberLines,
@@ -25,22 +27,91 @@ describe('the model catalogue', () => {
     // WebLLM throws on a presence penalty outside −2…2 and a repetition penalty at or below 0 —
     // at question time, after the download, which is the worst moment to find out.
     for (const choice of MODELS) {
-      const { temperature, topP, presencePenalty, repetitionPenalty } = choice.sampling ?? {}
-      if (temperature !== undefined) expect(temperature).toBeGreaterThanOrEqual(0)
-      if (topP !== undefined) {
-        expect(topP).toBeGreaterThan(0)
-        expect(topP).toBeLessThanOrEqual(1)
+      for (const row of [choice.sampling, choice.thinkingSampling]) {
+        const { temperature, topP, presencePenalty, repetitionPenalty } = row ?? {}
+        if (temperature !== undefined) expect(temperature).toBeGreaterThanOrEqual(0)
+        if (topP !== undefined) {
+          expect(topP).toBeGreaterThan(0)
+          expect(topP).toBeLessThanOrEqual(1)
+        }
+        if (presencePenalty !== undefined) {
+          expect(presencePenalty).toBeGreaterThanOrEqual(-2)
+          expect(presencePenalty).toBeLessThanOrEqual(2)
+        }
+        if (repetitionPenalty !== undefined) expect(repetitionPenalty).toBeGreaterThan(0)
+        // Anything but a repetition penalty on an ONNX entry would be a figure nothing reads.
+        if (choice.provider === 'transformers') {
+          expect(temperature).toBeUndefined()
+          expect(topP).toBeUndefined()
+          expect(presencePenalty).toBeUndefined()
+        }
+        // OpenRouter drops the repetition penalty instead: not uniformly accepted across its models.
+        if (choice.provider === 'openrouter') {
+          expect(repetitionPenalty).toBeUndefined()
+        }
       }
-      if (presencePenalty !== undefined) {
-        expect(presencePenalty).toBeGreaterThanOrEqual(-2)
-        expect(presencePenalty).toBeLessThanOrEqual(2)
+    }
+  })
+
+  it('names a thinking row only where there is a thinking mode to apply it to', () => {
+    for (const choice of MODELS) {
+      if (!choice.thinkingSampling) continue
+      // A row nothing can reach is a figure nothing reads.
+      expect(choice.thinking).toBe(true)
+      expect(['webllm', 'openrouter']).toContain(choice.provider)
+      // The pair exists because the two differ; one row would have been `sampling` alone.
+      expect(choice.thinkingSampling).not.toEqual(choice.sampling)
+    }
+  })
+
+  it('runs Qwen3.5 cooler when it thinks, since WebLLM cannot carry the card’s top_k', () => {
+    // Every row on that card assumes top_k=20. Without it, temperature 1.0 over a 0.95 nucleus
+    // leaves a much fatter tail than Qwen intends, which is where a long thought goes in circles.
+    const qwen = modelById('qwen3.5-4b')!
+    expect(qwen.thinkingSampling?.temperature).toBe(0.6)
+    expect(qwen.thinkingSampling?.presencePenalty).toBe(0)
+    // The one figure with no row behind it — the card leaves every row at 1.0 — and mild on
+    // purpose, since the penalty falls on the code's own identifiers as much as on a thought
+    // going round again. On both rows: the same 1.05, well under Qwen2.5-Coder's shipped 1.1.
+    expect(qwen.thinkingSampling?.repetitionPenalty).toBe(1.05)
+    expect(qwen.sampling?.repetitionPenalty).toBe(1.05)
+    // Non-thinking is the card's own instruct row — what the orchestrator now runs on throughout.
+    expect(qwen.sampling?.temperature).toBe(0.7)
+    expect(qwen.sampling?.topP).toBe(0.8)
+  })
+
+  it('names a context window only where WebLLM can set one, sized to what each model can hold', () => {
+    for (const choice of MODELS) {
+      if (choice.provider === 'webllm') {
+        // The MLC list compiles these to 4096; anything less than the 8192 floor would be a
+        // regression, and a figure past the model's own window is one it cannot run at.
+        expect(choice.contextTokens).toBeGreaterThanOrEqual(8_192)
+      } else {
+        // Neither the ONNX pipeline nor Chrome's model nor a hosted one takes the figure.
+        expect(choice.contextTokens).toBeUndefined()
       }
-      if (repetitionPenalty !== undefined) expect(repetitionPenalty).toBeGreaterThan(0)
-      // Anything but a repetition penalty on an ONNX entry would be a figure nothing reads.
-      if (choice.provider === 'transformers') {
-        expect(temperature).toBeUndefined()
-        expect(topP).toBeUndefined()
-        expect(presencePenalty).toBeUndefined()
+    }
+    // Gemma 2's weights stop at 8k; the Qwens are cheap to run wider, and the thinking ones need
+    // the room most.
+    expect(modelById('gemma-2-2b')?.contextTokens).toBe(8_192)
+    expect(modelById('qwen3.5-4b')?.contextTokens).toBeGreaterThan(
+      modelById('qwen-coder-3b')?.contextTokens ?? 0,
+    )
+  })
+
+  it('gives a model more code the wider its window', () => {
+    // Roughly 7.5k tokens held back for brief, handoff and generation, at about three characters
+    // a token of numbered code — a wider window is worth more code, never less.
+    const gemma = modelById('gemma-2-2b')!
+    const coder = modelById('qwen-coder-3b')!
+    const qwen = modelById('qwen3.5-4b')!
+    expect(coder.maxCodeChars).toBeGreaterThan(gemma.maxCodeChars)
+    expect(qwen.maxCodeChars).toBeGreaterThan(coder.maxCodeChars)
+    // The 8k entries are the known exception: Gemma 2 was already over-committed at 14 000 and
+    // its window cannot grow, so the rule is asserted for every window that was sized by it.
+    for (const choice of MODELS) {
+      if (choice.contextTokens && choice.contextTokens > 8_192) {
+        expect(choice.maxCodeChars).toBeLessThanOrEqual((choice.contextTokens - 7_000) * 3)
       }
     }
   })
@@ -62,6 +133,7 @@ describe('the model catalogue', () => {
       'qwen3.5-9b',
       'gemma-4-e2b',
       'gemma-4-e4b',
+      'openrouter-glm-5.3-flash',
     ])
   })
 
@@ -90,7 +162,18 @@ describe('the model catalogue', () => {
     for (const choice of MODELS) {
       if (choice.provider === 'builtin') continue
       expect(choice.model, choice.id).toBeTruthy()
-      expect(choice.size, choice.id).toMatch(/GB/)
+      // OpenRouter downloads nothing, so its size reads the same way builtin's does.
+      if (choice.provider === 'openrouter') {
+        expect(choice.size, choice.id).toBe('no download')
+      } else {
+        expect(choice.size, choice.id).toMatch(/GB/)
+      }
+    }
+  })
+
+  it('resolves every OpenRouter id, none of which need a GB figure', () => {
+    for (const choice of MODELS.filter((entry) => entry.provider === 'openrouter')) {
+      expect(modelById(choice.id)).toMatchObject({ provider: 'openrouter', model: choice.model })
     }
   })
 })
@@ -116,6 +199,42 @@ describe('the system prompt', () => {
     for (const role of [undefined, '', '   \n  ']) {
       expect(buildSystemPrompt(role)).toBe(DEFAULT_ROLE)
     }
+  })
+})
+
+describe('what the reader is told about the clip', () => {
+  const files = [
+    file('routes.ts', 'a'.repeat(300)),
+    file('db.ts', 'b'.repeat(300)),
+    file('util.ts', 'c'.repeat(300)),
+  ]
+
+  it('is nothing when every file went in whole', () => {
+    expect(describeClip({ files, maxCodeChars: 1_000 })).toBeNull()
+    expect(planCode({ files, maxCodeChars: 1_000 }).omitted).toEqual([])
+  })
+
+  it('names the file that was cut, with how much of it survived, and the ones never shown', () => {
+    // 300 of routes.ts, then 250 of db.ts, then no room worth spending on util.ts.
+    const note = describeClip({ files, maxCodeChars: 550 })
+    expect(note).toBe('db.ts cut after 250 of 300 characters; util.ts not shown')
+    // The same plan is what the message itself is built from, so the two cannot disagree.
+    const message = buildCodeMessage({ files, maxCodeChars: 550 })
+    expect(message).toContain('`db.ts`, truncated after the first 250 characters')
+    expect(message).toContain('Also open, but not shown to you: `util.ts`')
+  })
+
+  it('reports the file on screen as cut rather than dropped, whatever the budget', () => {
+    expect(describeClip({ files, maxCodeChars: 100 })).toBe(
+      'routes.ts cut after 100 of 300 characters; db.ts, util.ts not shown',
+    )
+  })
+
+  it('formats large counts for a reader', () => {
+    const big = [file('big.ts', 'x'.repeat(20_000))]
+    expect(describeClip({ files: big, maxCodeChars: 14_000 })).toBe(
+      'big.ts cut after 14,000 of 20,000 characters',
+    )
   })
 })
 

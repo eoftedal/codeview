@@ -12,7 +12,7 @@
  * them is `useAgents`.
  */
 
-import { DEFAULT_ROLE } from './chat'
+import { REVIEWER_BRIEF } from './chat'
 import { parseSections, serializeSections } from './share'
 
 export interface AgentSpec {
@@ -53,11 +53,20 @@ export const DEFAULT_ORCHESTRATOR = `You are the orchestrator of a code review. 
 
 **What the review is about is the reader's to decide, not yours.** Their task is given to you with every brief you are asked for, and it is the subject of the run: each brief you write serves that task and nothing else. Do not substitute a review you would rather run, do not widen a narrow task into a general audit, and do not narrow a broad one to the first thing that occurs to you. The agents already know their own trade — each carries its own brief describing what it is and how it reads code — so you are not the one who supplies the expertise. You supply the subject, the order, and the hand-off.
 
-When you are asked to brief an agent, reply with the instruction for that agent and nothing else — no preamble, no commentary, no findings of your own. Write it as a direct instruction of a short paragraph or a few bullets: what to look for, what to check, and what shape the answer should take. Keep it under 120 words. The agent is already told who it is by its own brief, so do not repeat its role back to it.
+When you are asked to brief an agent, reply with the instruction for that agent and nothing else — no preamble, no commentary, no findings of your own. Write it as a direct instruction: a short paragraph, or a few bullets, saying what to look for, what to check, and what shape the answer should take. A brief is a pointer, not the review — write it once and stop; do not count its words, weigh its wording or draft it twice. The agent is already told who it is by its own brief, so do not repeat its role back to it.
 
 **The previous agent's report is handed to the next agent in full, word for word, alongside your brief.** You are not the one who carries it, so do not carry it: do not summarise its findings, do not restate its verdicts in your own words, do not shorten its list, do not correct it, and do not add findings of your own. Rewriting a report is how a line number turns into the wrong line number and a "mitigated" turns into a "confirmed". Quoting a few words to point at one item is fine; reproducing or rewording the report is not. Your brief says what the next agent should *do* with the text it is about to read — nothing else.
 
 When you are asked for the final summary, write the result of the review as an answer to the reader's task: what the agents found, each finding in the terms they reported it — if they traced a path through the code, give the path — and then a one-line verdict. Say plainly when nothing was found; an empty review is a result, not a failure. Never report a finding no agent reported, and never cite a file or line number no agent cited.`
+
+/**
+ * The first agent's brief: the chat's reviewer, closed the other way. The chat asks for a short
+ * answer because a reader is waiting on one question; an agent's report is the *entire* input of
+ * the agent after it, and a hop it leaves out for brevity is a hop nobody checks. The orchestrator's
+ * brief asks for the shape it wants, but a system prompt beats a message every time — which is
+ * why the brevity line cannot simply be overridden from there and has to be absent here.
+ */
+export const DEFAULT_REVIEW = `${REVIEWER_BRIEF} Report every flow you find, each in full: your report is all the next reviewer has to work from, and a hop you leave out is one nobody will check.`
 
 /** The second agent's brief: not a second look for bugs, but a ruling on the first look. */
 export const DEFAULT_TRIAGE = `You are an adversarial security reviewer, and your job is triage: deciding which of the findings another reviewer has just reported are real. You are not here to agree. A reviewer who confirms everything is worth nothing, and so is one who dismisses everything.
@@ -66,20 +75,18 @@ You have the code in front of you. Take the findings one at a time:
 
 1. **Check the citation.** Go to the file and line the finding names and confirm that the code there actually contains what is claimed — the same names, the same call, the same assignment. A finding whose cited line does not say what it claims is wrong, and you say so plainly.
 2. **Walk the flow yourself**, hop by hop, from the named source to the named sink, and look for what the first reviewer missed: a validation, an encoding, a parameterised query, an escape, a cast to a type that cannot carry an injection, a branch that cannot be reached, a sink that is not really a sink.
-3. **Rule on it.** Every finding gets one of three verdicts: **confirmed** — the flow is real and nothing on the path removes the taint; **mitigated** — something on the path does, and you name it, with its file and line; **not a finding** — the code does not say what was claimed, or there is no flow from that source to that sink at all.
+3. **Rule on it.** Every finding gets one of three verdicts: **confirmed** — the flow is real and nothing on the path removes the taint; **mitigated** — the weakness is real, but something on the path removes the taint today, and you name it with its file and line; still report the weakness, since the next change to that path may not; **not a finding** — the code does not say what was claimed, or there is no flow from that source to that sink at all.
 
 Be hard on vague claims. "User input could be dangerous here", with no source, no sink and no path, is not a finding and does not become one by being repeated. Do not soften a verdict to be agreeable, and do not confirm a finding because it was stated confidently.
 
-You are able to separate a weakness in the code from a real exploitable vulnerability. You will still flag the weakness, but note that it is mitigated in the current state.
-
 Report one entry per finding: the claim in a few words, the verdict in bold, and one or two sentences of reasoning citing file and line. Then, at the end, note anything genuinely dangerous you saw that the first reviewer did not report.`
 
-/** The team a reader starts with: the chat pane's own reviewer, then triage over what it found. */
+/** The team a reader starts with: the chat's reviewer asked for a full report, then triage over it. */
 export function defaultTeam(): AgentTeam {
   return {
     orchestrator: DEFAULT_ORCHESTRATOR,
     agents: [
-      { id: createAgentId(), name: 'Review', role: DEFAULT_ROLE },
+      { id: createAgentId(), name: 'Review', role: DEFAULT_REVIEW },
       { id: createAgentId(), name: 'Adversarial Triage', role: DEFAULT_TRIAGE },
     ],
   }
@@ -204,15 +211,26 @@ export function untitledAgentName(taken: readonly string[]): string {
 }
 
 /**
- * How much of an agent's answer is carried to the next hop verbatim. These models have a few
- * thousand tokens for everything, system prompt included, and an answer that fills the window
- * leaves no room for the code the next agent has to check it against. Clipping is stated rather
- * than silent — a reviewer told it is reading half a report behaves differently from one that
- * thinks it has the whole thing.
+ * The least of an agent's answer that is carried to the next hop verbatim, whatever the model. The
+ * smallest models here have a few thousand tokens for everything, system prompt included, and an
+ * answer that fills the window leaves no room for the code the next agent has to check it against.
+ * Clipping is stated rather than silent — a reviewer told it is reading half a report behaves
+ * differently from one that thinks it has the whole thing.
  */
 export const MAX_RELAY_CHARS = 6_000
 
-function clip(text: string, limit: number = MAX_RELAY_CHARS): string {
+/**
+ * How much of a report a given model is handed. The floor above was sized for a 14 000-character
+ * code budget; a model with room for 60 000 characters of code has room for a report to match,
+ * and a thorough review of a large listing easily runs past 6 000 characters — clipping it there
+ * would hand triage half the findings for no reason. A third of the code budget, never less than
+ * the floor: the report is checked *against* the code, so the code keeps the larger share.
+ */
+export function relayLimit(maxCodeChars: number): number {
+  return Math.max(MAX_RELAY_CHARS, Math.floor(maxCodeChars / 3))
+}
+
+function clip(text: string, limit: number): string {
   const trimmed = text.trim()
   if (trimmed.length <= limit) return trimmed
   return `${trimmed.slice(0, limit)}\n\n[…truncated: this report was longer than fits here]`
@@ -268,32 +286,41 @@ export function kickoffMessage(task: string, first: AgentSpec): string {
  * will rewrite it by default, and a rewritten verdict is worse than no verdict: it arrives in the
  * next agent's context contradicting the copy beside it, in a voice that sounds equally
  * authoritative.
+ *
+ * `limit` is the orchestrator's own model's `relayLimit`, not the next agent's: this copy is read
+ * by the orchestrator, and the next agent gets its own in `handoffMessage`.
  */
 export function relayMessage(
   task: string,
   from: AgentSpec,
   output: string,
   next: AgentSpec,
+  limit: number = MAX_RELAY_CHARS,
 ): string {
   return [
     taskBlock(task),
     '',
     `**${from.name}** reported this:`,
     '',
-    clip(output),
+    clip(output, limit),
     '',
     `**${next.name}** runs next, and will be given that report in full, word for word, alongside your brief — so do not summarise it, do not restate its verdicts and do not reword its findings. Write only the brief: what **${next.name}** should do with the report it is about to read. Reply with that brief and nothing else.`,
   ].join('\n')
 }
 
 /** Asking the orchestrator to close the run. */
-export function summaryMessage(task: string, from: AgentSpec, output: string): string {
+export function summaryMessage(
+  task: string,
+  from: AgentSpec,
+  output: string,
+  limit: number = MAX_RELAY_CHARS,
+): string {
   return [
     taskBlock(task),
     '',
     `**${from.name}**, the last agent, reported this:`,
     '',
-    clip(output),
+    clip(output, limit),
     '',
     'That is the end of the run. Write the final summary, and let it answer the reader’s task above — not a different question you would rather have been asked.',
   ].join('\n')
@@ -313,6 +340,7 @@ export function summaryMessage(task: string, from: AgentSpec, output: string): s
 export function handoffMessage(
   brief: string,
   previous: { from: AgentSpec; output: string } | null,
+  limit: number = MAX_RELAY_CHARS,
 ): string {
   if (!previous) return brief.trim()
   return [
@@ -320,7 +348,7 @@ export function handoffMessage(
     '',
     `This is the verdict from **${previous.from.name}**, the agent before you, exactly as it was written:`,
     '',
-    clip(previous.output),
+    clip(previous.output, limit),
     '',
     `Work from that text itself, not from any description of it. Where the brief above characterises it differently — a different verdict, a different finding, a different line — the text above is what is authoritative.`,
   ].join('\n')

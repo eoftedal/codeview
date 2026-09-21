@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_ORCHESTRATOR,
+  DEFAULT_REVIEW,
   DEFAULT_TASK,
   DEFAULT_TRIAGE,
   MAX_RELAY_CHARS,
@@ -11,13 +12,14 @@ import {
   normalizeTeam,
   orchestratorPrompt,
   parseTeam,
+  relayLimit,
   relayMessage,
   serializeTeam,
   summaryMessage,
   teamModels,
   type AgentSpec,
 } from '../src/lib/agents'
-import { DEFAULT_ROLE } from '../src/lib/chat'
+import { DEFAULT_ROLE, REVIEWER_BRIEF } from '../src/lib/chat'
 
 const agent = (name: string, role = 'brief'): AgentSpec => ({ id: `id-${name}`, name, role })
 
@@ -27,9 +29,26 @@ describe('the shipped team', () => {
   it('is the chat pane’s own reviewer, then triage over what it found', () => {
     const team = defaultTeam()
     expect(team.orchestrator).toBe(DEFAULT_ORCHESTRATOR)
-    expect(team.agents.map((one) => one.name)).toEqual(['Review', 'Triage'])
-    expect(team.agents[0]!.role).toBe(DEFAULT_ROLE)
+    expect(team.agents.map((one) => one.name)).toEqual(['Review', 'Adversarial Triage'])
+    expect(team.agents[0]!.role).toBe(DEFAULT_REVIEW)
     expect(team.agents[1]!.role).toBe(DEFAULT_TRIAGE)
+  })
+
+  it('asks its reviewer for a full report where the chat asks for a short answer', () => {
+    // Same brief, different closing: an agent's report is the next agent's whole input, and a
+    // system prompt asking for brevity would win over any orchestrator brief asking for more.
+    expect(DEFAULT_REVIEW.startsWith(REVIEWER_BRIEF)).toBe(true)
+    expect(DEFAULT_ROLE.startsWith(REVIEWER_BRIEF)).toBe(true)
+    expect(DEFAULT_ROLE).toMatch(/keep answers short/i)
+    expect(DEFAULT_REVIEW).not.toMatch(/keep answers short/i)
+    expect(DEFAULT_REVIEW).toMatch(/in full/i)
+  })
+
+  it('gives a thinking orchestrator nothing to count', () => {
+    // "Under 120 words" was a number a reasoning model spent minutes on, tallying and redrafting.
+    // Shape is asked for; a figure is not.
+    expect(DEFAULT_ORCHESTRATOR).not.toMatch(/\d+\s*words/i)
+    expect(DEFAULT_ORCHESTRATOR).toMatch(/do not count/i)
   })
 
   it('tells the orchestrator it cannot read the code', () => {
@@ -220,7 +239,7 @@ describe('normalizeTeam', () => {
 
   it('falls back to the shipped agents rather than keeping none', () => {
     const team = normalizeTeam({ orchestrator: 'x', agents: [] })
-    expect(team.agents.map((one) => one.name)).toEqual(['Review', 'Triage'])
+    expect(team.agents.map((one) => one.name)).toEqual(['Review', 'Adversarial Triage'])
   })
 
   it('falls back to the shipped brief rather than sending an empty one', () => {
@@ -324,5 +343,23 @@ describe('the messages each hop is asked', () => {
     expect(message).toContain('truncated')
     expect(message.length).toBeLessThan(huge.length)
     expect(message).toContain('x'.repeat(100))
+  })
+
+  it('hands a model with room for more code a longer report to match', () => {
+    // The floor was sized for a 14 000-character code budget. A model that can hold 60 000 of
+    // code is not served by triage seeing 6 000 of a review written over all of it.
+    expect(relayLimit(14_000)).toBe(MAX_RELAY_CHARS)
+    expect(relayLimit(1_000)).toBe(MAX_RELAY_CHARS)
+    expect(relayLimit(60_000)).toBe(20_000)
+
+    const report = 'x'.repeat(MAX_RELAY_CHARS + 500)
+    const previous = { from: agent('Review'), output: report }
+    const wide = handoffMessage('Check these.', previous, relayLimit(60_000))
+    expect(wide).not.toContain('truncated')
+    expect(wide).toContain(report)
+    // The orchestrator's two messages take the same limit, since it reads them on its own model.
+    expect(relayMessage(TASK, agent('Review'), report, agent('Triage'), 20_000)).toContain(report)
+    expect(summaryMessage(TASK, agent('Review'), report, 20_000)).toContain(report)
+    expect(summaryMessage(TASK, agent('Review'), report)).toContain('truncated')
   })
 })
