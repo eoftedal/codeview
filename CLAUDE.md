@@ -175,13 +175,25 @@ instantiates `Gemma4ForCausalLM` against weights whose architecture is
 `embed_tokens` plus `decoder_model_merged` alone — never the vision or audio encoder. Nothing in
 the provider knows this; it falls out of the repo's own config, which is also where the external
 data chunk counts come from. Their size figures are those two files, and it is the per-layer
-embeddings, not the 2.3B effective parameters, that make an "E2B" a 3 GB download. That split is also
+embeddings, not the 2.3B effective parameters, that make an "E2B" a 3 GB download. **`onnxruntime-web` is a 32-bit
+wasm module** — its memory is declared `max=4.00 GiB` — and that address space, not the GPU and not
+the machine's RAM, is what those two run out of: E2B's files claim 3.11 GB of it and E4B's 4.91 GB
+before a prompt exists, leaving the session, the arenas and the prefill intermediates to share what
+is left. Which is why `maxCodeChars` is **6 000** on the Gemma 4 entries and 14 000 on every other
+ONNX one — the single budget in the catalogue sized by a memory ceiling rather than a context
+window, since the intermediates grow with the listing and a big enough prompt ends in
+`Failed to allocate memory for buffer mapping` on a machine with tens of gigabytes free. The other
+two ONNX entries are ~1.2 GB of weights with nearly 3 GiB of room, and keep the wider budget. The
+same fact decides which way `cpuEmbeddings` points: it is
 a **lever on GPU memory**, and the only one those entries have: at q4f16 `embed_tokens` is 1.59 GB
 against the decoder's 1.52 on E2B (2.02 against 2.89 on E4B), and it is a lookup table rather than
 arithmetic, so `ModelChoice.cpuEmbeddings` runs it on the CPU and leaves the GPU to the decoder
-alone. It is **off everywhere** — what it costs is `inputs_embeds` and `per_layer_inputs` crossing
-from CPU to GPU on every token, and that has not been measured — so it exists to be flipped on an
-entry and timed, not as a default. The record it builds lives in `providers/devices.ts`, its own
+alone. It is **off everywhere**, and on a machine with GPU memory to spare it should stay off: running a
+session on `wasm` keeps its weights in the 4 GiB address space above, which is the scarce resource
+there, so it trades the plentiful one for the scarce one and makes the failure it looks like a cure
+for more likely. It is for the opposite machine — a GPU too small for both sessions — and what it
+costs even then is `inputs_embeds` and `per_layer_inputs` crossing from CPU to GPU on every token,
+which has not been measured. So it exists to be flipped on an entry and timed, not as a default. The record it builds lives in `providers/devices.ts`, its own
 module for `ceiling.ts`'s reason, and the rule it encodes is the trap: Transformers.js dispatches a
 device record per session **file**, and a file the record does not name falls back to the library's
 default, which in a browser is `wasm` — so `SPLIT_SESSIONS` names _both_ sessions, or moving the
@@ -365,7 +377,18 @@ both providers cap generation at one `MAX_NEW_TOKENS` (`providers/ceiling.ts`, i
 the ONNX worker's bundle does not pull the catalogue in for a number) — a ceiling against a model
 that never emits its end of turn, not a per-model figure and not a target, so it is deliberately
 generous and shared between thinking and answer. The ONNX worker counts tokens with a stopping
-criterion and reports reaching it on `done`; WebLLM reports `finish_reason: 'length'`, which is
+criterion and reports reaching it on `done`. **A failure has to find the same route back**, which
+is subtler than it looks: `transformers.ts`'s `fail` hands an error to whichever of `ready`/`pending`
+is actually waiting, because `worker.onerror` used to close over the _load_ promise's `reject` and
+so delivered every failure after load to a settled promise — leaving the pane waiting on a stream
+that had already stopped. A worker-level error is `fatal` and latches `broken`, since posting to a
+dead worker is silence rather than an error; an exception the worker caught and reported is not,
+since it is still there to answer the next question. What escapes the worker's own try/catch comes
+back through `onunhandledrejection`, which is where a WebGPU device dying mid-run actually
+surfaces — ORT's async work is not the call being awaited, and that call may never settle at all.
+There is deliberately **no timeout**: a large listing on a small model legitimately takes minutes
+before its first token, and a watchdog that cannot tell that from a dead device would abort real
+answers. WebLLM reports `finish_reason: 'length'`, which is
 also what a **full context window** produces — a long thought over a large listing ends there,
 silently, unless it is read. Neither provider has a thinking budget to offer: WebLLM lets no
 assistant prefill through, so a thought cannot be closed early. The stream stays

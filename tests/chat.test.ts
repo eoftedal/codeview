@@ -143,6 +143,18 @@ describe('the model catalogue', () => {
     }
   })
 
+  it('sizes the Gemma 4 budgets from the wasm address space, not the context window', () => {
+    // `onnxruntime-web` is a 32-bit module — its memory is declared max 4.00 GiB — and the Gemma 4
+    // weights claim 3.11 GB (E2B) or 4.91 GB (E4B) of that before a prompt exists. What is left
+    // has to hold the session and the prefill, which grows with the listing; the other ONNX
+    // entries are ~1.2 GB of weights with room to spare and keep the wider budget.
+    const roomy = modelById('qwen-coder-1.5b-onnx')!.maxCodeChars
+    expect(modelById('glm-edge-1.5b')!.maxCodeChars).toBe(roomy)
+    for (const id of ['gemma-4-e2b', 'gemma-4-e4b']) {
+      expect(modelById(id)!.maxCodeChars).toBeLessThan(roomy)
+    }
+  })
+
   it('resolves an id to its provider and model', () => {
     const choice = modelById('qwen-coder-1.5b')
     expect(choice).toMatchObject({

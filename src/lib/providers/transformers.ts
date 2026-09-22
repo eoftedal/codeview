@@ -51,6 +51,34 @@ export const transformers: Provider = {
 
     let pending: Pending | null = null
     let ready: Pending | null = null
+    /**
+     * Set once the worker itself has died, so every later question fails at once instead of being
+     * posted to something that is gone. A message to a terminated worker is not an error — it is
+     * silence, and silence here is indistinguishable from a slow model.
+     */
+    let broken: Error | null = null
+
+    /**
+     * Whatever went wrong, to whoever is waiting for it. Exactly one of the two ever is: a load, or
+     * a question. `fatal` says the worker is gone rather than merely unhappy — an exception it
+     * caught and reported leaves it alive and able to answer the next question, while an error on
+     * the worker itself does not.
+     *
+     * This exists because the obvious spelling was wrong in a way that cost nothing until it cost
+     * everything: `worker.onerror` used to close over the *load* promise's `reject`, so once load
+     * had settled every later failure was delivered to a settled promise and dropped. The pane went
+     * on waiting for a stream that had already stopped.
+     */
+    function fail(error: Error, fatal = false): void {
+      if (fatal) broken = error
+      const waiting = ready ?? pending
+      ready = null
+      pending = null
+      waiting?.reject(error)
+    }
+
+    // On the worker, not on a promise: a worker can fail at any point, including between questions.
+    worker.onerror = (event) => fail(new Error(event.message || 'The model worker failed.'), true)
 
     worker.onmessage = (event: MessageEvent<FromWorker>) => {
       const message = event.data
@@ -69,21 +97,16 @@ export const transformers: Provider = {
           pending?.resolve(message.truncated)
           pending = null
           break
-        case 'error': {
-          const error = new Error(message.message)
-          // A failure during load and a failure mid-answer land in different places.
-          ready?.reject(error)
-          pending?.reject(error)
-          ready = null
-          pending = null
+        case 'error':
+          // Reported by the worker, so it caught it and is still there: a failure during load and
+          // one mid-answer land in different places, and `fail` knows which is waiting.
+          fail(new Error(message.message))
           break
-        }
       }
     }
 
     await new Promise<void>((resolve, reject) => {
       ready = { onToken: () => {}, resolve: () => resolve(), reject }
-      worker.onerror = (event) => reject(new Error(event.message || 'The model worker failed.'))
       // Only the repetition penalty crosses: the pipeline has no presence penalty to give it to.
       send({
         type: 'load',
@@ -118,6 +141,12 @@ export const transformers: Provider = {
 
             return new ReadableStream<string>({
               start(controller) {
+                // The worker is already gone: say so now rather than post into the dark.
+                if (broken) {
+                  controller.error(broken)
+                  return
+                }
+
                 const onAbort = () => send({ type: 'stop' })
                 options?.signal?.addEventListener('abort', onAbort, { once: true })
 
@@ -165,6 +194,9 @@ export const transformers: Provider = {
       },
 
       destroy() {
+        // A question still in flight would otherwise wait forever on a worker that no longer
+        // exists — the reader changing model mid-answer is the ordinary way to get here.
+        fail(new Error('The model was unloaded.'), true)
         worker.terminate()
       },
     }

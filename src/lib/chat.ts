@@ -148,8 +148,10 @@ export interface ModelChoice {
   size: string
   /**
    * How much of the buffer fits alongside a conversation in this model's context. Sized from the
-   * window: line-numbered code runs about three characters a token, and roughly 7.5k tokens are
-   * held back for the brief (~1k), the conversation or an agent's handoff (~2.5k) and generation
+   * window — except on the Gemma 4 ONNX entries, where a tighter ceiling than the window decides
+   * it; see them. From the window, then: line-numbered code runs about three characters a token,
+   * and roughly 7.5k tokens are held back for the brief (~1k), the conversation or an agent's
+   * handoff (~2.5k) and generation
    * (`MAX_NEW_TOKENS`). So a 16k window gives 24 000 characters, 32k gives 60 000, and an 8k
    * window — Gemma 2, Chrome's own — is already over-committed at 14 000; neither is a thinking
    * model, so the shortfall shows as a clipped answer with its note rather than an empty one.
@@ -398,27 +400,37 @@ export const MODELS: readonly ModelChoice[] = [
   //
   // These two are also the only entries `cpuEmbeddings` applies to, and the only ones whose weights
   // split in half: the embedding table is 1.59 GB against the decoder's 1.52 on E2B, 2.02 against
-  // 2.89 on E4B, all at q4f16. A machine that runs out of GPU memory on one of these has that
-  // lever and no other — set the field on the entry and measure it; it is off here because the
-  // copy it costs per token has not been.
+  // 2.89 on E4B, all at q4f16. It is off here, and on a machine with GPU memory to spare it should
+  // stay off — see the field, which trades the plentiful resource for the scarce one.
+  //
+  // The scarce one is why `maxCodeChars` is 6 000 here and 14 000 on every other ONNX entry, and it
+  // is the one budget in this catalogue that answers to something other than a context window.
+  // `onnxruntime-web` is a **32-bit wasm module**: its memory is declared `max=4.00 GiB`, and
+  // everything it maps lives in that address space — 3.11 GB of it already spoken for by E2B's two
+  // files, 4.91 GB by E4B's. What is left has to hold the session, the arenas and the prefill
+  // intermediates, which are what grow with the listing; past a certain prompt the mapping fails
+  // and ORT reports `Failed to allocate memory for buffer mapping` on a machine with 48 GB free.
+  // The other two ONNX entries are ~1.2 GB of weights with nearly 3 GiB of room, so they keep the
+  // wider budget.
   {
     id: 'gemma-4-e2b',
     provider: 'transformers',
     label: 'Gemma 4 E2B',
     size: '~3.1 GB',
-    maxCodeChars: 14_000,
+    maxCodeChars: 6_000,
     model: 'onnx-community/gemma-4-E2B-it-ONNX',
     // q4f16, the default: this Gemma's own WebGPU demo runs these two sessions at exactly that,
     // so unlike Gemma 3 its fp16 path is one the publisher stands behind.
     thinking: true,
     note: 'Google’s newest small model, and the strongest non-Qwen here. A long first download.',
+    //cpuEmbeddings: true,
   },
   {
     id: 'gemma-4-e4b',
     provider: 'transformers',
     label: 'Gemma 4 E4B',
     size: '~4.9 GB',
-    maxCodeChars: 14_000,
+    maxCodeChars: 6_000,
     model: 'onnx-community/gemma-4-E4B-it-ONNX',
     thinking: true,
     note: 'The same model one size up. Wants a discrete or Apple-silicon GPU, and patience.',

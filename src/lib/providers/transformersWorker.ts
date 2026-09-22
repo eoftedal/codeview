@@ -117,6 +117,19 @@ async function ask(
   post({ type: 'done', truncated: !stopper.interrupted && counter.generated >= MAX_NEW_TOKENS })
 }
 
+/**
+ * A rejection nobody awaited. The handler below catches what `load` and `ask` throw, but ORT does
+ * async work of its own — a device that dies mid-run surfaces there rather than on the call we are
+ * awaiting, and that call may then never settle at all. Reported rather than left to the console,
+ * where the pane cannot see it: an unreported one leaves a stream open on an answer that has
+ * already stopped arriving.
+ */
+self.onunhandledrejection = (event: PromiseRejectionEvent) => {
+  event.preventDefault()
+  const reason: unknown = event.reason
+  post({ type: 'error', message: reason instanceof Error ? reason.message : String(reason) })
+}
+
 self.onmessage = async (event: MessageEvent<ToWorker>) => {
   const message = event.data
   try {
