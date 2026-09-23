@@ -22,6 +22,7 @@ describe('the hunting briefs', () => {
       /open redirect/i,
       /CSRF/,
       /crypt/i,
+      /input validation/i,
     ]) {
       expect(HUNTER_NAMES.some((name) => term.test(name))).toBe(true)
     }

@@ -66,6 +66,29 @@ const decorated = (className: string, target: Page = page) =>
     nodes.map((n) => (n.textContent ?? '').replace(/\u00a0/g, ' ')),
   )
 
+/** Click "Copy link" and read back the fragment it produced. Copy link never touches the page's
+ *  own address bar any more, and whether the real clipboard permission is granted varies by
+ *  Chrome version and CI, so `writeText` is patched to capture its argument directly rather than
+ *  trusting either of those. */
+async function copyLink(target: Page = page): Promise<string> {
+  await target.evaluate(() => {
+    ;(window as unknown as { __copiedLink: string | null }).__copiedLink = null
+    navigator.clipboard.writeText = async (text: string) => {
+      ;(window as unknown as { __copiedLink: string | null }).__copiedLink = text
+    }
+    const button = [...document.querySelectorAll('.actions > button')].find(
+      (candidate) => candidate.textContent?.trim() === 'Copy link',
+    )
+    ;(button as HTMLElement | undefined)?.click()
+  })
+  await new Promise((resolve) => setTimeout(resolve, 600))
+  const copied = await target.evaluate(
+    () => (window as unknown as { __copiedLink: string | null }).__copiedLink,
+  )
+  const index = copied?.indexOf('#') ?? -1
+  return index >= 0 ? copied!.slice(index) : ''
+}
+
 beforeAll(async () => {
   server = await createServer({ server: { port: PORT }, logLevel: 'error' })
   await server.listen()
@@ -267,17 +290,10 @@ describe('share links', () => {
   })
 
   it('round-trips the buffer through Copy link', async () => {
-    // Clipboard access is denied in headless Chrome; the app catches that and still writes the
-    // fragment, which is the part being tested here.
-    await page.evaluate(() => {
-      // '.actions button' would also match the language buttons nested in .languages.
-      const button = [...document.querySelectorAll('.actions > button')].find(
-        (candidate) => candidate.textContent?.trim() === 'Copy link',
-      )
-      ;(button as HTMLElement).click()
-    })
-    await new Promise((resolve) => setTimeout(resolve, 600))
-    const hash = await page.evaluate(() => location.hash)
+    // `copyLink` patches `navigator.clipboard.writeText` to capture its argument, since whether the
+    // real permission is granted varies by Chrome version and CI — Copy link never touches this
+    // page's own address bar, so there's nothing else to read the link back from.
+    const hash = await copyLink(page)
     expect(hash).toMatch(/^#src=z\./)
 
     const { fresh, source } = await loadInNewPage(hash)
@@ -286,7 +302,38 @@ describe('share links', () => {
       expect(source).toContain('const greeting = ')
     } finally {
       await fresh.close()
-      await page.evaluate(() => history.replaceState(null, '', location.pathname))
+    }
+  })
+
+  it('drops the fragment once loaded, so an edit survives a reload instead of the link snapping back', async () => {
+    const fresh = await browser.newPage()
+    try {
+      await fresh.setViewport({ width: 1400, height: 1000 })
+      await fresh.goto(`${URL}#src=const%20answer%20%3D%2042&lang=ts`, {
+        waitUntil: 'networkidle0',
+      })
+      await fresh.waitForSelector('.view-line')
+      await new Promise((resolve) => setTimeout(resolve, 600))
+
+      // The fragment did its one job of loading the buffer, and is already gone from the address
+      // bar — a reload from here must fall back to what's stored, not to the link again.
+      expect(await fresh.evaluate(() => location.hash)).toBe('')
+
+      await clickAt('const answer', 0, 0, fresh)
+      await fresh.keyboard.type('// edited\n')
+      // Past the 400ms debounce on the localStorage save this depends on surviving the reload.
+      await new Promise((resolve) => setTimeout(resolve, 700))
+
+      await fresh.reload({ waitUntil: 'networkidle0' })
+      await fresh.waitForSelector('.view-line')
+      await new Promise((resolve) => setTimeout(resolve, 600))
+
+      const source = await fresh.$$eval('.view-line', (nodes) =>
+        nodes.map((node) => (node.textContent ?? '').replace(/\u00a0/g, ' ')).join('\n'),
+      )
+      expect(source).toContain('// edited')
+    } finally {
+      await fresh.close()
     }
   })
 })
@@ -365,15 +412,7 @@ describe('embedding parameters', () => {
       await input.uploadFile(store, handler)
       await new Promise((resolve) => setTimeout(resolve, 900))
 
-      await fresh.evaluate(() => {
-        const button = [...document.querySelectorAll('.actions > button')].find(
-          (candidate) => candidate.textContent?.trim() === 'Copy link',
-        )
-        ;(button as HTMLElement).click()
-      })
-      await new Promise((resolve) => setTimeout(resolve, 800))
-
-      const hash = await fresh.evaluate(() => location.hash)
+      const hash = await copyLink(fresh)
       // Deflated, and it names the tab that was on screen.
       expect(hash).toMatch(/^#files=z\./)
       expect(hash).toContain('active=handler.ts')
@@ -430,15 +469,7 @@ describe('embedding parameters', () => {
   it('carries the filename through Copy link', async () => {
     const fresh = await open('?filename=src/App.tsx')
     try {
-      await fresh.evaluate(() => {
-        const button = [...document.querySelectorAll('.actions > button')].find(
-          (candidate) => candidate.textContent?.trim() === 'Copy link',
-        )
-        ;(button as HTMLElement).click()
-      })
-      await new Promise((resolve) => setTimeout(resolve, 700))
-
-      const hash = await fresh.evaluate(() => location.hash)
+      const hash = await copyLink(fresh)
       expect(hash).toContain('filename=src%2FApp.tsx')
       expect(hash).toContain('lang=tsx')
 
@@ -754,16 +785,9 @@ describe('the chat pane picks a model honestly', () => {
         'Hello there',
       )
 
-      // The key is never in the address bar: Copy link only ever hand-picks the prompt and the
-      // agent team into the fragment.
-      await fresh.evaluate(() => {
-        const button = [...document.querySelectorAll('.actions > button')].find(
-          (candidate) => candidate.textContent?.trim() === 'Copy link',
-        )
-        ;(button as HTMLElement | undefined)?.click()
-      })
-      await new Promise((resolve) => setTimeout(resolve, 300))
-      const hash = await fresh.evaluate(() => location.hash)
+      // The key is never in the link: Copy link only ever hand-picks the prompt and the agent
+      // team into the fragment.
+      const hash = await copyLink(fresh)
       expect(hash).not.toContain('sk-or-test-key')
       expect(hash).not.toContain('openrouter')
 
@@ -847,6 +871,236 @@ describe('the chat pane picks a model honestly', () => {
           nodes.map((node) => node.textContent?.trim()),
         ),
       ).not.toContain('Mistral Large · no download')
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('offers no local model, and requests nothing, until an address is set', async () => {
+    // The whole of the opt-in gate: on the deployed site this is the state every reader is in, and
+    // nothing about it may reach for `localhost` — that is what would trip Chrome's local-network
+    // permission prompt on a page nobody asked to do this.
+    const fresh = await chatPageWith(function () {
+      localStorage.clear()
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+      const originalFetch = window.fetch.bind(window)
+      ;(window as unknown as { __probes: string[] }).__probes = []
+      window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        ;(window as unknown as { __probes: string[] }).__probes.push(url)
+        return originalFetch(input, init)
+      }) as typeof window.fetch
+    })
+    try {
+      const options = await fresh.$$eval('.model option', (nodes) =>
+        nodes.map((node) => node.textContent?.trim()),
+      )
+      expect(options.some((label) => label?.includes('qwen2.5-coder'))).toBe(false)
+      const probes = await fresh.evaluate(
+        () => (window as unknown as { __probes: string[] }).__probes,
+      )
+      expect(probes.some((url) => url.includes('11434'))).toBe(false)
+      expect(
+        await fresh.evaluate(() => localStorage.getItem('codeview:local-server-url')),
+      ).toBeNull()
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('discovers the models on a local server once its address is set, and answers from one', async () => {
+    const fresh = await chatPageWith(function () {
+      localStorage.clear()
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+      const originalFetch = window.fetch.bind(window)
+      ;(window as unknown as { __inputs: unknown[] }).__inputs = []
+      window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (!url.includes('11434')) return originalFetch(input, init)
+        if (url.endsWith('/models')) {
+          return new Response(
+            JSON.stringify({ data: [{ id: 'qwen2.5-coder:7b' }, { id: 'llama3.2:3b' }] }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          )
+        }
+        ;(window as unknown as { __inputs: unknown[] }).__inputs.push(
+          JSON.parse(String(init?.body)),
+        )
+        const encoder = new TextEncoder()
+        const body = new ReadableStream({
+          start(controller) {
+            // `reasoning_content` is llama.cpp's and LM Studio's spelling of a thought, not
+            // OpenRouter's `reasoning` — folded into the same `<think>` block either way.
+            controller.enqueue(
+              encoder.encode('data: {"choices":[{"delta":{"reasoning_content":"weighing"}}]}\n\n'),
+            )
+            controller.enqueue(
+              encoder.encode('data: {"choices":[{"delta":{"content":"Served"}}]}\n\n'),
+            )
+            controller.enqueue(
+              encoder.encode(
+                'data: {"choices":[{"delta":{"content":" locally"},"finish_reason":"stop"}]}\n\n',
+              ),
+            )
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+            controller.close()
+          },
+        })
+        return new Response(body, { status: 200 })
+      }) as typeof window.fetch
+    })
+    try {
+      await fresh.click('.prompt')
+      // A bare host is the spelling readers reach for, and it is stored canonical.
+      await fresh.type('#local-server-url', 'localhost:11434')
+      await fresh.click('.prompt-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:local-server-url'))).toBe(
+        'http://localhost:11434/v1',
+      )
+
+      // Both models the server reported are now in the picker, from the one `/models` call that
+      // also settled whether anything was listening.
+      const options = await fresh.$$eval('.model option', (nodes) =>
+        nodes.map((node) => node.textContent?.trim()),
+      )
+      expect(options).toContain('qwen2.5-coder:7b · no download')
+      expect(options).toContain('llama3.2:3b · no download')
+
+      await fresh.select('.model', 'local:qwen2.5-coder:7b')
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(await fresh.$eval('.status .muted', (el) => el.textContent)).toContain(
+        'running on your own server',
+      )
+
+      await fresh.type('.composer textarea', 'What does this do?')
+      await fresh.click('.composer .send')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      expect(await fresh.$eval('.message.assistant .text', (el) => el.textContent)).toContain(
+        'Served locally',
+      )
+
+      // The model name reaches the server as its own, not as our namespaced id, and the files ride
+      // a user turn rather than the system prompt.
+      const sent = (
+        await fresh.evaluate(
+          () =>
+            (window as unknown as { __inputs: { model: string; messages: { role: string }[] }[] })
+              .__inputs,
+        )
+      )[0]!
+      expect(sent.model).toBe('qwen2.5-coder:7b')
+      expect(sent.messages.map((message) => message.role).slice(0, 3)).toEqual([
+        'system',
+        'user',
+        'assistant',
+      ])
+
+      // An address on this machine is no part of a share link, for the same reason the key is not:
+      // it means nothing wherever the link is opened.
+      const hash = await copyLink(fresh)
+      expect(hash).not.toContain('11434')
+      expect(hash).not.toContain('localhost')
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('names the server, not the browser, when nothing answers there', async () => {
+    // A server that was up when it was last asked and is down now — which is why the discovered
+    // list is kept through a failed probe rather than emptied, and why the model is still pickable.
+    const fresh = await chatPageWith(function () {
+      localStorage.clear()
+      localStorage.setItem('codeview:local-server-url', 'http://localhost:11434/v1')
+      localStorage.setItem(
+        'codeview:local-server-seen',
+        JSON.stringify([{ model: 'qwen2.5-coder:7b', label: 'qwen2.5-coder:7b', thinking: false }]),
+      )
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+      const originalFetch = window.fetch.bind(window)
+      window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        // What a browser actually does when nothing is listening, or the origin is refused.
+        if (url.includes('11434')) throw new TypeError('Failed to fetch')
+        return originalFetch(input, init)
+      }) as typeof window.fetch
+    })
+    try {
+      await fresh.select('.model', 'local:qwen2.5-coder:7b')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      await fresh.type('.composer textarea', 'What does this do?')
+      await fresh.click('.composer .send')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      const failed = await fresh.$eval('.message.failed .text', (el) => el.textContent)
+      expect(failed).toContain('No server answered at http://localhost:11434/v1')
+      // The three causes worth naming, none of which is visible from the browser side.
+      expect(failed).toContain('OLLAMA_ORIGINS')
+      expect(failed).not.toContain('Failed to fetch')
+
+      // The model it could not reach stays in the picker: one failed probe is not evidence the
+      // reader's server is gone for good.
+      expect(
+        await fresh.$$eval('.model option', (nodes) =>
+          nodes.map((node) => node.textContent?.trim()),
+        ),
+      ).toContain('qwen2.5-coder:7b · no download')
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('lets a reader name a local model by hand, for a server that lists none', async () => {
+    const fresh = await chatPageWith(function () {
+      localStorage.clear()
+      localStorage.setItem('codeview:local-server-url', 'http://localhost:11434/v1')
+      Object.defineProperty(navigator, 'gpu', {
+        value: { requestAdapter: async () => ({}) },
+        configurable: true,
+      })
+      const originalFetch = window.fetch.bind(window)
+      window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        // A server with no `/models` route at all — the case the hand-added list exists for.
+        if (url.includes('11434')) return new Response('not found', { status: 404 })
+        return originalFetch(input, init)
+      }) as typeof window.fetch
+    })
+    try {
+      await fresh.click('.prompt')
+      await fresh.type('.models-add.local .models-input', 'deepseek-r1:8b')
+      const labelInput = await fresh.$$('.models-add.local .models-input')
+      await labelInput[1]!.type('DeepSeek R1')
+      await fresh.click('.models-add.local .models-think input')
+      await fresh.click('.models-add.local button')
+      await fresh.click('.prompt-editor .save')
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      expect(
+        await fresh.$$eval('.model option', (nodes) =>
+          nodes.map((node) => node.textContent?.trim()),
+        ),
+      ).toContain('DeepSeek R1 · no download')
+      expect(await fresh.evaluate(() => localStorage.getItem('codeview:local-server-models'))).toBe(
+        JSON.stringify([{ model: 'deepseek-r1:8b', label: 'DeepSeek R1', thinking: true }]),
+      )
+
+      // Flagged as thinking, which is the one thing `/models` could never have told us — so the
+      // checkbox is on offer for it.
+      await fresh.select('.model', 'local:deepseek-r1:8b')
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(await fresh.$('.reason')).not.toBeNull()
     } finally {
       await fresh.close()
     }
@@ -1235,19 +1489,9 @@ describe('the chat pane picks a model honestly', () => {
         configurable: true,
       })
     })
-    const copyLink = async () => {
-      await fresh.evaluate(() => {
-        const button = [...document.querySelectorAll('.actions > button')].find(
-          (candidate) => candidate.textContent?.trim() === 'Copy link',
-        )
-        ;(button as HTMLElement).click()
-      })
-      await new Promise((resolve) => setTimeout(resolve, 600))
-      return fresh.evaluate(() => location.hash)
-    }
     try {
       // The shipped brief is not worth a parameter: it is what every reader gets anyway.
-      expect(await copyLink()).not.toContain('systemprompt')
+      expect(await copyLink(fresh)).not.toContain('systemprompt')
 
       await fresh.click('.prompt')
       await fresh.$eval('.prompt-text', (el) => {
@@ -1258,7 +1502,7 @@ describe('the chat pane picks a model honestly', () => {
       await fresh.click('.prompt-editor .save')
       await new Promise((resolve) => setTimeout(resolve, 200))
 
-      const hash = await copyLink()
+      const hash = await copyLink(fresh)
       expect(hash).toMatch(/systemprompt=z\./)
 
       // Which the other end reads back, deflated payload and all.
@@ -1871,19 +2115,9 @@ describe('the agents pane runs a line of agents', () => {
 
   it('carries a rewritten team into Copy link, and nothing when it is the default', async () => {
     const fresh = await agentsPage()
-    const copyLink = async () => {
-      await fresh.evaluate(() => {
-        const button = [...document.querySelectorAll('.actions > button')].find(
-          (candidate) => candidate.textContent?.trim() === 'Copy link',
-        )
-        ;(button as HTMLElement).click()
-      })
-      await new Promise((resolve) => setTimeout(resolve, 600))
-      return fresh.evaluate(() => location.hash)
-    }
     try {
       // The shipped team is not worth a parameter: it is what every reader gets anyway.
-      expect(await copyLink()).not.toContain('agents=')
+      expect(await copyLink(fresh)).not.toContain('agents=')
 
       await fresh.click('.prompt')
       await fresh.$eval('.team-editor .card .prompt-text', (el) => {
@@ -1897,7 +2131,7 @@ describe('the agents pane runs a line of agents', () => {
       expect(await fresh.evaluate(() => localStorage.getItem('codeview:agents'))).toContain(
         'Brief them briefly.',
       )
-      expect(await copyLink()).toMatch(/agents=z\./)
+      expect(await copyLink(fresh)).toMatch(/agents=z\./)
     } finally {
       await fresh.close()
     }
@@ -2024,14 +2258,7 @@ describe('the agents pane runs a line of agents', () => {
       )
       // And a model alone makes the team worth a link: Copy link carries it, and a fresh page
       // opened on that link — the reader's own storage empty — shows the same roster.
-      await fresh.evaluate(() => {
-        const button = [...document.querySelectorAll('.actions > button')].find(
-          (candidate) => candidate.textContent?.trim() === 'Copy link',
-        )
-        ;(button as HTMLElement).click()
-      })
-      await new Promise((resolve) => setTimeout(resolve, 600))
-      const hash = await fresh.evaluate(() => location.hash)
+      const hash = await copyLink(fresh)
       expect(hash).toMatch(/agents=z\./)
       const opened = await agentsPage(hash)
       try {

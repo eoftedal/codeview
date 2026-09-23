@@ -110,13 +110,13 @@ the tree and the Monaco editor instance live in `shallowRef`s. Tree rows get sha
 `provide`/`inject` (`src/components/astContext.ts`), not prop drilling.
 
 **The chat tab is a third question with a third cost.** `src/lib/chat.ts` is a provider contract,
-not a client: `providers/{builtin,webllm,transformers,openrouter}.ts` implement `availability` /
-`load`, and nothing above them knows which model is answering. **Two lifetimes, and conflating
+not a client: `providers/{builtin,webllm,transformers,openrouter,localServer}.ts` implement
+`availability` / `load`, and nothing above them knows which model is answering. **Two lifetimes, and conflating
 them is the bug that keeps coming back**: a `ModelEngine` owns the loaded weights and outlives
 conversations, while a `ChatSession` is a system prompt and its turns. `newChat` drops the session
 and keeps the engine — destroying the engine per conversation means reloading the model onto the
-GPU on every "New chat". Three of the four providers keep the rule stated everywhere else: no key,
-no server, no hosted fallback — every model runs on the reader's machine. `openrouter` is the one
+GPU on every "New chat". Four of the five providers keep the rule stated everywhere else: no key,
+no hosted fallback — every model runs on the reader's machine. `openrouter` is the one
 deliberate exception, clearly labelled wherever it's offered: it sends the system prompt, the open
 files and every question to OpenRouter's API using a key the reader supplies themselves
 (`providers/openrouterKey.ts`, `localStorage` key `codeview:openrouter-key` — the first _secret_
@@ -129,8 +129,47 @@ load one without a key, throwing a message that names the missing key specifical
 attempting a request. The three shipped OpenRouter entries are not the whole story: a reader can
 add any OpenRouter-hosted slug of their own from the same settings panel
 (`providers/openrouterModels.ts`, `localStorage` key `codeview:openrouter-models`, turned into an
-ordinary `ModelChoice` by `toModelChoice` so nothing downstream treats it differently). `MODELS` in
-`chat.ts` is a static list, so `providers/index.ts`'s `allModels()` is what actually merges the
+ordinary `ModelChoice` by `toModelChoice` so nothing downstream treats it differently).
+
+**`localserver` is the fifth provider and the opposite of an exception**: a server the reader
+started — Ollama, LM Studio, llama.cpp, vLLM — reached over loopback, so the code never leaves the
+machine and nothing downloads into the browser. It sits beside `openrouter` only because the four of
+them speak the same API, and `providers/openaiCompatible.ts` is that shared half: one SSE read loop
+carrying the three rules that drift the moment they are copied — the partial answer pushed into the
+history on _both_ the success and the error path, the `DOMException('Aborted', 'AbortError')` that
+`stream.ts`'s `isAbort` is keyed to, and `fold.end()` closing a `<think>` the stream left open. What
+is left in each provider is its four own facts: endpoint, headers, ceiling, and the wording of a
+failure. **Its gate is the base URL, not `import.meta.env.DEV`**, and the reasoning matters because
+the obvious premise is wrong: a page on GitHub Pages _can_ fetch `http://localhost` — loopback is
+carved out of mixed-content blocking, the Secure Contexts spec counting `127.0.0.1`, `[::1]` and the
+`localhost` name as potentially trustworthy. What actually stands in the way is the reader's own to
+clear (Ollama's default origins are loopback-only, so `OLLAMA_ORIGINS` is needed for the deployed
+site; LM Studio has a switch) plus Chrome's local-network permission prompt for a public page
+reaching a loopback address — which is the reason nothing is ever requested until an address is
+typed, rather than a reason to gate on the build. A dev-mode prefill was tried and **rejected for a
+test reason worth keeping**: `tests/e2e/app.test.ts` runs against the dev server and pins the
+picker's contents with `toEqual`, so seeding an address there would make those listings depend on
+whether the machine running them happens to have a server up. `EXAMPLE_LOCAL_URL` is a placeholder
+only. Its catalogue is entirely the reader's: nothing is added to `MODELS`, and
+`providers/localServerModels.ts` merges what `/models` reported (cached under
+`codeview:local-server-seen`) with what they named by hand (`codeview:local-server-models`), **the
+hand-added entry winning** so that naming a discovered model is an override — the one way to say it
+thinks, or that its context is smaller than the budget assumes, neither of which `/models` reports.
+**The cache exists because `allModels()` is synchronous and discovery is not**, and it is
+_persisted_ rather than held in memory so a reload restores the picker at once and a remembered
+model id still resolves before the probe returns — otherwise `useModel` quietly bumps the reader
+onto a different model on every reload. A failed probe deliberately keeps the list: a server down
+for a minute is not evidence it is gone. Three reasoning field names are read, not one
+(`reasoning`, `reasoning_content`, `thinking`), because OpenRouter, llama.cpp/LM Studio and Ollama
+each pick a different one, and a server that writes `<think>` into `content` needs nothing —
+`markdown.ts` already folds it. `enable_thinking` rides `chat_template_kwargs` and is sent **only**
+for an entry the reader flagged, since these servers disagree about unknown body fields and a
+discovered entry must not be what finds that out. The failure that matters is the one with no
+`Response` at all: `fetch` rejects with a `TypeError`, and `networkMessage` names the address and
+all three causes rather than letting "Failed to fetch" stand. Its address is no part of a share
+link, for the key's reason and one more — it means nothing wherever the link is opened.
+
+`MODELS` in `chat.ts` is a static list, so `providers/index.ts`'s `allModels()` is what actually merges the
 shipped catalogue with the reader's own — `usableModels()` and the new `findModel()` (the one
 lookup `useModel`, `useAgents` and the agents pane use in place of `chat.ts`'s own `modelById`,
 which only knows the shipped three) both go through it. Adding or removing one does not touch the
@@ -292,7 +331,7 @@ naming the model, filed against the agent, rather than running it on something e
 **The hunters are a shelf, not a mode.** `src/lib/hunters.ts` is one `Record<string, string>` —
 the name the picker shows, the complete system prompt — built from a shared opening and closing
 around the per-class half in `FOCUS`, so a change to how a finding is reported is one edit rather
-than fifteen. Both panes offer them (`ChatPane`'s settings panel, and every agent card in
+than sixteen. Both panes offer them (`ChatPane`'s settings panel, and every agent card in
 `AgentsPane`, where the two shipped briefs sit in the same select), and picking one **only writes
 the textarea**: there is no hunter id kept, no new key in a link and nothing downstream that knows
 a brief came from here — an edited hunter is simply a brief of the reader's own, which is why the
@@ -317,11 +356,16 @@ a chat, and an agent's question is a brief plus a whole report, so `useAgents` p
 clips the listing and says so instead of the answer dying at the window with nothing to relay. The
 relay clip scales too — `relayLimit(maxCodeChars)`, a third of the code budget and never under
 `MAX_RELAY_CHARS` — with the orchestrator's two messages clipped at the picked model's limit and each
-handoff at the receiving agent's. **OpenRouter has its own ceiling**, `MAX_HOSTED_TOKENS`, not
-`ceiling.ts`'s: on that API `max_tokens` also pays for the reasoning, and nothing hosted is looping.
-Its thought does not arrive in the text either — it is `delta.reasoning` beside `delta.content` —
-so `foldReasoning` in `providers/thoughts.ts` turns it into the `<think>` block everything else
-already handles, on every stream regardless of the thinking flag, since a custom slug may reason
+handoff at the receiving agent's. **Both OpenAI-compatible providers have their own ceiling**,
+`MAX_HOSTED_TOKENS` and `MAX_LOCAL_TOKENS`, not `ceiling.ts`'s: on that API `max_tokens` also pays
+for the reasoning, so 4096 is how a thinking model spends its whole allowance and returns no answer.
+That `MAX_NEW_TOKENS` guards against a local model that loops does apply to `localserver` in a way it
+does not to a hosted one — but reaching the ceiling is reported rather than swallowed, and the stop
+button is on a GPU the reader owns, so it keeps the roomier figure too.
+Their thought does not arrive in the text either — it is `delta.reasoning` (or
+`reasoning_content`, or `thinking`) beside `delta.content` — so `foldReasoning` in
+`providers/thoughts.ts` turns it into the `<think>` block everything else already handles, on every
+stream regardless of the thinking flag, since a custom slug or a local reasoning model may reason
 unasked. The shipped Review agent runs on `DEFAULT_REVIEW`, not `DEFAULT_ROLE`: the same
 `REVIEWER_BRIEF` closed with "report every flow in full" instead of the chat's "keep answers
 short", because an agent's report is the next agent's entire input and a system prompt asking for
@@ -347,7 +391,11 @@ Answers are Markdown, rendered by `markdown.ts` → `MarkdownText.vue` → `Mark
 real elements — never `v-html`, which is what keeps model output from becoming markup. The parser's
 odd-looking rules are deliberate: an unterminated fence is code (a streaming answer is always
 mid-block), emphasis is `*`-only (`_` would italicise `snake_case`), and only `http(s)` targets
-become links. A model reaching for LaTeX mid-sentence gets one concession: a `$…$` run
+become links. Backticks are counted, not merely found — a run of _n_ opens a code span and only a
+run of exactly _n_ closes it, which is how a model writing about this codebase gets a backtick
+inside one (``console.log(`a`)``), and the same rule at block level is why a four-backtick fence
+survives a ``` line inside it. `spansToText` therefore picks a delimiter longer than anything in
+the span, since a wrapped list item is re-parsed from its own re-serialized text. A model reaching for LaTeX mid-sentence gets one concession: a `$…$` run
 holding nothing _but_ arrow macros is spelled as the character (`SYMBOLS` in `markdown.ts`,
 and adding a symbol means adding a row). Nothing but — which is what leaves `$5 to $10`, and
 any macro the table has no character for, exactly as written.
@@ -368,7 +416,9 @@ The agents' orchestrator calls `chat(system)` with no second argument, which is 
 mechanism by which it never sees a file.
 
 **Pure vs. impure.** `src/lib/{agents,analyzer,astTree,definitions,files,flow,share}.ts` are pure and
-unit-tested over fixture strings — the analyzer's fixtures are now _sets_ of files, which is how
+unit-tested over fixture strings — as are `normalizeBaseUrl` and `toModelChoice`
+(`tests/localServer.test.ts`), the two halves of the local provider that touch neither storage nor
+the network; the rest of it, like the OpenRouter key and its added models, is browser-bound — — the analyzer's fixtures are now _sets_ of files, which is how
 cross-file resolution and cross-file traces are tested; everything else is browser-bound and covered only by the e2e suites.
 `chat.ts` is the mixed case: `buildSystemPrompt`/`numberLines`/`promptFiles`/`describeStatus` are
 pure, the `MODELS` catalogue is data, and only the provider seam is not. `stream.ts` is the shared
@@ -474,7 +524,19 @@ each field is spread in only when set, never sent as null.
   newline before a `--8<--` header belongs to the header** — change that and every file that ends
   without a newline gains one on the way through a link. `copyShareLink` still writes the old
   `src`/`lang`/`filename` form for a lone tab: shorter, and every existing link and embed keeps
-  working.
+  working. It never touches the reader's own address bar any more — only the clipboard (falling
+  back to putting the link in the notice text if that write is refused) — since the address bar is
+  a live view of *their* buffer, not the one being handed to someone else.
+- **The fragment is dropped from the address bar once, right after every composable that reads it
+  (`useBuffer`, `useChat`, `useAgents`) has captured what it needs, in `App.vue`.** Each parses
+  `location.hash` synchronously on construction even though applying a linked value is itself
+  async, so dropping it once all three have run still lets it overload `localStorage` for that one
+  load. Without this, editing after opening a link and then reloading would snap straight back to
+  the link's content, since `fromParams` would still be true; dropping the hash means a reload
+  falls back to `localStorage` instead, which every edit already keeps current. `dropFragment` in
+  `share.ts` is the one place that does this — a no-op when there is no hash, which is the common
+  case — and it is *not* a watcher on ongoing edits: once dropped, there is nothing left to change
+  out from under.
 - **The caret rule.** A caret sits _between_ characters, so a cursor at the end of a word is one past
   the identifier it belongs to. Both `findNodeAtOffset` and `identifierAt` look one character left
   when the caret isn't inside a token. Any new offset→node lookup needs the same rule.

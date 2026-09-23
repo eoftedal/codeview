@@ -175,6 +175,19 @@ export function parseParams(search: string, hash: string): Map<string, string> {
   return params
 }
 
+/**
+ * Drop the fragment from the address bar, leaving the query string alone. Called once, straight
+ * after every composable that reads `location.hash` on load has captured what it needs from it —
+ * so the fragment still gets to overload `localStorage` for that one load, but the moment it has,
+ * the URL stops describing it. Without this, editing after opening a link and then reloading would
+ * snap straight back to the link's content, discarding what was typed in between; a reload should
+ * fall back to `localStorage`, which every edit already keeps current. A no-op when there is no
+ * hash to begin with, which is the common case.
+ */
+export function dropFragment(): void {
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search)
+}
+
 const FALSY = new Set(['false', '0', 'no', 'off'])
 
 /**

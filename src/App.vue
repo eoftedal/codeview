@@ -15,8 +15,11 @@ import { useModel } from './composables/useModel'
 import { findNodeAtOffset } from './lib/astTree'
 import type { DefinitionResult, Span } from './lib/definitions'
 import { isExternalOrigin, type FlowTarget, type FlowTrace } from './lib/flow'
+import { dropFragment } from './lib/share'
 import { useOpenRouterKey } from './lib/providers/openrouterKey'
 import { useOpenRouterModels } from './lib/providers/openrouterModels'
+import { useLocalServerUrl } from './lib/providers/localServerUrl'
+import { refreshLocalServerModels, useLocalServerModels } from './lib/providers/localServerModels'
 
 const SPLIT_KEY = 'codeview:split'
 
@@ -80,10 +83,32 @@ const openrouterKey = useOpenRouterKey()
 const openrouterModels = useOpenRouterModels()
 watch(openrouterModels.models, () => model.refreshModels(), { deep: true })
 
+/** The address of a model server the reader runs themselves, and any model they have named on it
+ *  by hand. Held here for the same reason the two above are: a provider setting, not a
+ *  conversation one.
+ *
+ *  Changing the address is the one setting that needs an *async* step before the picker can be
+ *  rebuilt — the local catalogue is whatever the server reports, and `allModels()` is synchronous,
+ *  so the answer has to be cached before `refreshModels()` reads it. That ordering is the whole
+ *  reason this watch is not the one-liner the OpenRouter one is. */
+const localServerUrl = useLocalServerUrl()
+const localServerModels = useLocalServerModels()
+watch(localServerUrl.url, () => {
+  void refreshLocalServerModels().then(() => model.refreshModels())
+})
+watch(localServerModels.models, () => model.refreshModels(), { deep: true })
+
 /** Held here, not in the panes: a pane unmounts whenever another tab is shown, and neither a
  *  conversation nor a run should survive only as long as a glance at the tree. */
 const chat = useChat(model, files, activeFileId)
 const agents = useAgents(model, files, activeFileId)
+
+// Every composable above has now read whatever it needs out of `location.hash` (the files, the
+// chat's brief, the agents' team) — each synchronously, on construction, even though applying a
+// linked value is itself async. So the fragment has done its one job: dropping it here, once,
+// lets it still overload `localStorage` on this load without leaving a stale link in the address
+// bar for a later reload to snap back to.
+dropFragment()
 
 watch(activeTab, (tab) => {
   if (tab === 'chat' || tab === 'agents') model.probe()
@@ -341,6 +366,8 @@ function onFilePicked(event: Event): void {
               :role-is-default="chat.roleIsDefault.value"
               :openrouter-key="openrouterKey.key.value"
               :openrouter-models="openrouterModels.models.value"
+              :local-server-url="localServerUrl.url.value"
+              :local-server-models="localServerModels.models.value"
               :status="model.status.value"
               :progress="model.progress.value"
               :messages="chat.messages.value"
@@ -353,6 +380,8 @@ function onFilePicked(event: Event): void {
               @update:role="chat.setRole($event)"
               @update:openrouter-key="openrouterKey.key.value = $event"
               @update:openrouter-models="openrouterModels.models.value = $event"
+              @update:local-server-url="localServerUrl.url.value = $event"
+              @update:local-server-models="localServerModels.models.value = $event"
               @ask="chat.ask($event)"
               @stop="chat.stop()"
               @new-chat="chat.newChat()"

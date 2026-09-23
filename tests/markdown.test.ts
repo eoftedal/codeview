@@ -42,6 +42,35 @@ describe('inline spans', () => {
     expect(parseInline('`a ** b * c`')).toEqual([{ kind: 'code', text: 'a ** b * c' }])
   })
 
+  it('lets a longer delimiter hold a backtick — the run length is what closes a span', () => {
+    expect(parseInline('a ``console.log(`a`)`` b')).toEqual([
+      { kind: 'text', text: 'a ' },
+      { kind: 'code', text: 'console.log(`a`)' },
+      { kind: 'text', text: ' b' },
+    ])
+    expect(parseInline('``` ``x`` ```')).toEqual([{ kind: 'code', text: '``x``' }])
+  })
+
+  it('drops the padding space that lets a span start or end with a backtick', () => {
+    expect(parseInline('use `` ` `` here')).toEqual([
+      { kind: 'text', text: 'use ' },
+      { kind: 'code', text: '`' },
+      { kind: 'text', text: ' here' },
+    ])
+  })
+
+  it('leaves a run with no closer of its own length as text', () => {
+    expect(parseInline('``a`')).toEqual([{ kind: 'text', text: '``a`' }])
+    expect(parseInline('```a`')).toEqual([{ kind: 'text', text: '```a`' }])
+  })
+
+  it("closes on the first run of exactly the opener's length", () => {
+    expect(parseInline('`a``` and `b`')).toEqual([
+      { kind: 'code', text: 'a``` and ' },
+      { kind: 'text', text: 'b`' },
+    ])
+  })
+
   it('spells a LaTeX arrow, in text and in emphasis', () => {
     expect(parseInline('req.params.id $\\rightarrow$ db.query')).toEqual([
       { kind: 'text', text: 'req.params.id → db.query' },
@@ -115,6 +144,14 @@ describe('blocks', () => {
     expect(blocks).toEqual([{ kind: 'code', language: 'js', text: 'db.query(sql)' }])
   })
 
+  it('closes a fence only on a run as long as the opener, so a block can hold one', () => {
+    const blocks = parseMarkdown('````md\n```js\nx\n```\n````\nafter')
+    expect(blocks).toEqual([
+      { kind: 'code', language: 'md', text: '```js\nx\n```' },
+      { kind: 'paragraph', spans: [{ kind: 'text', text: 'after' }] },
+    ])
+  })
+
   it('reads bullet lists, keeping nesting depth', () => {
     const blocks = parseMarkdown('- source: `req.query.id`\n- sink: `db.query`\n  - line 21\n')
     expect(blocks).toHaveLength(1)
@@ -133,6 +170,16 @@ describe('blocks', () => {
     const list = blocks[0]!
     expect(list.kind === 'list' && list.items).toHaveLength(1)
     expect(text(list)).toBe('the value reaches the sink unescaped')
+  })
+
+  it('keeps a backtick in a code span when a wrapped item is re-parsed', () => {
+    const blocks = parseMarkdown('- it calls ``fn(`a`)``\n  on line 12\n')
+    const list = blocks[0]!
+    expect(list.kind === 'list' && list.items[0]!.spans).toEqual([
+      { kind: 'text', text: 'it calls ' },
+      { kind: 'code', text: 'fn(`a`)' },
+      { kind: 'text', text: ' on line 12' },
+    ])
   })
 
   it('reads headings, quotes and rules', () => {

@@ -65,9 +65,16 @@ const DELIMITER = /^\s{0,3}\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/
  * Emphasis is `*`-only on purpose: `_` is a word character in the code these answers are about, and
  * `snake_case_names` would come out italicised. Link targets must be http(s), so a `href` can never
  * be built out of anything a model dreamt up.
+ *
+ * A code span is delimited by a *run* of backticks and closed only by a run of exactly the same
+ * length — which is the whole of how a backtick gets inside one, and a model writing about this
+ * codebase does that constantly: ``console.log(`a`)``. All four guards count the run rather than
+ * just finding the next backtick. Without the two around the opener the engine would backtrack into
+ * a shorter opener and close against the inner backtick; without the two around the closer it would
+ * stop inside a longer run. Still one line at a time, like the emphasis rules beside it.
  */
 const INLINE =
-  /`([^`\n]+)`|\*\*(?!\s)([^\n]+?)(?<!\s)\*\*|\*(?!\s)([^*\n]+?)(?<!\s)\*|\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g
+  /(?<!`)(`+)(?!`)([^\n]+?)(?<!`)\1(?!`)|\*\*(?!\s)([^\n]+?)(?<!\s)\*\*|\*(?!\s)([^*\n]+?)(?<!\s)\*|\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g
 
 /**
  * A model reaching for LaTeX mid-sentence. Asked how a value travels, one writes
@@ -115,6 +122,15 @@ function spell(text: string): string {
   )
 }
 
+/**
+ * CommonMark's padding rule: one space comes off each end when there is one at both, which is the
+ * only way to write a span whose text starts or ends with a backtick — ``` `` ` `` ``` is a span
+ * holding one backtick. A run of nothing but spaces is left alone; there is nothing else in it.
+ */
+function unpad(text: string): string {
+  return text.startsWith(' ') && text.endsWith(' ') && text.trim() ? text.slice(1, -1) : text
+}
+
 /** Inline spans of one line. Emphasis carries plain text — no nesting, by design. */
 export function parseInline(text: string): Inline[] {
   const spans: Inline[] = []
@@ -123,10 +139,10 @@ export function parseInline(text: string): Inline[] {
   for (const match of text.matchAll(INLINE)) {
     const index = match.index
     if (index > last) spans.push({ kind: 'text', text: spell(text.slice(last, index)) })
-    if (match[1] !== undefined) spans.push({ kind: 'code', text: match[1] })
-    else if (match[2] !== undefined) spans.push({ kind: 'strong', text: spell(match[2]) })
-    else if (match[3] !== undefined) spans.push({ kind: 'em', text: spell(match[3]) })
-    else spans.push({ kind: 'link', text: spell(match[4]!), href: match[5]! })
+    if (match[2] !== undefined) spans.push({ kind: 'code', text: unpad(match[2]) })
+    else if (match[3] !== undefined) spans.push({ kind: 'strong', text: spell(match[3]) })
+    else if (match[4] !== undefined) spans.push({ kind: 'em', text: spell(match[4]) })
+    else spans.push({ kind: 'link', text: spell(match[5]!), href: match[6]! })
     last = index + match[0].length
   }
 
@@ -224,8 +240,12 @@ export function parseMarkdown(source: string): Block[] {
 
     const fence = FENCE.exec(line)
     if (fence) {
-      const marker = fence[1]![0]!
-      const closing = new RegExp(`^\\s{0,3}${marker === '`' ? '`' : '~'}{3,}\\s*$`)
+      // Only a run at least as long as the opener closes it: a four-backtick fence is how a block
+      // holding a ``` line is written, and a `{3,}` closer would end it on that line instead.
+      const marker = fence[1]!
+      const closing = new RegExp(
+        `^\\s{0,3}${marker[0] === '`' ? '`' : '~'}{${marker.length},}\\s*$`,
+      )
       const body: string[] = []
       index++
       // An unterminated fence is the normal state of a streaming answer, so the rest is the block.
@@ -328,13 +348,28 @@ export function parseMarkdown(source: string): Block[] {
   return blocks
 }
 
+/**
+ * Writes a code span back out so `parseInline` reads the same text again: a delimiter longer than
+ * any backtick run inside it, and the padding space that `unpad` takes off — needed when the text
+ * would otherwise touch the delimiter, and when it already has a space at both ends.
+ */
+function codeSpan(text: string): string {
+  const longest = Math.max(0, ...[...text.matchAll(/`+/g)].map((run) => run[0].length))
+  const padded =
+    text.startsWith('`') ||
+    text.endsWith('`') ||
+    (text.startsWith(' ') && text.endsWith(' ') && text.trim() !== '')
+  const delimiter = '`'.repeat(longest + 1)
+  return padded ? `${delimiter} ${text} ${delimiter}` : `${delimiter}${text}${delimiter}`
+}
+
 /** Re-flattens spans so a wrapped list item can be parsed as one line. */
 function spansToText(spans: Inline[]): string {
   return spans
     .map((span) => {
       switch (span.kind) {
         case 'code':
-          return `\`${span.text}\``
+          return codeSpan(span.text)
         case 'strong':
           return `**${span.text}**`
         case 'em':

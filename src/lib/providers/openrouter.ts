@@ -7,25 +7,17 @@
  * this exception.
  *
  * Shaped closest to `builtin.ts` in that there is no Worker: network I/O does not block the main
- * thread the way on-device inference does, so nothing here needs to be kept off it. But unlike
- * `builtin.ts` there is no browser-native session object to lean on, so this provider does the same
- * streaming/history/abort/truncation bookkeeping `webllm.ts` and `transformers.ts` do, over SSE
- * instead of a library's own stream.
+ * thread the way on-device inference does, so nothing here needs to be kept off it. The streaming
+ * itself lives in `./openaiCompatible.ts`, shared with `./localServer.ts` — what is left here is
+ * the four things that are OpenRouter's own: its URL, its headers, its generation ceiling and the
+ * wording of its failures.
  */
 
-import {
-  CODE_ACK,
-  type Availability,
-  type LoadOptions,
-  type ModelEngine,
-  type Provider,
-} from '../chat'
+import { type Availability, type LoadOptions, type ModelEngine, type Provider } from '../chat'
+import { openAiEngine } from './openaiCompatible'
 import { getOpenRouterKey } from './openrouterKey'
-import { foldReasoning, withoutThoughts } from './thoughts'
 
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions'
-
-type Message = { role: 'system' | 'user' | 'assistant'; content: string }
 
 /**
  * The ceiling for one answer, in tokens. Deliberately not `ceiling.ts`'s `MAX_NEW_TOKENS`: that one
@@ -36,15 +28,6 @@ type Message = { role: 'system' | 'user' | 'assistant'; content: string }
  * so the figure only has to be high enough to be out of the way.
  */
 const MAX_HOSTED_TOKENS = 16_384
-
-interface Delta {
-  choices?: {
-    /** `reasoning` is where OpenRouter puts a thinking model's thought, beside the answer rather
-     *  than in it — see `foldReasoning`. */
-    delta?: { content?: string; reasoning?: string }
-    finish_reason?: string | null
-  }[]
-}
 
 /** OpenRouter's own error body shape, read for a message worth showing rather than a bare status
  *  code — the reader typed a key or picked a model, and the failure is usually about one of those. */
@@ -66,137 +49,34 @@ export const openrouter: Provider = {
     return getOpenRouterKey() !== null ? 'available' : 'needs-key'
   },
 
-  async load({
-    model,
-    thinking: reasons,
-    sampling,
-    thinkingSampling,
-  }: LoadOptions): Promise<ModelEngine> {
+  async load({ model, thinking, sampling, thinkingSampling }: LoadOptions): Promise<ModelEngine> {
     if (!model) throw new Error('OpenRouter needs a model id.')
     // `useModel.engine()`/`engineFor()` already refuse to reach this without a key — see
     // `useModel.ts` — but a key cleared between that check and this call (or a caller that skips
-    // it) should still fail plainly rather than send an unauthenticated request.
+    // it) should still fail plainly rather than send an unauthenticated request. Captured once and
+    // closed over by every session this engine opens.
     const key = getOpenRouterKey()
     if (!key) throw new Error('OpenRouter needs an API key — add one in the chat settings.')
 
-    return {
-      // Completions are stateless here too: a conversation is nothing but its own turns.
-      async chat(system, code) {
-        const messages: Message[] = [
-          { role: 'system', content: system },
-          ...(code
-            ? ([
-                { role: 'user', content: code },
-                { role: 'assistant', content: CODE_ACK },
-              ] as Message[])
-            : []),
-        ]
-
-        return {
-          promptStreaming(input, options) {
-            messages.push({ role: 'user', content: input })
-            let answer = ''
-            // Per question, the same as WebLLM: a card that names a thinking row names another
-            // for answering plainly. No shipped OpenRouter entry carries either yet.
-            const row =
-              (options?.thinking === true ? thinkingSampling : undefined) ?? sampling ?? {}
-
-            return new ReadableStream<string>({
-              async start(controller) {
-                const controllerAbort = new AbortController()
-                const onAbort = () => controllerAbort.abort()
-                options?.signal?.addEventListener('abort', onAbort, { once: true })
-
-                try {
-                  const response = await fetch(ENDPOINT, {
-                    method: 'POST',
-                    headers: {
-                      Authorization: `Bearer ${key}`,
-                      'Content-Type': 'application/json',
-                      'HTTP-Referer': location.origin,
-                      'X-Title': 'codeview',
-                    },
-                    body: JSON.stringify({
-                      model,
-                      messages,
-                      stream: true,
-                      max_tokens: MAX_HOSTED_TOKENS,
-                      ...(row.temperature !== undefined ? { temperature: row.temperature } : {}),
-                      ...(row.topP !== undefined ? { top_p: row.topP } : {}),
-                      ...(row.presencePenalty !== undefined
-                        ? { presence_penalty: row.presencePenalty }
-                        : {}),
-                      // Only a model with a thinking mode is asked about it, the same rule the
-                      // on-device providers apply.
-                      ...(reasons ? { reasoning: { enabled: options?.thinking === true } } : {}),
-                    }),
-                    signal: controllerAbort.signal,
-                  })
-
-                  if (!response.ok || !response.body) {
-                    throw new Error(await errorMessage(response))
-                  }
-
-                  const reader = response.body.getReader()
-                  const decoder = new TextDecoder()
-                  let buffer = ''
-                  let truncated = false
-                  // Folded whether or not the model was asked to think: a custom slug that
-                  // reasons by default still streams its thought here, and it must not vanish.
-                  const fold = foldReasoning()
-                  const emit = (text: string) => {
-                    if (!text) return
-                    answer += text
-                    controller.enqueue(text)
-                  }
-
-                  for (;;) {
-                    const { done, value } = await reader.read()
-                    if (done) break
-                    buffer += decoder.decode(value, { stream: true })
-                    const events = buffer.split('\n\n')
-                    buffer = events.pop() ?? ''
-                    for (const event of events) {
-                      const line = event.trim()
-                      if (!line.startsWith('data:')) continue
-                      const data = line.slice('data:'.length).trim()
-                      if (data === '[DONE]') continue
-                      const parsed = JSON.parse(data) as Delta
-                      const choice = parsed.choices?.[0]
-                      if (choice?.finish_reason === 'length') truncated = true
-                      emit(fold.delta(choice?.delta?.reasoning, choice?.delta?.content))
-                    }
-                  }
-                  emit(fold.end())
-
-                  messages.push({ role: 'assistant', content: withoutThoughts(answer) })
-                  if (options?.signal?.aborted) {
-                    controller.error(new DOMException('Aborted', 'AbortError'))
-                  } else {
-                    if (truncated) options?.onTruncated?.()
-                    controller.close()
-                  }
-                } catch (caught) {
-                  messages.push({ role: 'assistant', content: withoutThoughts(answer) })
-                  if (options?.signal?.aborted) {
-                    controller.error(new DOMException('Aborted', 'AbortError'))
-                  } else {
-                    controller.error(caught)
-                  }
-                } finally {
-                  options?.signal?.removeEventListener('abort', onAbort)
-                }
-              },
-            })
-          },
-
-          // Nothing local was ever allocated for this conversation.
-          destroy() {},
-        }
+    return openAiEngine(
+      {
+        endpoint: ENDPOINT,
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'HTTP-Referer': location.origin,
+          'X-Title': 'codeview',
+        },
+        maxTokens: MAX_HOSTED_TOKENS,
+        // Not uniformly accepted across the models OpenRouter fronts, so no shipped entry carries
+        // one and none is sent — `tests/chat.test.ts` holds that end of it.
+        repetitionPenalty: false,
+        // Only a model with a thinking mode is asked about it, the same rule the on-device
+        // providers apply.
+        reasoningFields: (reasons, asked) => (reasons ? { reasoning: { enabled: asked } } : {}),
+        errorMessage,
+        networkMessage: () => 'OpenRouter could not be reached — check this machine’s connection.',
       },
-
-      // No weights, no worker — nothing here to unload.
-      destroy() {},
-    }
+      { model, thinking, sampling, thinkingSampling },
+    )
   },
 }

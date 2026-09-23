@@ -326,7 +326,8 @@ export function useBuffer() {
           agents,
         })
     const url = `${location.origin}${location.pathname}${fragment}`
-    history.replaceState(null, '', fragment)
+    // Copying is the whole of what this does — it must never touch the reader's own address bar,
+    // which is a live view of *their* buffer, not the one they're handing someone else.
     try {
       await navigator.clipboard.writeText(url)
       notice.value = single
@@ -334,7 +335,8 @@ export function useBuffer() {
         : `Share link copied — all ${files.value.length} files.`
       return true
     } catch {
-      notice.value = 'Share link is in the address bar — copy it from there.'
+      // No address bar to point at any more, so the fallback carries the link itself.
+      notice.value = `Clipboard blocked — copy this link: ${url}`
       return false
     }
   }

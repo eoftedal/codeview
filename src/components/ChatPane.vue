@@ -4,6 +4,8 @@ import MarkdownText from './MarkdownText.vue'
 import { DEFAULT_ROLE, describeStatus, type ModelChoice, type ModelStatus } from '../lib/chat'
 import { HUNTERS, HUNTER_NAMES } from '../lib/hunters'
 import type { CustomOpenRouterModel } from '../lib/providers/openrouterModels'
+import { EXAMPLE_LOCAL_URL } from '../lib/providers/localServerUrl'
+import type { LocalServerModel } from '../lib/providers/localServerModels'
 import type { ChatMessage } from '../composables/useChat'
 
 const props = defineProps<{
@@ -20,6 +22,12 @@ const props = defineProps<{
   openrouterKey: string
   /** OpenRouter models the reader has added themselves, beyond the shipped three. */
   openrouterModels: CustomOpenRouterModel[]
+  /** The address of the reader's own model server, or '' if none is set. This is what the local
+   *  provider offers models at all for: with no address there are no local entries to pick. */
+  localServerUrl: string
+  /** Models named on that server by hand — an override for what it reported, or the whole list
+   *  for a server with no `/models` route. */
+  localServerModels: LocalServerModel[]
   status: ModelStatus
   progress: number
   messages: ChatMessage[]
@@ -37,6 +45,8 @@ const emit = defineEmits<{
   'update:role': [string]
   'update:openrouterKey': [string]
   'update:openrouterModels': [CustomOpenRouterModel[]]
+  'update:localServerUrl': [string]
+  'update:localServerModels': [LocalServerModel[]]
   ask: [string]
   stop: []
   newChat: []
@@ -59,6 +69,8 @@ const editingPrompt = ref(false)
 const promptDraft = ref(props.role)
 const keyDraft = ref(props.openrouterKey)
 const modelsDraft = ref<CustomOpenRouterModel[]>(props.openrouterModels)
+const localUrlDraft = ref(props.localServerUrl)
+const localModelsDraft = ref<LocalServerModel[]>(props.localServerModels)
 
 // Starting points for the brief, keyed by the name the picker shows. The shipped one is here
 // beside the hunters, so the picker answers "what else could this say" on its own rather than
@@ -111,25 +123,83 @@ function removeModel(model: string): void {
   modelsDraft.value = modelsDraft.value.filter((entry) => entry.model !== model)
 }
 
+// The same guard for the local list, against the draft and the live picker both. A name already
+// *discovered* is deliberately not taken: naming it by hand is how a reader says something the
+// server's own listing cannot — that it thinks, or that its context is smaller than the default
+// budget assumes — so that is an override rather than a duplicate.
+const newLocalModel = ref('')
+const newLocalLabel = ref('')
+const newLocalThinking = ref(false)
+const newLocalTaken = computed(() => {
+  const name = newLocalModel.value.trim()
+  if (!name) return false
+  return localModelsDraft.value.some((entry) => entry.model === name)
+})
+
+function addLocalModel(): void {
+  const model = newLocalModel.value.trim()
+  if (!model || newLocalTaken.value) return
+  const label = newLocalLabel.value.trim()
+  localModelsDraft.value = [
+    ...localModelsDraft.value,
+    { model, label: label || model, thinking: newLocalThinking.value },
+  ]
+  newLocalModel.value = ''
+  newLocalLabel.value = ''
+  newLocalThinking.value = false
+}
+
+function removeLocalModel(model: string): void {
+  localModelsDraft.value = localModelsDraft.value.filter((entry) => entry.model !== model)
+}
+
+/** This page's own origin, so the CORS hint names the value the reader actually has to allow
+ *  rather than leaving them to work it out — it differs between the dev server and the deployed
+ *  site, which is exactly when this goes wrong. */
+const origin = computed(() => location.origin)
+
+/** What the server reported, as opposed to what the reader named: the picker's local entries less
+ *  the hand-added ones. Shown as a count, since the names are already in the picker above. */
+const discoveredCount = computed(
+  () =>
+    props.models.filter(
+      (entry) =>
+        entry.provider === 'localserver' &&
+        !props.localServerModels.some((named) => named.model === entry.model),
+    ).length,
+)
+
 const settingsChanged = computed(
   () =>
     promptDraft.value !== props.role ||
     keyDraft.value !== props.openrouterKey ||
-    JSON.stringify(modelsDraft.value) !== JSON.stringify(props.openrouterModels),
+    JSON.stringify(modelsDraft.value) !== JSON.stringify(props.openrouterModels) ||
+    localUrlDraft.value !== props.localServerUrl ||
+    JSON.stringify(localModelsDraft.value) !== JSON.stringify(props.localServerModels),
 )
 
 /** Whether the toolbar's dot and gold tint are earned: any setting away from what shipped. */
 const settingsCustomized = computed(
-  () => !props.roleIsDefault || props.openrouterKey !== '' || props.openrouterModels.length > 0,
+  () =>
+    !props.roleIsDefault ||
+    props.openrouterKey !== '' ||
+    props.openrouterModels.length > 0 ||
+    props.localServerUrl !== '' ||
+    props.localServerModels.length > 0,
 )
 
 function editPrompt(): void {
   promptDraft.value = props.role
   keyDraft.value = props.openrouterKey
   modelsDraft.value = props.openrouterModels
+  localUrlDraft.value = props.localServerUrl
+  localModelsDraft.value = props.localServerModels
   newModelSlug.value = ''
   newModelLabel.value = ''
   newModelThinking.value = false
+  newLocalModel.value = ''
+  newLocalLabel.value = ''
+  newLocalThinking.value = false
   editingPrompt.value = true
 }
 
@@ -138,6 +208,8 @@ function savePrompt(): void {
   emit('update:role', promptDraft.value.trim() ? promptDraft.value : DEFAULT_ROLE)
   emit('update:openrouterKey', keyDraft.value)
   emit('update:openrouterModels', modelsDraft.value)
+  emit('update:localServerUrl', localUrlDraft.value)
+  emit('update:localServerModels', localModelsDraft.value)
   editingPrompt.value = false
 }
 
@@ -335,6 +407,73 @@ watch(
         </div>
         <p v-if="newModelTaken" class="hint warn">Already on the list.</p>
 
+        <label class="key-label" for="local-server-url">Local model server</label>
+        <p class="hint">
+          Ollama, LM Studio, llama.cpp or vLLM running on this machine — anything serving the OpenAI
+          API. Nothing is requested until an address is set, and the code never leaves the machine.
+          The server has to allow this page's origin: Ollama needs
+          <code>OLLAMA_ORIGINS={{ origin }}</code> for anything but a loopback page, and LM Studio
+          has a CORS switch. Answers cut short usually mean the server's own context is small —
+          Ollama's <code>num_ctx</code> defaults to 4096 whatever the model supports.
+        </p>
+        <div class="key-row">
+          <input
+            id="local-server-url"
+            v-model="localUrlDraft"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            :placeholder="EXAMPLE_LOCAL_URL"
+            class="key-input"
+          />
+          <button :disabled="!localUrlDraft" @click="localUrlDraft = ''">Clear</button>
+        </div>
+        <p v-if="localServerUrl && discoveredCount > 0" class="hint">
+          {{ discoveredCount }} model{{ discoveredCount === 1 ? '' : 's' }} found on the server.
+        </p>
+        <p v-else-if="localServerUrl" class="hint warn">
+          No models found there yet — the address may be wrong, the server down, or it may not list
+          them. Name one below to use it anyway.
+        </p>
+
+        <ul v-if="localModelsDraft.length > 0" class="models-list local">
+          <li v-for="entry in localModelsDraft" :key="entry.model" class="models-row">
+            <span class="models-label" :title="entry.model">{{ entry.label }}</span>
+            <span v-if="entry.thinking" class="models-thinking" title="Has a thinking mode">
+              thinks
+            </span>
+            <button class="models-remove" @click="removeLocalModel(entry.model)">Remove</button>
+          </li>
+        </ul>
+        <div class="models-add local">
+          <input
+            v-model="newLocalModel"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="model name on the server"
+            class="models-input"
+            @keydown.enter.prevent="addLocalModel"
+          />
+          <input
+            v-model="newLocalLabel"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Label (optional)"
+            class="models-input"
+            @keydown.enter.prevent="addLocalModel"
+          />
+          <label class="models-think" title="Offers the thinking checkbox and asks it to reason">
+            <input v-model="newLocalThinking" type="checkbox" />
+            thinks
+          </label>
+          <button :disabled="!newLocalModel.trim() || newLocalTaken" @click="addLocalModel">
+            Add
+          </button>
+        </div>
+        <p v-if="newLocalTaken" class="hint warn">Already on the list.</p>
+
         <div class="prompt-actions">
           <button class="save" :disabled="!settingsChanged" @click="savePrompt">Save</button>
           <button @click="editingPrompt = false">Cancel</button>
@@ -385,6 +524,10 @@ watch(
 
       <footer v-if="choice?.provider === 'openrouter'">
         Hosted by OpenRouter for this model — the code goes to their API, not only this machine.
+      </footer>
+      <footer v-else-if="choice?.provider === 'localserver'">
+        Runs on your own model server — nothing downloads here, and the code goes no further than
+        this machine.
       </footer>
       <footer v-else>Runs on this machine — weights come down, the code never goes up.</footer>
     </template>

@@ -134,7 +134,10 @@ export interface Provider {
   load(options: LoadOptions): Promise<ModelEngine>
 }
 
-export type ProviderId = 'builtin' | 'webllm' | 'transformers' | 'openrouter'
+/** Four of the five run the model on the reader's own machine; `openrouter` is the one that does
+ *  not. `localserver` is emphatically on the first side of that line — a server the reader started,
+ *  reached over loopback — and shares only an API shape with the hosted one. */
+export type ProviderId = 'builtin' | 'webllm' | 'transformers' | 'openrouter' | 'localserver'
 
 /** The ONNX builds worth offering: 4-bit weights, with fp16 or fp32 compute. */
 export type Quantisation = 'q4f16' | 'q4'
@@ -496,7 +499,11 @@ export function describeStatus(
     case 'unavailable':
       return 'this model will not load here'
     case 'needs-key':
-      return 'add an OpenRouter API key in the chat settings to use this'
+      // Two providers are missing a setting rather than a capability, and they are missing
+      // different ones — naming the wrong one is worse than saying nothing.
+      return choice?.provider === 'localserver'
+        ? 'add your model server’s address in the chat settings to use this'
+        : 'add an OpenRouter API key in the chat settings to use this'
     case 'downloadable':
       return size && size !== 'no download'
         ? `${size} downloads on the first question, then it is cached`
@@ -508,9 +515,11 @@ export function describeStatus(
       // one place that distinction has to be stated plainly, or "running on this machine" would be
       // a false claim for the one provider it doesn't hold for.
       if (busy) return busyLabel
-      return choice?.provider === 'openrouter'
-        ? 'ready — questions are sent to OpenRouter'
-        : 'ready — running on this machine'
+      if (choice?.provider === 'openrouter') return 'ready — questions are sent to OpenRouter'
+      // Still this machine, but a server beside the browser rather than the tab itself — and the
+      // reader chose an address, so saying which side of that line it is on is worth a word.
+      if (choice?.provider === 'localserver') return 'ready — running on your own server'
+      return 'ready — running on this machine'
   }
 }
 

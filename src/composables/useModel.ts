@@ -1,6 +1,7 @@
 import { computed, onScopeDispose, ref, watch, type Ref } from 'vue'
 import type { ModelChoice, ModelEngine, ModelStatus } from '../lib/chat'
 import { findModel, providerFor, usableModels } from '../lib/providers'
+import { getLocalServerUrl } from '../lib/providers/localServerUrl'
 import { getOpenRouterKey } from '../lib/providers/openrouterKey'
 import { hasGpuAdapter } from '../lib/providers/webgpu'
 
@@ -105,7 +106,12 @@ export function useModel(): ModelHost {
     const all = usableModels()
     models.value =
       gpuAvailable === false
-        ? all.filter((entry) => entry.provider === 'builtin' || entry.provider === 'openrouter')
+        ? all.filter(
+            (entry) =>
+              entry.provider === 'builtin' ||
+              entry.provider === 'openrouter' ||
+              entry.provider === 'localserver',
+          )
         : all
   }
 
@@ -122,8 +128,8 @@ export function useModel(): ModelHost {
     void (async () => {
       gpuAvailable = await hasGpuAdapter()
       if (!gpuAvailable) {
-        // OpenRouter needs no GPU either, so losing the adapter should not hide it alongside the
-        // on-device models that do.
+        // Neither OpenRouter nor a local server needs a GPU, so losing the adapter should not hide
+        // either alongside the on-device models that do.
         recomputeModels()
         if (models.value.length === 0) {
           status.value = 'unavailable'
@@ -148,6 +154,11 @@ export function useModel(): ModelHost {
       }
       try {
         status.value = await providerFor(selected.provider).availability()
+        // A local server's `availability()` is also its discovery call, and the picker is built
+        // from what that call caches — synchronously, since `allModels()` cannot await. So the
+        // list is rebuilt here, or a model the reader pulled since the cache was last written
+        // would not appear until they touched the address field or reloaded the page.
+        if (selected.provider === 'localserver') recomputeModels()
       } catch {
         status.value = 'unavailable'
       }
@@ -156,15 +167,21 @@ export function useModel(): ModelHost {
 
   /** Weights onto the GPU, with the download — whichever model's — shown on the one status line.
    *
-   *  OpenRouter is refused here rather than let through to fail inside a `fetch`: a stop-and-say
-   *  loudly about a missing key is the point, not a generic "cannot run in this browser" (this
-   *  model *can* run here; the browser is not what is missing) or a raw HTTP error from the
-   *  provider itself. Both `engine()` (the chat pane) and `engineFor()` (an agent's own model) go
-   *  through this one place, so the complaint reaches either caller the same way. */
+   *  The two providers missing a *setting* are refused here rather than let through to fail inside
+   *  a `fetch`: a stop-and-say loudly about what is missing is the point, not a generic "cannot run
+   *  in this browser" (either model *can* run here; the browser is not what is missing) or a raw
+   *  HTTP error from the provider itself. Both `engine()` (the chat pane) and `engineFor()` (an
+   *  agent's own model) go through this one place, so the complaint reaches either caller the same
+   *  way. */
   async function load(selected: ModelChoice): Promise<ModelEngine> {
     if (selected.provider === 'openrouter' && getOpenRouterKey() === null) {
       throw new Error(
         `${selected.label} needs an OpenRouter API key — add one in the chat settings.`,
+      )
+    }
+    if (selected.provider === 'localserver' && getLocalServerUrl() === null) {
+      throw new Error(
+        `${selected.label} needs a local model server address — add one in the chat settings.`,
       )
     }
     return providerFor(selected.provider).load({

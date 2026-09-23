@@ -15,7 +15,7 @@
  * new key in a link, and a hunter edited afterwards is simply a prompt of the reader's own.
  *
  * `FOCUS` holds the half that differs; the opening and closing are shared, so a change to how a
- * finding is reported is one edit rather than fifteen.
+ * finding is reported is one edit rather than sixteen.
  */
 
 /** What a hunter is told it is, before it is told what to look for. */
@@ -109,6 +109,18 @@ Then look at the *target*: a finding needs a field worth setting — \`role\`, \
 What removes it: an explicit allowlist of keys — a pick, a permit list, a DTO or an input type holding only the writable fields — or a check that the privileged fields are unchanged.
 
 Traps: validating *values* (types, lengths, formats) does not restrict *which* keys are written; a blocklist misses the next field somebody adds to the model; a nested object carries the same problem one level down; and the same handler reached by an admin path may legitimately write more, so say which caller you mean.`,
+
+  'Missing or broken input validation': `A finding is untrusted data used where a shape, a range or a membership was assumed but never established — or a check that never runs, or misses the value used. Where it then ends up in a query, a command or a path, that injection is another hunt; this one is the check.
+
+Validation that never runs looks validated, so read the call, not the declaration: an \`express-validator\` chain with no \`validationResult(req)\`; constraints on a DTO with no \`@Valid\` on the parameter; \`safeParse\`, \`Joi.validate\` or \`is_valid()\` whose \`success\`/\`error\` nobody inspects; an async validator never awaited.
+
+Then read each check against the use: one field checked and its siblings not; \`min\` without \`max\`; \`if (body.role)\`, which an absent field skips; \`optional\`, \`partial\` or \`passthrough\` where later code requires; validation on create but not on update; a truthiness test where \`0\` or \`''\` is legal.
+
+Regexes fail quietly, so try a payload against each: \`/^api.example.com$/\` passes \`apiXexample.com\`, an unescaped \`.\` being any character; \`/\\d+/\` unanchored matches \`abc123\`; \`/^a|b$/\` groups as \`^a\` or \`b$\`, each anchored at one end only; \`$\` admits a trailing newline in Python and matches every line in Ruby, where \`\\A\` and \`\\z\` do not; a \`/g\` regex reused with \`.test()\` alternates on \`lastIndex\`.
+
+What removes it: one schema at the boundary whose *output* the rest of the code uses, unknown keys rejected and the failure returned, not logged; an allowlist for anything enumerated; a bound on every body, array and upload.
+
+Traps: a check on one route and not its siblings — a queue consumer, a batch import — so name the way in that has none; \`parseInt('12abc')\` and \`Number('')\`, which fail by succeeding; decoding or normalising *after* the check; a scalar expected where \`?id=1&id=2\` arrives as an array. Say what the value then does — a crash, a negative amount, the wrong row — since a missing check in front of code that does not care is not a finding.`,
 
   'Prototype pollution': `A finding is attacker-controlled *keys* reaching an assignment that can write \`__proto__\`, \`constructor\` or \`prototype\`, so a property lands on an object everything else inherits from.
 
