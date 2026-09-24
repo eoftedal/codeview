@@ -119,8 +119,77 @@ def main():
     return [greet(greeting, address), connection.describe(), first, config["retries"]]
 `
 
+/**
+ * The Java seed. Same obligation as the others — every rule the binder implements shows up
+ * somewhere — and the comments name the cases a reader arriving from Python or TypeScript gets
+ * wrong: a block *is* a scope, a field is read without any `this.`, and overloads are separated by
+ * how many arguments a call passes.
+ */
+export const JAVA_SAMPLE = `// Move the cursor, or click a node in the tree on the right.
+// The editor underlines where the thing under your cursor was defined.
+
+// An imported name resolves to its import statement; 'defined in' says
+// which tab holds the real declaration.
+import com.example.Format;
+
+class Connection {
+    // A field is read from a method by bare name, with no 'this.' —
+    // the lookup walks through the class rather than skipping it.
+    private final String scheme = "tcp";
+    private String host;
+
+    Connection(String host) {
+        this.host = host;
+    }
+
+    // Two methods, one name: the overload is picked by how many
+    // arguments the call passes, which is all a reader without types has.
+    String describe() {
+        return describe(0);
+    }
+
+    String describe(int port) {
+        // 'host' here is the field; 'port' is the parameter above it.
+        return scheme + "://" + host + ":" + port;
+    }
+}
+
+class Main {
+    static String greet(String greeting, String target) {
+        // 'greeting' resolves to this parameter, not to any field:
+        // a name that enters scope as a parameter is defined by it.
+        return greeting + ", " + target;
+    }
+
+    static void main(String[] args) {
+        Connection connection = new Connection("example.com");
+
+        // A block IS a scope in Java, unlike Python: 'inner' does not
+        // escape the braces it is declared in.
+        if (args.length > 0) {
+            String inner = args[0];
+            System.out.println(inner);
+        }
+
+        for (String each : args) {          // 'each' is defined by the for
+            System.out.println(each);
+        }
+
+        try (var reader = Format.open()) {  // 'reader' is defined by the try
+            System.out.println(reader);
+        } catch (Exception error) {         // 'error' is defined by the catch
+            System.out.println(error);
+        }
+
+        System.out.println(greet("hello", connection.describe()));
+    }
+}
+`
+
 /** The seed for a language. Only a link asking for Python gets the Python one — the default buffer
  *  is still the TypeScript sample every embed and every test is written against. */
 export function sampleFor(language: Language): string {
-  return language === 'py' ? PYTHON_SAMPLE : SAMPLE
+  if (language === 'py') return PYTHON_SAMPLE
+  if (language === 'java') return JAVA_SAMPLE
+  return SAMPLE
 }

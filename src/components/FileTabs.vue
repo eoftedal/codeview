@@ -22,6 +22,7 @@ const BADGE: Record<Language, string> = {
   js: 'JS',
   jsx: 'JSX',
   py: 'PY',
+  java: 'JAVA',
 }
 
 /** There is always a buffer, so the last tab has no close button rather than an empty editor. */
@@ -216,6 +217,9 @@ onBeforeUnmount(() => {
 
 .lang-py {
   color: var(--violet);
+}
+.lang-java {
+  color: var(--flow);
 }
 
 .lang-js,

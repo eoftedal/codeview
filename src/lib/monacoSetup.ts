@@ -19,6 +19,7 @@ const MONACO_LANGUAGE: Record<Language, string> = {
   // Monaco ships this Monarch grammar already, and `getWorker` below hands any non-TS label the
   // plain editor worker — so highlighting Python costs nothing and needs no worker of its own.
   py: 'python',
+  java: 'java',
 }
 
 export function monacoLanguageId(language: Language): string {

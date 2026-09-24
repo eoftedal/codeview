@@ -2,7 +2,7 @@
 
 **Live demo:** https://eoftedal.github.io/codeview/
 
-Explore a TypeScript, JavaScript or Python file as a syntax tree. Monaco on the left, the AST on
+Explore a TypeScript, JavaScript, Python or Java file as a syntax tree. Monaco on the left, the AST on
 the right, kept in sync both ways: move the cursor and the tree follows, click a node and
 the editor follows.
 
@@ -76,7 +76,7 @@ key. Key names are case-insensitive, since these get typed by hand.
 | Parameter      | Effect                                                                                                             |
 | -------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `src`          | the buffer — `z.`/`r.` payload, or literal source                                                                  |
-| `lang`         | `ts`, `tsx`, `js`, `jsx` or `py`                                                                                   |
+| `lang`         | `ts`, `tsx`, `js`, `jsx`, `py` or `java`                                                                           |
 | `filename`     | names the tab; its extension picks the language when `lang` is absent. **Copy link** carries it along              |
 | `hideHeader`   | hides the title bar, language switcher and buttons, for embedding                                                  |
 | `systemprompt` | the chat's brief — `z.`/`r.` payload, or literal text. **Copy link** carries it only when you have rewritten it    |
@@ -213,6 +213,44 @@ What Python support does **not** do:
   out of reach.
 - Decorators do not rewrite meaning: a name decorated with `@property` still resolves as the
   function it is written as.
+
+### Java
+
+Java is parsed by tree-sitter too, with a binder of its own — and three of its rules are the
+opposite of Python's, which is worth stating because the panes look identical:
+
+- **A block is a scope.** A name declared inside `{ … }` does not escape it, where Python's `if`
+  body leaks into the enclosing function.
+- **A class body is visible from its methods.** A method reads a field by bare name; Python needs
+  `self`, and this tool resolves each the way its own language does.
+- **Declaration precedes use** for locals, so there is no "assignment anywhere makes it local" rule
+  to approximate.
+
+**Overloads are separated by arity** — how many arguments the call passes. That is all a reader
+without types has, and it is usually enough, since overloads differ in arity far more often than
+they differ only in parameter type. Where arity cannot separate them the first declaration wins;
+that is a real limit, not a resolution.
+
+**A receiver's type is written down, which Java gives and Python does not.** `Db db = new Db();`
+says what `db` is on the line, so `db.load()` follows into `Db.load` — the member resolution Python
+has to decline. It works for a local, a field or a parameter whose type names a type in an open tab;
+a receiver whose type is not written down locally (a chained call, a field of a type from outside)
+leaves its members unresolvable, and the answer degrades to where the receiver came from.
+
+**A type in the same package needs no import**, and that is the shape most pasted pairs of files
+take — so an unresolved type name also looks for a tab declaring a top-level type of that name.
+Where the declaration is in another tab it has no range on screen, so the highlight lands on
+whatever named it here: the import, the `extends` clause, the receiver's own declaration, or the
+identifier itself.
+
+The **backward trace works the same way**, with one Java-specific cost: `x = …` declares nothing in
+Java, so reassignments come from a scan that resolves each assignment back to the same declaration,
+where Python's binder hands them over for free. Constructing an object is treated as a call to the
+constructor, so a field set in one reaches the `new` that supplied it.
+
+What Java support does **not** do: resolve a member on a receiver whose type is not written down;
+separate overloads that share an arity; follow a supertype, an import or a static member outside the
+open tabs; or know anything about generics, annotations that generate code, or reflection.
 
 ## Tracing a value back to its sources
 

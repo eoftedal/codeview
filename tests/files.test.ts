@@ -24,6 +24,7 @@ describe('languageForFile', () => {
     expect(languageForFile('worker.cjs')).toBe('js')
     expect(languageForFile('routes.py')).toBe('py')
     expect(languageForFile('stubs/db.PYI')).toBe('py')
+    expect(languageForFile('com/example/Db.java')).toBe('java')
   })
 
   it('knows nothing about extensions it does not own', () => {

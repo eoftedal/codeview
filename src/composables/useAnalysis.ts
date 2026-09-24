@@ -5,6 +5,7 @@ import type { AnalysisBackend, BackendFile } from '../lib/backend'
 import type { DefinitionResult } from '../lib/definitions'
 import type { CodeFile } from '../lib/files'
 import type { FlowTrace } from '../lib/flow'
+import { createJavaBackend } from '../lib/java/backend'
 import { createPythonBackend } from '../lib/python/backend'
 import { createTsBackend } from '../lib/tsBackend'
 
@@ -37,10 +38,12 @@ export interface Analysis {
 }
 
 /** Which backend answers for a language. The TypeScript family shares one `ts.Program`. */
-type Family = 'ts' | 'py'
+type Family = 'ts' | 'py' | 'java'
 
 function familyOf(language: Language): Family {
-  return language === 'py' ? 'py' : 'ts'
+  if (language === 'py') return 'py'
+  if (language === 'java') return 'java'
+  return 'ts'
 }
 
 /**
@@ -77,7 +80,9 @@ export function useAnalysis(
     const created =
       family === 'py'
         ? createPythonBackend()
-        : createTsBackend((name) => languages.get(name) ?? 'ts')
+        : family === 'java'
+          ? createJavaBackend()
+          : createTsBackend((name) => languages.get(name) ?? 'ts')
     backends.set(family, created)
     return created
   }

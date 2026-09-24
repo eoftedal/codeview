@@ -252,6 +252,7 @@ const languages = [
   { id: 'js', label: 'JS' },
   { id: 'jsx', label: 'JSX' },
   { id: 'py', label: 'PY' },
+  { id: 'java', label: 'JAVA' },
 ] as const
 
 /** The link carries the chat's brief and the agents' team when the reader wrote either — the
@@ -299,7 +300,7 @@ function onFilePicked(event: Event): void {
           class="hidden-input"
           type="file"
           multiple
-          accept=".ts,.tsx,.js,.jsx,.mjs,.cjs,.mts,.cts,.py,.pyi"
+          accept=".ts,.tsx,.js,.jsx,.mjs,.cjs,.mts,.cts,.py,.pyi,.java"
           @change="onFilePicked"
         />
       </div>

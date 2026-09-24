@@ -60,6 +60,7 @@ describe('production bundle', () => {
     expect(assets.some((name) => /^tree-sitter-[^.]+\.js$/.test(name))).toBe(true)
     expect(assets.some((name) => /^tree-sitter-[^.]+\.wasm$/.test(name))).toBe(true)
     expect(assets.some((name) => /^tree-sitter-python-[^.]+\.wasm$/.test(name))).toBe(true)
+    expect(assets.some((name) => /^tree-sitter-java-[^.]+\.wasm$/.test(name))).toBe(true)
   })
 
   it('loads with no console or page errors', () => {

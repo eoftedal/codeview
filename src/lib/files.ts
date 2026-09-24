@@ -16,6 +16,7 @@ const EXTENSIONS: Record<string, Language> = {
   jsx: 'jsx',
   py: 'py',
   pyi: 'py',
+  java: 'java',
 }
 
 /** What a language calls itself when we are the ones writing the name. */
@@ -25,6 +26,7 @@ const CANONICAL: Record<Language, string> = {
   js: 'js',
   jsx: 'jsx',
   py: 'py',
+  java: 'java',
 }
 
 export interface CodeFile {
@@ -35,7 +37,7 @@ export interface CodeFile {
   language: Language
 }
 
-export const LANGUAGES: readonly Language[] = ['ts', 'tsx', 'js', 'jsx', 'py']
+export const LANGUAGES: readonly Language[] = ['ts', 'tsx', 'js', 'jsx', 'py', 'java']
 
 export function isLanguage(value: string): value is Language {
   return (LANGUAGES as readonly string[]).includes(value)

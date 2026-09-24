@@ -392,6 +392,72 @@ describe('python', () => {
   })
 })
 
+describe('java', () => {
+  async function openJava(hash: string) {
+    const fresh = await browser.newPage()
+    await fresh.setViewport({ width: 1400, height: 1000 })
+    await fresh.goto(`${URL}${hash}`, { waitUntil: 'networkidle0' })
+    await fresh.waitForFunction(
+      () => document.querySelector('.row .kind')?.textContent?.trim() === 'program',
+      { timeout: 20_000 },
+    )
+    return fresh
+  }
+
+  it('shows a tree-sitter tree, says JAVA on the tab, and resolves a field', async () => {
+    const source =
+      'class A {\n    private String host = "h";\n    String get() { return host; }\n}\n'
+    const fresh = await openJava(`#src=${encodeURIComponent(source)}&lang=java&filename=A.java`)
+
+    const kinds = await fresh.$$eval('.row .kind', (nodes) =>
+      nodes.map((node) => node.textContent?.trim() ?? ''),
+    )
+    expect(kinds[0]).toBe('program')
+    expect(kinds).toContain('class_declaration')
+    expect(await fresh.$eval('.tab .badge', (el) => el.textContent?.trim())).toBe('JAVA')
+
+    // A field read by bare name — the lookup walks through the class, unlike Python's.
+    await clickAt('return host', 8, 0, fresh)
+    expect(
+      await fresh.$eval('.definition', (el) => el.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
+    ).toContain('property `host`')
+    await fresh.close()
+  })
+
+  it('traces a value back across the tab that declares it', async () => {
+    const bundle = [
+      '--8<-- Main.java',
+      'class Main {',
+      '    void run() {',
+      '        Db db = new Db();',
+      '        String row = db.load();',
+      '        use(row);',
+      '    }',
+      '}',
+      '--8<-- Db.java',
+      'class Db {',
+      '    String load() { return "seed"; }',
+      '}',
+    ].join('\n')
+    const fresh = await openJava(`#files=${encodeURIComponent(bundle)}&active=Main.java`)
+
+    await clickAt('use(row)', 5, 0, fresh)
+    const tabs = await fresh.$$('.tabs button')
+    await tabs[1]!.click()
+    await fresh.waitForSelector('.trace-pane')
+    await fresh.click('.trace-pane .run')
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    const rows = await fresh.$$eval('.trace-pane .row', (nodes) =>
+      nodes.map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
+    )
+    // The chain crosses into Db.java through the receiver's written-down type.
+    expect(rows.join(' | ')).toContain('db.load()')
+    expect(rows.some((row) => row.includes('"seed"'))).toBe(true)
+    await fresh.close()
+  })
+})
+
 describe('share links', () => {
   /** A fresh page so the suite's own editor state is left alone. */
   async function loadInNewPage(hash: string) {

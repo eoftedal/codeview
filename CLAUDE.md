@@ -134,6 +134,37 @@ receiver counts. `TracePane`'s "no backward trace" branch is now unreachable, si
 language has one — **leave it**: it is what a language added without a trace shows instead of an
 empty pane, and `AnalysisBackend.trace` stays optional for the same reason.
 
+**Java is the third tree-sitter language, and its binder is the opposite of Python's in three
+places.** A **block is a scope**; a **class body is visible from its methods**, so `lookup` walks
+_through_ a type scope rather than skipping it; and declaration precedes use, so there is no
+"assignment anywhere makes it local" rule. What Java adds instead is **overloading**, which a binder
+without types cannot settle — `lookupCall` narrows by arity, which is syntactic and usually
+decisive, and where it is not the first declaration wins and the README says so.
+
+**Java's saving grace is that a receiver's type is written down.** `Db db = new Db();` names the
+type on the line, so `declaredTypeName` makes `db.load()` resolve into another tab — the member
+resolution Python has to decline. The cost is a longer list of ways a declaration can be _elsewhere_,
+and `MemberHit.anchor` is what handles it: a span is an offset into its own file, so presenting one
+against the active file's text is how a highlight lands on nonsense (`"ds Base { String m() {"` was
+the actual output before this existed). Every hit therefore carries the file it was found in, and a
+hit from another tab needs an anchor — the import, the `extends` clause, the receiver's declaration,
+or the clicked identifier itself — set at the **first** crossing only, since a chain two supertypes
+deep must still anchor on something in the file on screen. No anchor means null, which is what the
+TypeScript resolver answers in the same case.
+
+**A type in the same package needs no import**, and that is what most pasted pairs of Java files
+look like — so an unresolved type name also searches the open tabs for a top-level declaration of
+that name. It is Java's package rule approximated as "any open tab", and it is why the feature is
+usable on two files at all.
+
+**`declare` attaches `owner` to both copies of a member.** A field is added to its type's `members`
+_and_ to the scope's own `bindings`, because a bare name inside a method resolves through the second
+while `this.x` resolves through the first — and when only `members` carried the owner, a bare field
+read silently lost the dimmed class header. **Reassignment is a scan, not a binding**: Java's
+`x = …` is an `assignment_expression` that declares nothing, so `writesFor` walks the enclosing
+method or type and resolves each candidate back to the same declaration, where python/flow.ts gets
+its writes free from the binder.
+
 **Two independent TypeScript setups exist, and conflating them causes confusion.**
 
 1. `src/lib/analyzer.ts` — our own `ts.LanguageService` over the open files, running `noLib` and
