@@ -297,7 +297,7 @@ one to add, and nothing when the brief is the shipped one, which every reader ha
 end can be written by hand — see [Parameters](#parameters) — so one link can hand someone the code
 and the question to ask about it.
 
-**Start from** beside the box is a shelf of briefs to begin with: the shipped one, and fifteen
+**Start from** beside the box is a shelf of briefs to begin with: the shipped one, and sixteen
 **hunters** — one per classic class, from SQL injection and XSS through SSRF, path traversal,
 BOLA/IDOR, mass assignment and prototype pollution to unsafe deserialization, open redirect, CSRF,
 authentication and weak crypto (`src/lib/hunters.ts`). Each is a complete brief naming that class's

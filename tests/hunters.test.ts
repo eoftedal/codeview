@@ -5,6 +5,19 @@ import { parseSections, serializeSections } from '../src/lib/share'
 
 const entries = Object.entries(HUNTERS)
 
+/**
+ * The classes with no path to report — a missing check, a cookie flag, a key in the source. These
+ * get the closing that asks for a where and a what-is-missing rather than a hop-by-hop flow, and
+ * adding a class means deciding which shape it is.
+ */
+const CHECKLISTS = [
+  'Broken object-level authorization (BOLA/IDOR)',
+  'Missing function-level authorization',
+  'CSRF & cross-origin',
+  'Authentication & sessions',
+  'Secrets & weak cryptography',
+]
+
 describe('the hunting briefs', () => {
   it('covers the classic classes a reader would come looking for', () => {
     // Not an exhaustive list — the point is that the obvious ones are not missing.
@@ -27,6 +40,7 @@ describe('the hunting briefs', () => {
       expect(HUNTER_NAMES.some((name) => term.test(name))).toBe(true)
     }
     expect(HUNTER_NAMES).toEqual(Object.keys(HUNTERS))
+    expect(HUNTER_NAMES).toEqual(expect.arrayContaining(CHECKLISTS))
   })
 
   it('is briefer than the shipped brief, which is the whole reason they exist', () => {
@@ -38,9 +52,13 @@ describe('the hunting briefs', () => {
     }
   })
 
-  it('names its own class in its opening line', () => {
+  it('names its own class in a one-line opening', () => {
+    // The opening rides every hunt, so it is where a saved character counts sixteen times over.
+    // One line is room for a role and a class, and no room for a lesson in what untrusted data is.
     for (const [name, text] of entries) {
-      expect(text.slice(0, 200), name).toContain(name)
+      const first = text.slice(0, text.indexOf('\n\n'))
+      expect(first, name).toContain(name)
+      expect(first.length, name).toBeLessThan(200)
     }
   })
 
@@ -48,7 +66,7 @@ describe('the hunting briefs', () => {
     // Two agents each hunting everything is one agent run twice. A hunter that wanders is also a
     // hunter whose report the next one cannot rule on.
     for (const [name, text] of entries) {
-      expect(text, name).toMatch(/only thing you report/i)
+      expect(text, name).toMatch(/single-issue hunt/i)
       expect(text, name).toMatch(/Report no other class/i)
     }
   })
@@ -57,10 +75,23 @@ describe('the hunting briefs', () => {
     for (const [name, text] of entries) {
       // The rule that stops an invented line number: check the name is on the line first.
       expect(text, name).toMatch(/actually appears on that line/i)
-      // Findings are paths, not adjectives.
-      expect(text, name).toMatch(/one numbered step per hop/i)
       // An empty hunt is a result. Without this a model reaches for something to report.
       expect(text, name).toMatch(/say plainly when you find nothing/i)
+    }
+  })
+
+  it('shows a flow hunter the shape of a path, and asks a checklist hunter for none', () => {
+    for (const [name, text] of entries) {
+      if (CHECKLISTS.includes(name)) {
+        // A missing authorization check has no source and no sink; asking for hops invites a
+        // model to invent them.
+        expect(text, name).not.toMatch(/one numbered step per hop/i)
+        expect(text, name).toMatch(/what is missing/i)
+      } else {
+        // Findings are paths, not adjectives — and the shape is shown, not described.
+        expect(text, name).toMatch(/one numbered step per hop/i)
+        expect(text, name).toMatch(/^1\. /m)
+      }
     }
   })
 
