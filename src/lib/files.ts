@@ -14,10 +14,18 @@ const EXTENSIONS: Record<string, Language> = {
   mjs: 'js',
   cjs: 'js',
   jsx: 'jsx',
+  py: 'py',
+  pyi: 'py',
 }
 
 /** What a language calls itself when we are the ones writing the name. */
-const CANONICAL: Record<Language, string> = { ts: 'ts', tsx: 'tsx', js: 'js', jsx: 'jsx' }
+const CANONICAL: Record<Language, string> = {
+  ts: 'ts',
+  tsx: 'tsx',
+  js: 'js',
+  jsx: 'jsx',
+  py: 'py',
+}
 
 export interface CodeFile {
   /** Stable for the life of the tab; the Monaco model and the editor's undo history hang off it. */
@@ -27,7 +35,7 @@ export interface CodeFile {
   language: Language
 }
 
-export const LANGUAGES: readonly Language[] = ['ts', 'tsx', 'js', 'jsx']
+export const LANGUAGES: readonly Language[] = ['ts', 'tsx', 'js', 'jsx', 'py']
 
 export function isLanguage(value: string): value is Language {
   return (LANGUAGES as readonly string[]).includes(value)

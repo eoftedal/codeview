@@ -11,7 +11,7 @@ import {
   withLanguage,
   type CodeFile,
 } from '../lib/files'
-import { SAMPLE } from '../lib/sample'
+import { sampleFor } from '../lib/sample'
 import {
   buildFragment,
   decodeShare,
@@ -119,7 +119,7 @@ export function useBuffer() {
           {
             id: createId(),
             name: named ?? sampleName(linkLanguage),
-            text: storedActive?.text ?? SAMPLE,
+            text: storedActive?.text ?? sampleFor(linkLanguage),
             language: linkLanguage,
           },
         ]
@@ -267,7 +267,7 @@ export function useBuffer() {
       }
       const detected = languageForFile(file.name)
       if (!detected) {
-        rejected.push(`${file.name} isn't a TypeScript or JavaScript file`)
+        rejected.push(`${file.name} isn't a file this viewer can parse`)
         continue
       }
       const content = await file.text()
@@ -346,7 +346,7 @@ export function useBuffer() {
     const file: CodeFile = {
       id: createId(),
       name: named ?? sampleName(language),
-      text: SAMPLE,
+      text: sampleFor(language),
       language,
     }
     files.value = [file]

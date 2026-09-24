@@ -548,6 +548,7 @@ const FENCE: Record<Language, string> = {
   tsx: 'tsx',
   js: 'javascript',
   jsx: 'jsx',
+  py: 'python',
 }
 
 /** Line-numbered, so an answer can point at a line and a reader can find it. */

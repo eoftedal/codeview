@@ -73,7 +73,7 @@ const FOCUS: Record<string, { shape: Shape; text: string }> = {
     shape: 'flow',
     text: `A finding is untrusted data reaching a database call as *query text* rather than as a bound value.
 
-Look at every query built by concatenation, a template literal, \`+\`, \`%\`, \`format\` or \`fmt.Sprintf\` and then passed to \`query\`, \`execute\`, \`exec\`, \`raw\`, \`$queryRawUnsafe\`, \`knex.raw\`, \`sequelize.query\`, \`cursor.execute\`, \`RawSQL\`/\`.extra\`, \`createQueryBuilder().where(...)\`, a JDBC \`Statement\`, or a stored-procedure call assembled by hand. In NoSQL, look for a request object handed to a query unchecked — \`find(req.body)\`, where \`{"$ne": null}\` or \`$gt\` arrives as an operator — and for \`$where\`, \`mapReduce\`, \`$expr\` and dot-notation keys from input.
+Look at every query built by concatenation, a template literal, \`+\`, \`%\`, \`format\` or \`fmt.Sprintf\` and then passed to \`query\`, \`execute\`, \`exec\`, \`raw\`, \`$queryRawUnsafe\`, \`knex.raw\`, \`sequelize.query\`, \`cursor.execute\`, \`RawSQL\`/\`.extra\`/\`.raw()\`, SQLAlchemy \`text()\` inside a \`filter\`/\`execute\`, \`createQueryBuilder().where(...)\`, a JDBC \`Statement\`, or a stored-procedure call assembled by hand. In NoSQL, look for a request object handed to a query unchecked — \`find(req.body)\`, where \`{"$ne": null}\` or \`$gt\` arrives as an operator — and for \`$where\`, \`mapReduce\`, \`$expr\` and dot-notation keys from input.
 
 What removes the taint: placeholders with bound parameters (\`?\`, \`$1\`, \`:name\`), an ORM call that passes values as values, or an allowlist. What does not: hand-written quoting or escaping, a \`LIKE\` escape, stripping quotes or semicolons, a blocklist of keywords.
 
@@ -84,7 +84,7 @@ Traps: a placeholder cannot bind a table name, a column name, a sort direction o
     shape: 'flow',
     text: `A finding is untrusted data reaching a process launch where it can become part of the command line.
 
-Sinks: \`exec\`, \`execSync\`, \`spawn\`/\`execFile\` with \`shell: true\`, \`os.system\`, \`subprocess\` with \`shell=True\`, \`Runtime.getRuntime().exec(string)\`, \`exec.Command("sh", "-c", ...)\`, \`popen\`, \`system()\`, backticks, and any helper that builds a command for git, ffmpeg, imagemagick, tar, curl or a shell script.
+Sinks: \`exec\`, \`execSync\`, \`spawn\`/\`execFile\` with \`shell: true\`, \`os.system\`, \`os.popen\`, \`subprocess\` with \`shell=True\`, \`subprocess.getoutput\`, \`Runtime.getRuntime().exec(string)\`, \`exec.Command("sh", "-c", ...)\`, \`popen\`, \`system()\`, backticks, and any helper that builds a command for git, ffmpeg, imagemagick, tar, curl or a shell script.
 
 What removes the taint: an argument vector with no shell (\`execFile\`/\`spawn\` with an array, \`subprocess.run([...])\`, \`exec.Command(prog, args...)\`), a fixed program, and arguments checked against an allowlist or a pattern. Quoting a value by hand inside a shell string does not; \`shlex.quote\` or \`shell-quote\` does, but only if every interpolated part goes through it.
 
@@ -95,7 +95,7 @@ Traps: an argument vector still injects when the *program* comes from input, or 
     shape: 'flow',
     text: `A finding is untrusted data reaching a place the browser parses as markup or script, without encoding for that exact context.
 
-Sinks: \`innerHTML\`, \`outerHTML\`, \`insertAdjacentHTML\`, \`document.write\`, \`v-html\`, \`dangerouslySetInnerHTML\`, Angular's \`bypassSecurityTrust*\`, jQuery \`.html()\` and \`$(input)\`, a raw filter in a template (\`{{{ }}}\`, \`| safe\`, \`| raw\`, \`Html.Raw\`, \`mark_safe\`), a response sent as \`text/html\`, an attribute built by hand, and \`href\`/\`src\`/\`formaction\` set to a value that could be \`javascript:\` or \`data:\`. DOM XSS starts at \`location.hash\`, \`location.search\`, \`document.referrer\`, \`window.name\` or a \`postMessage\` handler, so trace those as sources too.
+Sinks: \`innerHTML\`, \`outerHTML\`, \`insertAdjacentHTML\`, \`document.write\`, \`v-html\`, \`dangerouslySetInnerHTML\`, Angular's \`bypassSecurityTrust*\`, jQuery \`.html()\` and \`$(input)\`, a raw filter in a template (\`{{{ }}}\`, \`| safe\`, \`| raw\`, \`Html.Raw\`, \`mark_safe\`, \`Markup()\`, \`format_html\`), a response sent as \`text/html\`, an attribute built by hand, and \`href\`/\`src\`/\`formaction\` set to a value that could be \`javascript:\` or \`data:\`. DOM XSS starts at \`location.hash\`, \`location.search\`, \`document.referrer\`, \`window.name\` or a \`postMessage\` handler, so trace those as sources too.
 
 What removes the taint: the framework's own escaping on its default path, \`textContent\` or \`setAttribute\` with a checked scheme, or a sanitiser such as DOMPurify configured to allow no \`on*\` handler and no \`javascript:\` URL.
 
@@ -117,7 +117,7 @@ Traps: a blocklist of \`localhost\` and \`127.0.0.1\` misses \`0.0.0.0\`, \`[::1
     shape: 'flow',
     text: `A finding is untrusted data deciding *which* file is read, written, served or deleted.
 
-Sinks: \`fs.readFile\`/\`createReadStream\`/\`writeFile\`/\`unlink\`, \`res.sendFile\`/\`res.download\`, \`open()\`, \`File\`/\`Paths.get\`, a static-file or template lookup keyed by input, an upload destination, and archive extraction — an entry name inside a zip or tar is untrusted input (zip slip).
+Sinks: \`fs.readFile\`/\`createReadStream\`/\`writeFile\`/\`unlink\`, \`res.sendFile\`/\`res.download\`, \`open()\`, \`File\`/\`Paths.get\`, a static-file or template lookup keyed by input, an upload destination, and archive extraction (\`zipfile.extractall\`, \`tarfile.extractall\`, \`shutil.unpack_archive\`) — an entry name inside a zip or tar is untrusted input (zip slip).
 
 What removes the taint: resolving the candidate and checking the result is still inside the intended root (\`path.resolve(root, name)\`, then a prefix check against \`root\` plus a separator), taking the basename only, or mapping an id to a path through an allowlist.
 
@@ -139,7 +139,7 @@ Report the route, the identifier, the operation, and the check that is missing. 
     shape: 'check',
     text: `A finding is an endpoint or operation whose caller is never checked for the right to call it at all.
 
-Read the routing table as a whole and compare siblings. Look for a route registered before or outside the authentication middleware; a guard applied to one router and not another; a decorator or annotation (\`@RequireAuth\`, \`@PreAuthorize\`, \`login_required\`) on every method in a class but one; a check on \`POST\` but not \`PUT\`, \`PATCH\` or \`DELETE\`; an admin, debug, internal, metrics, export or migration endpoint left open; a role read from the request body, a query parameter or an unverified header rather than from the session; a check that only logs; an environment or feature-flag branch that skips one.
+Read the routing table as a whole and compare siblings. Look for a route registered before or outside the authentication middleware; a guard applied to one router and not another; a decorator or annotation (\`@RequireAuth\`, \`@PreAuthorize\`, \`login_required\`, \`@permission_classes\`, a Flask \`@before_request\`) on every method in a class but one; a check on \`POST\` but not \`PUT\`, \`PATCH\` or \`DELETE\`; an admin, debug, internal, metrics, export or migration endpoint left open; a role read from the request body, a query parameter or an unverified header rather than from the session; a check that only logs; an environment or feature-flag branch that skips one.
 
 What counts as a control: a check that runs before the handler's effects, against a server-side session or a verified token, and decides on the operation actually being attempted.
 
@@ -252,7 +252,7 @@ For each, say what it lets an attacker do, not only which rule it breaks.`,
 
 Secrets: a key, token, password, private key or connection string written into the source, into a config fallback (\`process.env.KEY || 'dev-secret'\`), into a comment, or into a fixture that production code also reads; a secret logged, put in a URL or query string, returned in an error or an API response, or shipped in a client bundle. Name the secret's purpose and every place it appears.
 
-Crypto: MD5 or SHA-1 for passwords, signatures or integrity; a fast hash where bcrypt, scrypt or argon2 belongs; an unsalted or globally salted password hash; \`Math.random\`, \`rand()\`, a timestamp or UUIDv1 for anything security-bearing — tokens, session ids, password resets, nonces, OTPs; AES-ECB; a static, reused or zero IV or nonce; CBC or a stream cipher with nothing authenticating the ciphertext; a home-made construction; \`==\` on a secret where a constant-time comparison belongs; certificate verification turned off (\`rejectUnauthorized: false\`, \`verify=False\`, \`InsecureSkipVerify: true\`, a trust-all \`TrustManager\`).
+Crypto: MD5 or SHA-1 (\`hashlib.md5\`, \`hashlib.sha1\`) for passwords, signatures or integrity; a fast hash where bcrypt, scrypt or argon2 belongs; an unsalted or globally salted password hash; \`Math.random\`, \`random.random\`/\`random.randint\` (seeded, not \`secrets\`), \`rand()\`, a timestamp or UUIDv1 for anything security-bearing — tokens, session ids, password resets, nonces, OTPs; AES-ECB; a static, reused or zero IV or nonce; CBC or a stream cipher with nothing authenticating the ciphertext; a home-made construction; \`==\` on a secret where a constant-time comparison belongs; certificate verification turned off (\`rejectUnauthorized: false\`, \`verify=False\`, \`InsecureSkipVerify: true\`, a trust-all \`TrustManager\`).
 
 Say what each one protects and what it should be instead. Where a weak primitive guards nothing an attacker wants — a cache key, an ETag, a test fixture — say that too, rather than reporting it as a vulnerability.`,
   },

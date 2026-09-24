@@ -16,7 +16,13 @@ const emit = defineEmits<{
 }>()
 
 /** Stands in for VS Code's file icons — the language, in the colour the editor tints it. */
-const BADGE: Record<Language, string> = { ts: 'TS', tsx: 'TSX', js: 'JS', jsx: 'JSX' }
+const BADGE: Record<Language, string> = {
+  ts: 'TS',
+  tsx: 'TSX',
+  js: 'JS',
+  jsx: 'JSX',
+  py: 'PY',
+}
 
 /** There is always a buffer, so the last tab has no close button rather than an empty editor. */
 const closable = () => props.files.length > 1
@@ -206,6 +212,10 @@ onBeforeUnmount(() => {
 .lang-ts,
 .lang-tsx {
   color: var(--accent);
+}
+
+.lang-py {
+  color: var(--violet);
 }
 
 .lang-js,

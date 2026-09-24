@@ -56,7 +56,13 @@ let definitionDecorations: monaco.editor.IEditorDecorationsCollection | undefine
 let hoverDecorations: monaco.editor.IEditorDecorationsCollection | undefined
 let flowDecorations: monaco.editor.IEditorDecorationsCollection | undefined
 
-const EXTENSION: Record<Language, string> = { ts: 'ts', tsx: 'tsx', js: 'js', jsx: 'jsx' }
+const EXTENSION: Record<Language, string> = {
+  ts: 'ts',
+  tsx: 'tsx',
+  js: 'js',
+  jsx: 'jsx',
+  py: 'py',
+}
 
 /**
  * Monaco's TypeScript worker keys off the model URI's extension, not just the language id — an
@@ -345,7 +351,7 @@ defineExpose({ revealDefinition })
   >
     <slot name="tabs" />
     <div ref="host" class="editor" />
-    <div v-if="dropActive" class="drop-hint">Drop .ts, .tsx, .js or .jsx files</div>
+    <div v-if="dropActive" class="drop-hint">Drop .ts, .tsx, .js, .jsx or .py files</div>
   </div>
 </template>
 

@@ -41,6 +41,70 @@ one AST, one set of decorations. A span is an offset into a particular file and 
 anywhere else — which is why `FlowNode` carries `file`, and why `App.vue` filters trace spans to
 the active tab before handing them to Monaco.
 
+**One language per backend, and the seam is `useAnalysis`.** `src/lib/backend.ts` is the contract
+the panes see — `update` / `tree` / `resolve` / optional `trace` / optional `ready` — and it imports
+nothing from `typescript`. `tsBackend.ts` wraps today's analyzer unchanged; `python/backend.ts` is
+the other implementation. `useAnalysis` partitions the open tabs by language, calls `update` on
+**every** backend holding files (so a tab off screen is still in its language's program, which is
+what a cross-file definition walks along), and dispatches `tree`/`resolve`/`trace` to whichever owns
+the active one. **Cross-language resolution does not exist and will not**: the two backends never
+share a file set, so a `.ts` file's import cannot see `db.py` and Python's `import db` cannot see
+`db.ts`. There is no build system here to say what would bridge them, and inventing one would mean
+guessing. `trace` is **optional rather than null-returning** — `null` already means "nothing
+resolved at this offset", and a pane has to tell that apart from "this language has no trace" to
+explain itself instead of looking broken.
+
+**Python is tree-sitter, and the grammar loads on the main thread — that is a fact, not a
+preference.** `@vscode/tree-sitter-wasm` ships the runtime and 16 grammars built together, which is
+what removes the ABI-mismatch failure that a hand-assembled `web-tree-sitter` + grammar pair invites.
+Its `wasm/tree-sitter.js` is a **UMD bundle** whose `getCurrentScriptUrl()` runs at module-evaluation
+time (`var _scriptName = getCurrentScriptUrl()`) and **throws** unless `__filename` or `document`
+exists — so it cannot load in any worker, and a _module_ worker is worse still: the bundle detects a
+worker with `typeof importScripts`, which a module worker does not have, so it falls to its shell
+branch and never installs `readAsync`. On the main thread `document.currentScript` is null for a
+module, `_scriptName` is undefined, and emscripten's `scriptDirectory` stays empty — harmless
+_because_ `locateFile` is supplied, which is the branch `findWasmBinary` then takes. The three assets
+are `?url` imports so Vite emits them hashed and resolves them against the emitting chunk, which is
+what makes `base: './'` work on Pages; importing the glue normally would have Rollup treat it as CJS,
+hoist its `require('fs')` onto Vite's node stubbing, and inline 169 kB into the main chunk. Dev
+serves everything from `/` and so proves none of this, which is why `tests/e2e/dist.test.ts` asserts
+the three assets exist **and** loads a Python buffer in the built bundle. In the unit suites the same
+package is reached through `createRequire` (`tests/support/python.ts`) — a real CJS load is the only
+thing that gives the UMD its `__filename` — and `Language.load` is handed the wasm _bytes_, which
+keeps URL resolution out of the test path entirely.
+
+**Offsets are UTF-16 code units, and that is pinned rather than assumed.** Every `Span` in the app is
+a UTF-16 offset, because that is what Monaco's `getPositionAt` and `String.slice` both take. A byte
+offset would put every highlight in the wrong place — but only in files holding non-ASCII, which a
+suite of ASCII fixtures would never notice. `tests/pythonTree.test.ts` pins it with an accent and a
+non-BMP emoji.
+
+**The caret rule reaches further in Python than it does in TypeScript.** Once `identifierAt` has
+picked an identifier, every later question is asked at **that identifier's position**, not at the
+caret's. A caret sits between characters, so one parked at the end of the last name in a `def` is
+exactly that `def`'s `endIndex` — _outside_ it — and `scopeAt` would then miss the scope the name is
+plainly in, which is how `self.host` silently fell back to resolving `self`.
+
+**`python/scopes.ts` is two passes, and the split is load-bearing.** Everything a scope binds is
+collected before any lookup runs, so "an assignment anywhere in a function makes the name local
+throughout it" falls out structurally instead of needing a special case. The three rules a reader
+arriving from TypeScript gets wrong are all deliberate: `if`/`for`/`while`/`with`/`try` are **not**
+scopes, a **class body is skipped** by any lookup from inside a nested function, and a
+**comprehension is** a scope. Builtins deliberately do not resolve — the same principle `noLib` buys
+on the TypeScript side, and the same reason there is no list of interesting globals. Attributes
+resolve **syntactically** in three shapes only (`self.x`, `C.x` for a class in an open tab, and a
+method reached either way); anything else falls back to where the _object_ came from, which is the
+same property fallback `definitions.ts` makes for a value TypeScript cannot type. It never guesses at
+an attribute, because in a tool for following untrusted data a plausible wrong declaration is worse
+than none. **Base classes are walked, and the walk crosses tabs** — depth-first, left to right,
+class-before-bases so an override wins, with a `file:offset` `seen` set because a cycle in the
+hierarchy is illegal Python but entirely writable mid-edit. When the declaration lands in another tab
+it has no range on screen, so the highlight goes to the _import that brought the base class in_ while
+the label still names the attribute that was asked about — the same "nearest thing on screen" idiom
+`resolveDefinition` already uses for an imported name. Note this is one place Python answers _better_
+than TypeScript: `db.run()` on a namespace import returns null there, since nothing local stands for
+`run` itself, while Python reports the import with `definedIn`.
+
 **Two independent TypeScript setups exist, and conflating them causes confusion.**
 
 1. `src/lib/analyzer.ts` — our own `ts.LanguageService` over the open files, running `noLib` and

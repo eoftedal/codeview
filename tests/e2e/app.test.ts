@@ -272,6 +272,109 @@ describe('language switching', () => {
   })
 })
 
+describe('python', () => {
+  /** A fresh page: this suite's shared page holds the TypeScript sample, and a Python buffer
+   *  belongs to a different backend entirely. */
+  async function openPython(hash: string) {
+    const fresh = await browser.newPage()
+    await fresh.setViewport({ width: 1400, height: 1000 })
+    await fresh.goto(`${URL}${hash}`, { waitUntil: 'networkidle0' })
+    // The seed buffer renders before the link is applied and the grammar is fetched after that,
+    // so waiting for `.row` alone would match the TypeScript tree still on screen.
+    await fresh.waitForFunction(
+      () => document.querySelector('.row .kind')?.textContent?.trim() === 'module',
+      { timeout: 20_000 },
+    )
+    return fresh
+  }
+
+  const SOURCE = 'greeting = "hi"\n\ndef greet(greeting):\n    return greeting\n'
+
+  it('shows a tree-sitter tree, and says PY on the tab', async () => {
+    const fresh = await openPython(`#src=${encodeURIComponent(SOURCE)}&lang=py&filename=app.py`)
+    const kinds = await fresh.$$eval('.row .kind', (nodes) =>
+      nodes.map((node) => node.textContent?.trim() ?? ''),
+    )
+    expect(kinds[0]).toBe('module')
+    expect(kinds).toContain('function_definition')
+    expect(await fresh.$eval('.tab .badge', (el) => el.textContent?.trim())).toBe('PY')
+    expect(await fresh.$eval('.languages button.active', (el) => el.textContent?.trim())).toBe('PY')
+    await fresh.close()
+  })
+
+  it('resolves a definition, preferring the parameter that shadows the module name', async () => {
+    const fresh = await openPython(`#src=${encodeURIComponent(SOURCE)}&lang=py&filename=app.py`)
+    await clickAt('return greeting', 10, 0, fresh)
+    const definition = await fresh.$eval(
+      '.definition',
+      (el) => el.textContent?.replace(/\s+/g, ' ').trim() ?? '',
+    )
+    expect(definition).toContain('parameter `greeting`')
+    expect(definition).toContain('line 3')
+    await fresh.close()
+  })
+
+  it('offers no trace, and explains why rather than doing nothing', async () => {
+    const fresh = await openPython(`#src=${encodeURIComponent(SOURCE)}&lang=py&filename=app.py`)
+    const tabs = await fresh.$$('nav button')
+    for (const tab of tabs) {
+      if ((await tab.evaluate((el) => el.textContent))?.includes('Trace')) {
+        await tab.click()
+        break
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(await fresh.$eval('button.run', (el) => (el as HTMLButtonElement).disabled)).toBe(true)
+    expect(
+      await fresh.$eval('.empty', (el) => el.textContent?.replace(/\s+/g, ' ') ?? ''),
+    ).toContain('TypeScript and JavaScript only')
+    await fresh.close()
+  })
+
+  it('keeps a Python tab and a TypeScript tab in separate programs', async () => {
+    // One bundle, two languages. Each tab must resolve in its own backend, and neither may see
+    // the other's declarations — there is no build system here to say what would bridge them.
+    const bundle = [
+      '--8<-- app.py',
+      'from db import run',
+      'run()',
+      '--8<-- helper.ts',
+      "export const shared = 'ts'",
+      'shared',
+    ].join('\n')
+    const fresh = await openPython(`#files=${encodeURIComponent(bundle)}&active=app.py`)
+
+    expect(await fresh.$$eval('.tab .badge', (n) => n.map((e) => e.textContent?.trim()))).toEqual([
+      'PY',
+      'TS',
+    ])
+
+    // The Python tab: `run` is an import of a module no tab holds, so no `defined in`.
+    await clickAt('run()', 1, 0, fresh)
+    const pythonDefinition = await fresh.$eval(
+      '.definition',
+      (el) => el.textContent?.replace(/\s+/g, ' ').trim() ?? '',
+    )
+    expect(pythonDefinition).toContain('import `run`')
+    expect(pythonDefinition).not.toContain('helper.ts')
+
+    // Switch to the TypeScript tab: the other backend answers, and the tree changes shape.
+    await fresh.evaluate(() => {
+      const tabs = [...document.querySelectorAll('.tab')]
+      ;(tabs.find((t) => t.textContent?.includes('helper.ts')) as HTMLElement).click()
+    })
+    await fresh.waitForFunction(
+      () => document.querySelector('.row .kind')?.textContent?.trim() === 'SourceFile',
+      { timeout: 10_000 },
+    )
+    await clickAt('shared', 2, 1, fresh)
+    expect(
+      await fresh.$eval('.definition', (el) => el.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
+    ).toContain('variable `shared`')
+    await fresh.close()
+  })
+})
+
 describe('share links', () => {
   /** A fresh page so the suite's own editor state is left alone. */
   async function loadInNewPage(hash: string) {

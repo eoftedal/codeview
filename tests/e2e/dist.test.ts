@@ -13,6 +13,7 @@ let server: PreviewServer
 let browser: Browser
 let page: Page
 const pageErrors: string[] = []
+const wasmResponses: string[] = []
 
 beforeAll(async () => {
   await build({ logLevel: 'error' })
@@ -29,6 +30,10 @@ beforeAll(async () => {
   )
   page.on('console', (message) => {
     if (message.type() === 'error') pageErrors.push(message.text())
+  })
+  page.on('response', (response) => {
+    const name = response.url().split('/').pop() ?? ''
+    if (/tree-sitter/.test(name)) wasmResponses.push(`${response.status()} ${name}`)
   })
 
   await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'networkidle0' })
@@ -49,6 +54,12 @@ describe('production bundle', () => {
     const assets = readdirSync('dist/assets')
     expect(assets.some((name) => name.startsWith('editor.worker'))).toBe(true)
     expect(assets.some((name) => name.startsWith('ts.worker'))).toBe(true)
+    // The Python grammar is fetched at runtime from a `?url` asset, so dev — which serves
+    // everything from `/` — proves nothing about the build, which runs under `base: './'`. These
+    // three are the runtime glue, its wasm, and the grammar.
+    expect(assets.some((name) => /^tree-sitter-[^.]+\.js$/.test(name))).toBe(true)
+    expect(assets.some((name) => /^tree-sitter-[^.]+\.wasm$/.test(name))).toBe(true)
+    expect(assets.some((name) => /^tree-sitter-python-[^.]+\.wasm$/.test(name))).toBe(true)
   })
 
   it('loads with no console or page errors', () => {
@@ -90,5 +101,33 @@ describe('production bundle', () => {
       (el) => el.textContent?.replace(/\s+/g, ' ').trim() ?? '',
     )
     expect(definition).toContain('import `formatAddress`')
+  })
+
+  /**
+   * The whole runtime path in one case: `base: './'` resolution of three `?url` assets, the
+   * dynamic `import()` of a UMD bundle, emscripten's `locateFile`, and `Language.load`. Dev serves
+   * everything from `/` and so proves none of it.
+   */
+  it('fetches and runs the Python grammar', async () => {
+    const source = 'greeting = "hi"\ndef greet(name):\n    return name\n'
+    // `goto` to a URL that differs only in its fragment is an in-page navigation, so the app is
+    // never re-created and never re-reads the link. Reload to actually boot it on this hash.
+    await page.goto(`http://localhost:${PORT}/#src=${encodeURIComponent(source)}&lang=py`)
+    await page.reload({ waitUntil: 'networkidle0' })
+    // The seed buffer parses and renders before the link has been applied, and the grammar is
+    // fetched after that — so waiting for `.row` would match the TypeScript tree still on screen.
+    await page.waitForFunction(
+      () => document.querySelector('.row .kind')?.textContent?.trim() === 'module',
+      { timeout: 15_000 },
+    )
+
+    const kinds = await page.$$eval('.row .kind', (nodes) =>
+      nodes.map((node) => node.textContent?.trim() ?? ''),
+    )
+    expect(kinds[0]).toBe('module')
+    expect(kinds).toContain('function_definition')
+
+    expect(wasmResponses.length).toBeGreaterThan(0)
+    expect(wasmResponses.filter((entry) => !entry.startsWith('200'))).toEqual([])
   })
 })

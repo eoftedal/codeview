@@ -192,7 +192,10 @@ function onSelectNode(id: number): void {
  *  on an explicit request, never on cursor movement the way the definition highlight does. */
 function runTrace(offset: number = cursorOffset.value): void {
   cursorOffset.value = offset
-  trace.value = analysis.trace(offset)
+  // The editor's Trace action stays registered whatever the language — a context-menu entry that
+  // appears and disappears under the reader is worse than one that explains itself — so Alt+T on a
+  // buffer with no trace opens the pane and lets it say why, rather than doing nothing at all.
+  trace.value = analysis.traceSupported.value ? analysis.trace(offset) : null
   activeTab.value = 'trace'
 }
 
@@ -248,6 +251,7 @@ const languages = [
   { id: 'tsx', label: 'TSX' },
   { id: 'js', label: 'JS' },
   { id: 'jsx', label: 'JSX' },
+  { id: 'py', label: 'PY' },
 ] as const
 
 /** The link carries the chat's brief and the agents' team when the reader wrote either — the
@@ -295,7 +299,7 @@ function onFilePicked(event: Event): void {
           class="hidden-input"
           type="file"
           multiple
-          accept=".ts,.tsx,.js,.jsx,.mjs,.cjs,.mts,.cts"
+          accept=".ts,.tsx,.js,.jsx,.mjs,.cjs,.mts,.cts,.py,.pyi"
           @change="onFilePicked"
         />
       </div>
@@ -377,11 +381,26 @@ function onFilePicked(event: Event): void {
               @hover="hoveredId = $event"
               @reveal-definition="editorPane?.revealDefinition()"
             />
+            <p
+              v-else-if="activeTab === 'ast' && analysis.status.value === 'loading'"
+              class="pane-note"
+            >
+              Loading the parser…
+            </p>
+            <p
+              v-else-if="activeTab === 'ast' && analysis.status.value === 'failed'"
+              class="pane-note failed"
+            >
+              The parser for this language could not be loaded — {{ analysis.failure.value }}.
+              <br />
+              Highlighting and editing still work; the tree and the definition highlight do not.
+            </p>
             <TracePane
               v-else-if="activeTab === 'trace'"
               :trace="trace"
               :target="definition?.label ?? null"
               :active-file="fileName"
+              :supported="analysis.traceSupported.value"
               @run="runTrace()"
               @select="onSelectTraceStep"
               @hover="tracedHover = $event"
@@ -538,6 +557,18 @@ button:hover {
 
 .hidden-input {
   display: none;
+}
+
+.pane-note {
+  padding: 24px 20px;
+  margin: 0;
+  color: var(--dim);
+  text-align: center;
+  line-height: 1.7;
+  font-family: 'Inter', sans-serif;
+}
+.pane-note.failed {
+  color: var(--danger);
 }
 
 .notice {

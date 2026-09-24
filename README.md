@@ -2,7 +2,7 @@
 
 **Live demo:** https://eoftedal.github.io/codeview/
 
-Explore a TypeScript or JavaScript file as a syntax tree. Monaco on the left, the AST on
+Explore a TypeScript, JavaScript or Python file as a syntax tree. Monaco on the left, the AST on
 the right, kept in sync both ways: move the cursor and the tree follows, click a node and
 the editor follows.
 
@@ -76,7 +76,7 @@ key. Key names are case-insensitive, since these get typed by hand.
 | Parameter      | Effect                                                                                                             |
 | -------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `src`          | the buffer — `z.`/`r.` payload, or literal source                                                                  |
-| `lang`         | `ts`, `tsx`, `js` or `jsx`                                                                                         |
+| `lang`         | `ts`, `tsx`, `js`, `jsx` or `py`                                                                                   |
 | `filename`     | names the tab; its extension picks the language when `lang` is absent. **Copy link** carries it along              |
 | `hideHeader`   | hides the title bar, language switcher and buttons, for embedding                                                  |
 | `systemprompt` | the chat's brief — `z.`/`r.` payload, or literal text. **Copy link** carries it only when you have rewritten it    |
@@ -84,7 +84,8 @@ key. Key names are case-insensitive, since these get typed by hand.
 
 Any of these describes what the link is about, so it opens with those files rather than the
 tabs the reader happened to leave open. Without them, the last session comes back whole;
-the seed buffer arrives as `example.ts`, because every tab needs a name. `systemprompt` and
+the seed buffer arrives as `example.ts` — or `example.py`, with its own sample, when the link asks
+for Python — because every tab needs a name. `systemprompt` and
 `agents` are the exceptions on both counts: neither says anything about which files are open, so
 they leave the reader's tabs alone, and both belong to the link rather than to the reader — they
 are not written to `localStorage`, so opening someone else's link cannot overwrite a brief or a
@@ -146,6 +147,59 @@ bundler would — no extension needed. An import of anything that is not open (`
 The editor shows one file, so a declaration in another tab has no range to highlight: an
 imported name still answers with its import statement, and the header adds → `db.ts` to say
 which tab holds the real declaration.
+
+### Python
+
+Python is parsed by [tree-sitter](https://tree-sitter.github.io/) rather than by the TypeScript
+compiler, so the tree is a tree-sitter tree — `module`, `function_definition`, `identifier` — and
+the definitions come from a scope binder of our own rather than from a type checker. The answers
+have the same shape as the TypeScript ones: the same reasons, the same signature clipping, the same
+`defined in` when a name is declared in another tab.
+
+Three of Python's rules differ from TypeScript's in ways worth stating, because a reader arriving
+from the other side gets them wrong:
+
+- **`if`, `for`, `while`, `with` and `try` are not scopes.** A name bound inside one is visible
+  after it.
+- **A class body is invisible from inside a method.** A method reaches a class attribute through
+  `self`, never by bare name — and this tool resolves it the same way.
+- **A comprehension is a scope**, so its target does not leak out of it.
+
+An assignment anywhere in a function makes that name local throughout the function, so a use above
+the assignment still resolves to it. Where a name is bound more than once, the binding in force is
+the last one at or before the cursor, falling back to the first in the scope. That is an
+approximation of shadowing in time, which is the most a static reading of a dynamic language can
+offer.
+
+Builtins — `print`, `len`, `open` — deliberately do not resolve, for the same reason nothing from
+`lib.d.ts` resolves on the TypeScript side: with only the open tabs to go on, a name with no
+declaration _is_ one that came from outside.
+
+**Attributes resolve by name, not by type**, and only in three shapes: `self.x` inside a class,
+`C.x` where `C` is a class in an open tab, and a method reached either way.
+
+Base classes **are** followed, including into another tab — `class UserView(BaseView)` resolves
+`self.template` to whatever `BaseView` declares, wherever `BaseView` lives. The walk is depth-first
+and left to right, which agrees with Python's own C3 linearization for any hierarchy without
+diamonds, and the class itself always wins over its bases, so an override resolves to the override.
+A base in no open tab simply ends that branch. Only bare identifiers count as bases: a dotted one
+(`models.Model`) would need the module resolved first, and is almost always external anyway.
+
+Anything else — `obj.method()` where `obj` came from a function's return value — falls back to
+showing where `obj` itself came from, and says so by pointing at that declaration instead. It never
+guesses at an attribute.
+
+What Python support does **not** do:
+
+- **No backward trace.** The trace rides the TypeScript language service's reference index, and
+  there is no equivalent here. The pane says so rather than offering a button that does nothing.
+- **No cross-language resolution.** A `.py` tab and a `.ts` tab are in separate programs. Python's
+  `import db` never finds `db.ts`, and there is no build system here to say that it should.
+- `from m import *` binds nothing, so every name it would have brought in reads as external.
+- Dynamic attributes (`getattr`, `__getattr__`), `globals()`, `exec` and `__all__` re-exports are
+  out of reach.
+- Decorators do not rewrite meaning: a name decorated with `@property` still resolves as the
+  function it is written as.
 
 ## Tracing a value back to its sources
 

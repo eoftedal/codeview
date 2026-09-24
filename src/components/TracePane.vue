@@ -11,6 +11,9 @@ const props = defineProps<{
   /** The tab on screen. A step in another file is labelled with its own, and selecting it opens
    *  that tab. */
   activeFile: string
+  /** False on a language with no backward trace. The pane then explains itself rather than
+   *  offering a button that would do nothing. */
+  supported: boolean
 }>()
 
 const emit = defineEmits<{
@@ -94,7 +97,7 @@ provide(traceContextKey, {
       <div class="toolbar">
         <!-- Always "Trace": the button acts on whatever is under the cursor now, which is rarely
              what the trace on screen was run from, and "Retrace" claimed otherwise. -->
-        <button class="run" @click="emit('run')">
+        <button class="run" :disabled="!supported" @click="emit('run')">
           Trace<span v-if="target"> {{ target }}</span>
         </button>
         <template v-if="trace">
@@ -130,6 +133,15 @@ provide(traceContextKey, {
 
     <div class="body" @mouseleave="emit('hover', null)">
       <TraceRow v-if="trace" :id="trace.root" :depth="0" />
+      <p v-else-if="!supported" class="empty">
+        The backward trace is <strong>TypeScript and JavaScript only</strong>.
+        <br />
+        It follows a value through assignments, returns and call-site arguments using the TypeScript
+        language service's reference index. There is no equivalent for this language here, and
+        guessing at one would quietly miss paths — which is worse than not offering it.
+        <br />
+        The syntax tree and the definition highlight work as normal.
+      </p>
       <p v-else class="empty">
         Put the cursor on a value and press <strong>Trace</strong> — or <kbd>Alt</kbd>+<kbd>T</kbd>
         in the editor.
@@ -140,7 +152,7 @@ provide(traceContextKey, {
       </p>
     </div>
 
-    <footer>
+    <footer v-if="supported">
       Shows every path that <em>could</em> reach the value — no aliasing, no path sensitivity.
     </footer>
   </section>
@@ -260,6 +272,10 @@ button:hover {
   line-height: 1.7;
 }
 
+.run:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .empty {
   padding: 24px 20px;
   margin: 0;

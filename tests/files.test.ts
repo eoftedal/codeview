@@ -22,6 +22,8 @@ describe('languageForFile', () => {
     expect(languageForFile('App.tsx')).toBe('tsx')
     expect(languageForFile('src/util.MTS')).toBe('ts')
     expect(languageForFile('worker.cjs')).toBe('js')
+    expect(languageForFile('routes.py')).toBe('py')
+    expect(languageForFile('stubs/db.PYI')).toBe('py')
   })
 
   it('knows nothing about extensions it does not own', () => {
@@ -36,6 +38,8 @@ describe('withLanguage', () => {
   it('rewrites an extension we recognise', () => {
     expect(withLanguage('src/App.ts', 'tsx')).toBe('src/App.tsx')
     expect(withLanguage('worker.mjs', 'ts')).toBe('worker.ts')
+    expect(withLanguage('src/App.ts', 'py')).toBe('src/App.py')
+    expect(withLanguage('routes.py', 'ts')).toBe('routes.ts')
   })
 
   it('leaves a name whose extension already means that language', () => {
