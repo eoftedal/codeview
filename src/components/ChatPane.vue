@@ -3,9 +3,6 @@ import { computed, nextTick, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
 import { DEFAULT_ROLE, describeStatus, type ModelChoice, type ModelStatus } from '../lib/chat'
 import { HUNTERS, HUNTER_NAMES } from '../lib/hunters'
-import type { CustomOpenRouterModel } from '../lib/providers/openrouterModels'
-import { EXAMPLE_LOCAL_URL } from '../lib/providers/localServerUrl'
-import type { LocalServerModel } from '../lib/providers/localServerModels'
 import type { ChatMessage } from '../composables/useChat'
 
 const props = defineProps<{
@@ -18,16 +15,6 @@ const props = defineProps<{
   role: string
   /** Whether that is still the shipped one, which is all a rewritten prompt is marked by. */
   roleIsDefault: boolean
-  /** The reader's OpenRouter key, or '' if none is set. Only OpenRouter models need it. */
-  openrouterKey: string
-  /** OpenRouter models the reader has added themselves, beyond the shipped ones. */
-  openrouterModels: CustomOpenRouterModel[]
-  /** The address of the reader's own model server, or '' if none is set. This is what the local
-   *  provider offers models at all for: with no address there are no local entries to pick. */
-  localServerUrl: string
-  /** Models named on that server by hand — an override for what it reported, or the whole list
-   *  for a server with no `/models` route. */
-  localServerModels: LocalServerModel[]
   status: ModelStatus
   progress: number
   messages: ChatMessage[]
@@ -43,10 +30,6 @@ const emit = defineEmits<{
   'update:model': [string]
   'update:thinking': [boolean]
   'update:role': [string]
-  'update:openrouterKey': [string]
-  'update:openrouterModels': [CustomOpenRouterModel[]]
-  'update:localServerUrl': [string]
-  'update:localServerModels': [LocalServerModel[]]
   ask: [string]
   stop: []
   newChat: []
@@ -61,16 +44,13 @@ const PROMPTS = [
 const draft = ref('')
 const body = ref<HTMLElement>()
 
-// The settings panel takes over the pane while it is open: a brief is several paragraphs, and a
-// textarea squeezed above the conversation is no place to read one. Every draft here is a copy, so
-// closing without saving leaves the prompt, the key and the added models alone. One panel and one
-// Save, because they are all settings for this pane rather than three separate features.
+// The prompt editor takes over the pane while it is open: a brief is several paragraphs, and a
+// textarea squeezed above the conversation is no place to read one. The draft is a copy, so closing
+// without saving leaves the brief alone. What the model is *reached* through — a key, a server
+// address, the reader's own catalogue additions — is not here: it is shared with the agents tab, so
+// it lives under the settings tab rather than under a conversation.
 const editingPrompt = ref(false)
 const promptDraft = ref(props.role)
-const keyDraft = ref(props.openrouterKey)
-const modelsDraft = ref<CustomOpenRouterModel[]>(props.openrouterModels)
-const localUrlDraft = ref(props.localServerUrl)
-const localModelsDraft = ref<LocalServerModel[]>(props.localServerModels)
 
 // Starting points for the brief, keyed by the name the picker shows. The shipped one is here
 // beside the hunters, so the picker answers "what else could this say" on its own rather than
@@ -91,138 +71,16 @@ function applyTemplate(name: string): void {
   if (text) promptDraft.value = text
 }
 
-// A second model of the same slug would just be a confusing duplicate in the picker — checked
-// against the catalogue too, not only the draft, so adding one already shipped is refused the
-// same way.
-const newModelSlug = ref('')
-const newModelLabel = ref('')
-const newModelThinking = ref(false)
-const newModelTaken = computed(() => {
-  const slug = newModelSlug.value.trim()
-  if (!slug) return false
-  return (
-    modelsDraft.value.some((entry) => entry.model === slug) ||
-    props.models.some((entry) => entry.provider === 'openrouter' && entry.model === slug)
-  )
-})
-
-function addModel(): void {
-  const model = newModelSlug.value.trim()
-  if (!model || newModelTaken.value) return
-  const label = newModelLabel.value.trim()
-  modelsDraft.value = [
-    ...modelsDraft.value,
-    { model, label: label || model, thinking: newModelThinking.value },
-  ]
-  newModelSlug.value = ''
-  newModelLabel.value = ''
-  newModelThinking.value = false
-}
-
-function removeModel(model: string): void {
-  modelsDraft.value = modelsDraft.value.filter((entry) => entry.model !== model)
-}
-
-// The same guard for the local list, against the draft and the live picker both. A name already
-// *discovered* is deliberately not taken: naming it by hand is how a reader says something the
-// server's own listing cannot — that it thinks, or that its context is smaller than the default
-// budget assumes — so that is an override rather than a duplicate.
-const newLocalModel = ref('')
-const newLocalLabel = ref('')
-const newLocalThinking = ref(false)
-const newLocalTaken = computed(() => {
-  const name = newLocalModel.value.trim()
-  if (!name) return false
-  return localModelsDraft.value.some((entry) => entry.model === name)
-})
-
-function addLocalModel(): void {
-  const model = newLocalModel.value.trim()
-  if (!model || newLocalTaken.value) return
-  const label = newLocalLabel.value.trim()
-  localModelsDraft.value = [
-    ...localModelsDraft.value,
-    { model, label: label || model, thinking: newLocalThinking.value },
-  ]
-  newLocalModel.value = ''
-  newLocalLabel.value = ''
-  newLocalThinking.value = false
-}
-
-function removeLocalModel(model: string): void {
-  localModelsDraft.value = localModelsDraft.value.filter((entry) => entry.model !== model)
-}
-
-/** This page's own origin, so the CORS hint names the value the reader actually has to allow
- *  rather than leaving them to work it out — it differs between the dev server and the deployed
- *  site, which is exactly when this goes wrong. */
-const origin = computed(() => location.origin)
-
-/**
- * What the server reported and the reader has not named: the picker's local entries less the
- * hand-added ones, saved and drafted alike. Listed by name rather than counted, so that any of them
- * can be flagged as thinking in place — `/models` cannot say which of them reason, and the think
- * switch is only ever sent for an entry marked so. Flagging one *names* it, which is the override
- * the hand-added list already is: it moves up into that list, with a Remove of its own that puts
- * it back here.
- */
-const discovered = computed(() =>
-  props.models
-    .filter(
-      (entry) =>
-        entry.provider === 'localserver' &&
-        !props.localServerModels.some((named) => named.model === entry.model) &&
-        !localModelsDraft.value.some((named) => named.model === entry.model),
-    )
-    .map((entry) => entry.model ?? entry.id),
-)
-
-function flagDiscovered(model: string): void {
-  if (localModelsDraft.value.some((entry) => entry.model === model)) return
-  localModelsDraft.value = [...localModelsDraft.value, { model, label: model, thinking: true }]
-}
-
-const settingsChanged = computed(
-  () =>
-    promptDraft.value !== props.role ||
-    keyDraft.value !== props.openrouterKey ||
-    JSON.stringify(modelsDraft.value) !== JSON.stringify(props.openrouterModels) ||
-    localUrlDraft.value !== props.localServerUrl ||
-    JSON.stringify(localModelsDraft.value) !== JSON.stringify(props.localServerModels),
-)
-
-/** Whether the toolbar's dot and gold tint are earned: any setting away from what shipped. */
-const settingsCustomized = computed(
-  () =>
-    !props.roleIsDefault ||
-    props.openrouterKey !== '' ||
-    props.openrouterModels.length > 0 ||
-    props.localServerUrl !== '' ||
-    props.localServerModels.length > 0,
-)
+const promptChanged = computed(() => promptDraft.value !== props.role)
 
 function editPrompt(): void {
   promptDraft.value = props.role
-  keyDraft.value = props.openrouterKey
-  modelsDraft.value = props.openrouterModels
-  localUrlDraft.value = props.localServerUrl
-  localModelsDraft.value = props.localServerModels
-  newModelSlug.value = ''
-  newModelLabel.value = ''
-  newModelThinking.value = false
-  newLocalModel.value = ''
-  newLocalLabel.value = ''
-  newLocalThinking.value = false
   editingPrompt.value = true
 }
 
 function savePrompt(): void {
   // An emptied box means the shipped brief, not a model with no instructions at all.
   emit('update:role', promptDraft.value.trim() ? promptDraft.value : DEFAULT_ROLE)
-  emit('update:openrouterKey', keyDraft.value)
-  emit('update:openrouterModels', modelsDraft.value)
-  emit('update:localServerUrl', localUrlDraft.value)
-  emit('update:localServerModels', localModelsDraft.value)
   editingPrompt.value = false
 }
 
@@ -292,14 +150,18 @@ watch(
           <button v-if="busy" @click="emit('stop')">Stop</button>
           <button
             class="prompt"
-            :class="{ custom: settingsCustomized, open: editingPrompt }"
-            title="System prompt, OpenRouter API key and added models"
-            aria-label="Chat settings"
+            :class="{ custom: !roleIsDefault, open: editingPrompt }"
+            :title="
+              roleIsDefault
+                ? 'What the model is told before the code'
+                : 'A rewritten brief is in use — click to edit or restore it'
+            "
+            aria-label="Prompt"
             @click="editingPrompt ? (editingPrompt = false) : editPrompt()"
           >
             <span class="cog" aria-hidden="true">⚙</span>
-            <span class="label">Settings</span>
-            <span v-if="settingsCustomized" class="edited" aria-hidden="true">·</span>
+            <span class="label">Prompt</span>
+            <span v-if="!roleIsDefault" class="edited" aria-hidden="true">·</span>
           </button>
         </div>
         <div v-if="status === 'downloading'" class="bar">
@@ -360,152 +222,8 @@ watch(
           Restore default prompt
         </button>
 
-        <label class="key-label" for="openrouter-key">OpenRouter API key</label>
-        <p class="hint">
-          Needed only for an OpenRouter-hosted model. Stored in this browser only, and never
-          included in a share link — the key stays out of the URL the way the prompt above does not
-          have to.
-        </p>
-        <div class="key-row">
-          <input
-            id="openrouter-key"
-            v-model="keyDraft"
-            type="password"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="sk-or-…"
-            class="key-input"
-          />
-          <button :disabled="!keyDraft" @click="keyDraft = ''">Clear</button>
-        </div>
-
-        <label class="key-label">OpenRouter models</label>
-        <p class="hint">
-          Beyond the ones shipped above — any model OpenRouter itself lists. Enter the slug from its
-          model page (for example <code>mistralai/mistral-large</code>), and tick <em>thinks</em> if
-          that page lists <code>reasoning</code> among its parameters: the think switch is only sent
-          for a model marked so.
-        </p>
-        <ul v-if="modelsDraft.length > 0" class="models-list">
-          <li v-for="entry in modelsDraft" :key="entry.model" class="models-row">
-            <span class="models-label" :title="entry.model">{{ entry.label }}</span>
-            <span v-if="entry.thinking" class="models-thinking" title="Has a thinking mode">
-              thinks
-            </span>
-            <button class="models-remove" @click="removeModel(entry.model)">Remove</button>
-          </li>
-        </ul>
-        <div class="models-add">
-          <input
-            v-model="newModelSlug"
-            type="text"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="vendor/model-slug"
-            class="models-input"
-            @keydown.enter.prevent="addModel"
-          />
-          <input
-            v-model="newModelLabel"
-            type="text"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="Label (optional)"
-            class="models-input"
-            @keydown.enter.prevent="addModel"
-          />
-          <label class="models-think" title="Offers the thinking checkbox and asks it to reason">
-            <input v-model="newModelThinking" type="checkbox" />
-            thinks
-          </label>
-          <button :disabled="!newModelSlug.trim() || newModelTaken" @click="addModel">Add</button>
-        </div>
-        <p v-if="newModelTaken" class="hint warn">Already on the list.</p>
-
-        <label class="key-label" for="local-server-url">Local model server</label>
-        <p class="hint">
-          Ollama, LM Studio, llama.cpp or vLLM running on this machine — anything serving the OpenAI
-          API. Nothing is requested until an address is set, and the code never leaves the machine.
-          The server has to allow this page's origin: Ollama needs
-          <code>OLLAMA_ORIGINS={{ origin }}</code> for anything but a loopback page, and LM Studio
-          has a CORS switch. Answers cut short usually mean the server's own context is small —
-          Ollama's <code>num_ctx</code> defaults to 4096 whatever the model supports.
-        </p>
-        <div class="key-row">
-          <input
-            id="local-server-url"
-            v-model="localUrlDraft"
-            type="text"
-            autocomplete="off"
-            spellcheck="false"
-            :placeholder="EXAMPLE_LOCAL_URL"
-            class="key-input"
-          />
-          <button :disabled="!localUrlDraft" @click="localUrlDraft = ''">Clear</button>
-        </div>
-        <template v-if="localServerUrl && discovered.length > 0">
-          <p class="hint">
-            Found on the server. The listing cannot say which of them reason, so tick
-            <em>thinks</em> on one that does: the think switch is only sent for a model marked so.
-          </p>
-          <ul class="models-list local discovered">
-            <li v-for="name in discovered" :key="name" class="models-row">
-              <span class="models-label" :title="name">{{ name }}</span>
-              <label
-                class="models-think"
-                title="Offers the thinking checkbox and asks it to reason"
-              >
-                <input type="checkbox" @change="flagDiscovered(name)" />
-                thinks
-              </label>
-            </li>
-          </ul>
-        </template>
-        <p v-else-if="localServerUrl" class="hint warn">
-          No models found there yet — the address may be wrong, the server down, or it may not list
-          them. Name one below to use it anyway.
-        </p>
-
-        <ul v-if="localModelsDraft.length > 0" class="models-list local">
-          <li v-for="entry in localModelsDraft" :key="entry.model" class="models-row">
-            <span class="models-label" :title="entry.model">{{ entry.label }}</span>
-            <span v-if="entry.thinking" class="models-thinking" title="Has a thinking mode">
-              thinks
-            </span>
-            <button class="models-remove" @click="removeLocalModel(entry.model)">Remove</button>
-          </li>
-        </ul>
-        <div class="models-add local">
-          <input
-            v-model="newLocalModel"
-            type="text"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="model name on the server"
-            class="models-input"
-            @keydown.enter.prevent="addLocalModel"
-          />
-          <input
-            v-model="newLocalLabel"
-            type="text"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="Label (optional)"
-            class="models-input"
-            @keydown.enter.prevent="addLocalModel"
-          />
-          <label class="models-think" title="Offers the thinking checkbox and asks it to reason">
-            <input v-model="newLocalThinking" type="checkbox" />
-            thinks
-          </label>
-          <button :disabled="!newLocalModel.trim() || newLocalTaken" @click="addLocalModel">
-            Add
-          </button>
-        </div>
-        <p v-if="newLocalTaken" class="hint warn">Already on the list.</p>
-
         <div class="prompt-actions">
-          <button class="save" :disabled="!settingsChanged" @click="savePrompt">Save</button>
+          <button class="save" :disabled="!promptChanged" @click="savePrompt">Save</button>
           <button @click="editingPrompt = false">Cancel</button>
         </div>
       </section>
@@ -683,8 +401,8 @@ button:disabled {
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px 12px;
-  /* Three settings now share this panel, and the added-models list has no fixed size — without
-     this, a reader with several of their own models, or a short pane, could not reach Save. */
+  /* A hunter's brief runs to several paragraphs and the textarea has a floor, so a short pane
+     scrolls rather than squeezing Save off the bottom. */
   overflow-y: auto;
 }
 
@@ -728,7 +446,7 @@ button:disabled {
 .prompt-text {
   flex: 1;
   /* A floor, not `0`: the panel scrolls past this rather than squeezing the prompt itself away to
-     fit the models list below it. */
+     fit the buttons below it. */
   min-height: 120px;
   resize: none;
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -748,111 +466,6 @@ button:disabled {
 
 .restore {
   align-self: flex-start;
-}
-
-.key-label {
-  font-size: 12px;
-  color: var(--text);
-}
-
-.key-row {
-  display: flex;
-  gap: 6px;
-}
-
-.key-input {
-  flex: 1;
-  min-width: 0;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font: inherit;
-  font-size: 12px;
-  padding: 6px 8px;
-}
-
-.key-input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.models-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.models-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-}
-
-.models-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.models-thinking {
-  color: var(--dim);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.models-remove {
-  margin-left: auto;
-}
-
-/* A discovered row has no Remove; its checkbox takes that seat. */
-.models-list.discovered .models-think {
-  margin-left: auto;
-}
-
-.models-add {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-
-.models-input {
-  flex: 1 1 140px;
-  min-width: 0;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font: inherit;
-  font-size: 12px;
-  padding: 6px 8px;
-}
-
-.models-input:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-.models-think {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--dim);
-  font-size: 12px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.models-think input {
-  accent-color: var(--accent);
-  margin: 0;
-  cursor: pointer;
 }
 
 .model {

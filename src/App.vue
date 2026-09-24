@@ -5,6 +5,7 @@ import AstPane from './components/AstPane.vue'
 import ChatPane from './components/ChatPane.vue'
 import EditorPane from './components/EditorPane.vue'
 import FileTabs from './components/FileTabs.vue'
+import SettingsPane from './components/SettingsPane.vue'
 import SplitPane from './components/SplitPane.vue'
 import TracePane from './components/TracePane.vue'
 import { useAgents } from './composables/useAgents'
@@ -61,7 +62,7 @@ const revealToken = ref(0)
 /** Set when a trace row asks for a scroll, so the reveal lands on that exact step. */
 const revealSpan = ref<Span | null>(null)
 
-const activeTab = ref<'ast' | 'trace' | 'chat' | 'agents'>('ast')
+const activeTab = ref<'ast' | 'trace' | 'chat' | 'agents' | 'settings'>('ast')
 // Shallow: the graph is replaced wholesale and must never be deeply proxied, like the AST.
 const trace = shallowRef<FlowTrace | null>(null)
 /** A step the trace pane is pointing at, which wins over the AST row under the pointer. */
@@ -73,12 +74,13 @@ const model = useModel()
 
 /** The reader's OpenRouter key, if any — kept out here rather than in `useChat`, since it is a
  *  model-provider setting, not a conversation one, and `useAgents` needs the same catalogue
- *  gating `useModel` already reads it for. */
+ *  gating `useModel` already reads it for. That is also why the settings *tab* holds it: one key,
+ *  one address and one added catalogue, whichever pane ends up spending them. */
 const openrouterKey = useOpenRouterKey()
 
 /** OpenRouter models the reader has added themselves, beyond the shipped three. `usableModels()`
  *  reads these from `localStorage` directly, so `model.refreshModels()` is what tells the picker
- *  a fresh one just showed up — the reactive list here exists for the settings panel to edit, not
+ *  a fresh one just showed up — the reactive list here exists for the settings pane to edit, not
  *  for `useModel` to watch on its own. */
 const openrouterModels = useOpenRouterModels()
 watch(openrouterModels.models, () => model.refreshModels(), { deep: true })
@@ -110,9 +112,22 @@ const agents = useAgents(model, files, activeFileId)
 // bar for a later reload to snap back to.
 dropFragment()
 
+// What can run here is a pane's first cost, so it is settled on the first look at a pane that
+// cares — the settings tab included, since the local server's discovery call is the same probe and
+// its list is what that tab is there to show.
 watch(activeTab, (tab) => {
-  if (tab === 'chat' || tab === 'agents') model.probe()
+  if (tab === 'chat' || tab === 'agents' || tab === 'settings') model.probe()
 })
+
+/** Whether any provider setting has been given a value, which the settings tab's cogwheel carries:
+ *  a configured key or server address is otherwise invisible from anywhere in the app. */
+const providersConfigured = computed(
+  () =>
+    openrouterKey.key.value !== '' ||
+    openrouterModels.models.value.length > 0 ||
+    localServerUrl.url.value !== '' ||
+    localServerModels.models.value.length > 0,
+)
 
 const editorPane = ref<InstanceType<typeof EditorPane>>()
 
@@ -337,6 +352,18 @@ function onFilePicked(event: Event): void {
               <button :class="{ active: activeTab === 'agents' }" @click="activeTab = 'agents'">
                 Agents
               </button>
+              <!-- Where the models are reached from, which is neither pane's alone. The cogwheel
+                   carries it without a word, at the far end of the row, away from the four tabs
+                   that are things to look at rather than things to set. -->
+              <button
+                class="settings"
+                :class="{ active: activeTab === 'settings', custom: providersConfigured }"
+                title="Models and providers"
+                aria-label="Settings"
+                @click="activeTab = 'settings'"
+              >
+                <span class="cog" aria-hidden="true">⚙</span>
+              </button>
             </nav>
 
             <AstPane
@@ -367,10 +394,6 @@ function onFilePicked(event: Event): void {
               :thinking="model.thinking.value"
               :role="chat.role.value"
               :role-is-default="chat.roleIsDefault.value"
-              :openrouter-key="openrouterKey.key.value"
-              :openrouter-models="openrouterModels.models.value"
-              :local-server-url="localServerUrl.url.value"
-              :local-server-models="localServerModels.models.value"
               :status="model.status.value"
               :progress="model.progress.value"
               :messages="chat.messages.value"
@@ -381,10 +404,6 @@ function onFilePicked(event: Event): void {
               @update:model="model.model.value = $event"
               @update:thinking="model.thinking.value = $event"
               @update:role="chat.setRole($event)"
-              @update:openrouter-key="openrouterKey.key.value = $event"
-              @update:openrouter-models="openrouterModels.models.value = $event"
-              @update:local-server-url="localServerUrl.url.value = $event"
-              @update:local-server-models="localServerModels.models.value = $event"
               @ask="chat.ask($event)"
               @stop="chat.stop()"
               @new-chat="chat.newChat()"
@@ -411,6 +430,18 @@ function onFilePicked(event: Event): void {
               @run="agents.run()"
               @stop="agents.stop()"
               @clear="agents.clear()"
+            />
+            <SettingsPane
+              v-else-if="activeTab === 'settings'"
+              :models="model.models.value"
+              :openrouter-key="openrouterKey.key.value"
+              :openrouter-models="openrouterModels.models.value"
+              :local-server-url="localServerUrl.url.value"
+              :local-server-models="localServerModels.models.value"
+              @update:openrouter-key="openrouterKey.key.value = $event"
+              @update:openrouter-models="openrouterModels.models.value = $event"
+              @update:local-server-url="localServerUrl.url.value = $event"
+              @update:local-server-models="localServerModels.models.value = $event"
             />
           </div>
         </template>
@@ -567,6 +598,23 @@ main {
   color: var(--text);
   background: var(--bg);
   border-color: var(--border);
+}
+
+/* The far end of the row: a setting rather than a view, and the only tab with no word on it. */
+.tabs button.settings {
+  margin-left: auto;
+  padding: 5px 10px;
+}
+
+.cog {
+  font-size: 13px;
+  line-height: 1;
+}
+
+/* A configured key or server address is invisible everywhere else in the app, so the tab carries
+   the fact — the same gold the panes use for a setting away from what shipped. */
+.tabs button.settings.custom {
+  color: var(--gold);
 }
 
 .badge {

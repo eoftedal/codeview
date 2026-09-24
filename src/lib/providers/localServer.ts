@@ -119,7 +119,7 @@ export const localServer: Provider = {
     // check and this call should still fail plainly rather than post to a relative path.
     const base = getLocalServerUrl()
     if (!base) {
-      throw new Error('No local model server is configured — add its address in the chat settings.')
+      throw new Error('No local model server is configured — add its address in the settings tab.')
     }
 
     return openAiEngine(

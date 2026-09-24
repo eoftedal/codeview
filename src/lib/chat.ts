@@ -522,8 +522,8 @@ export function describeStatus(
       // Two providers are missing a setting rather than a capability, and they are missing
       // different ones — naming the wrong one is worse than saying nothing.
       return choice?.provider === 'localserver'
-        ? 'add your model server’s address in the chat settings to use this'
-        : 'add an OpenRouter API key in the chat settings to use this'
+        ? 'add your model server’s address in the settings tab to use this'
+        : 'add an OpenRouter API key in the settings tab to use this'
     case 'downloadable':
       return size && size !== 'no download'
         ? `${size} downloads on the first question, then it is cached`

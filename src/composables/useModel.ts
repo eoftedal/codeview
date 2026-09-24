@@ -176,12 +176,12 @@ export function useModel(): ModelHost {
   async function load(selected: ModelChoice): Promise<ModelEngine> {
     if (selected.provider === 'openrouter' && getOpenRouterKey() === null) {
       throw new Error(
-        `${selected.label} needs an OpenRouter API key — add one in the chat settings.`,
+        `${selected.label} needs an OpenRouter API key — add one in the settings tab.`,
       )
     }
     if (selected.provider === 'localserver' && getLocalServerUrl() === null) {
       throw new Error(
-        `${selected.label} needs a local model server address — add one in the chat settings.`,
+        `${selected.label} needs a local model server address — add one in the settings tab.`,
       )
     }
     return providerFor(selected.provider).load({

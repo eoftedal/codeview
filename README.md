@@ -280,6 +280,16 @@ Where the browser has neither a built-in model nor a working GPU adapter — `na
 exist and still hand back nothing — the tab says only that no language model is available in
 this browser, and does nothing else.
 
+Which models are on offer is partly a matter of configuration, and that lives in the **⚙** tab at
+the right-hand end of the row rather than under the chat: an OpenRouter API key, any OpenRouter slug
+you want in the catalogue yourself, and the address of a model server running on your own machine.
+All three are the same facts whether a chat or an agent run spends them, which is why they sit
+beside both panes instead of inside one — the tab's cogwheel goes gold once any of them is set,
+since a configured key is otherwise invisible from anywhere in the app. Nothing there is stored
+until **Save** (the address in particular starts a discovery request the moment it is kept), and
+none of it ever rides a share link. What stays under each pane's own cogwheel is what belongs to
+that pane alone: the chat's brief, the agents' team.
+
 The system prompt makes the model a security engineer reading the code as a SAST tool would —
 taint flowing from **sources** (request fields, environment, files, anything the code does not
 control) to **sinks** (queries, shell commands, `eval`, paths, DOM writes) — and carries
@@ -298,7 +308,7 @@ one cannot render the call the message would answer, and one runs chat templates
 role outright. The acknowledgement is there because some chat templates refuse two user turns in a
 row.
 
-The **⚙ System prompt** button opens that brief for editing — for another kind of review, another output
+The **⚙ Prompt** button opens that brief for editing — for another kind of review, another output
 shape, another language. What you write replaces the role and the two definitions; the open files
 are appended below it either way, since they are generated from the editor rather than typed.
 **Restore default** puts the shipped brief back, a rewritten one is remembered between visits and
@@ -462,6 +472,8 @@ src/components/AstNodeRow.vue   recursive row
 src/components/TracePane.vue    trace root, summary, external-source jump
 src/components/TraceRow.vue     recursive row
 src/components/ChatPane.vue     conversation, composer, model picker
+src/components/AgentsPane.vue   the run's transcript, the task box, the team editor
+src/components/SettingsPane.vue  key, server address, the reader's own catalogue additions
 src/lib/providers/*.ts     built-in / WebLLM / Transformers.js adapters
 src/components/MarkdownText.vue  answer blocks; MarkdownSpans.vue, inline
 src/components/SplitPane.vue    draggable divider

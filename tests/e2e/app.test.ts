@@ -53,6 +53,14 @@ async function clickAt(
   await new Promise((resolve) => setTimeout(resolve, 150))
 }
 
+/** The chat tab, third on the row — the settings cogwheel that follows Agents is the fifth, and
+ *  is addressed by its class rather than by index. */
+async function openChat(target: Page = page): Promise<void> {
+  const tabs = await target.$$('.tabs button')
+  await tabs[2]!.click()
+  await target.waitForSelector('.chat-pane')
+}
+
 const definitionText = () =>
   page.$eval('.definition', (el) => el.textContent?.replace(/\s+/g, ' ').trim() ?? '')
 
@@ -603,12 +611,23 @@ describe('the chat pane picks a model honestly', () => {
     await fresh.evaluateOnNewDocument(setup)
     await fresh.goto(URL, { waitUntil: 'networkidle0' })
     await fresh.waitForSelector('.row')
-    const tabs = await fresh.$$('.tabs button')
-    await tabs[2]!.click()
-    await fresh.waitForSelector('.chat-pane')
+    await openChat(fresh)
     // The GPU probe is async, and what the pane offers depends on how it lands.
     await new Promise((resolve) => setTimeout(resolve, 400))
     return fresh
+  }
+
+  /** The cogwheel at the far end of the tab row. A key, a server address and the reader's own
+   *  catalogue additions are the same facts for a chat and for an agent run, so they are no longer
+   *  reachable through a conversation's own settings — every case below goes here for them. */
+  async function openSettings(target: Page): Promise<void> {
+    await target.waitForSelector('.tabs button.settings')
+    await target.click('.tabs button.settings')
+    await target.waitForSelector('.settings-pane')
+  }
+
+  async function saveSettings(target: Page): Promise<void> {
+    await target.click('.settings-pane .save')
   }
 
   it('still offers OpenRouter when the browser can run neither of the others', async () => {
@@ -765,23 +784,23 @@ describe('the chat pane picks a model honestly', () => {
 
       await fresh.goto(URL, { waitUntil: 'networkidle0' })
       await fresh.waitForSelector('.row')
-      const tabs = await fresh.$$('.tabs button')
-      await tabs[2]!.click()
-      await fresh.waitForSelector('.chat-pane')
+      await openChat(fresh)
       await new Promise((resolve) => setTimeout(resolve, 400))
 
-      await fresh.click('.prompt')
-      await fresh.type('.key-input', 'sk-or-test-key')
-      await fresh.click('.prompt-editor .save')
+      await openSettings(fresh)
+      await fresh.type('#openrouter-key', 'sk-or-test-key')
+      await saveSettings(fresh)
       await new Promise((resolve) => setTimeout(resolve, 100))
 
-      expect(await fresh.$eval('.prompt', (el) => el.className)).toContain('custom')
+      // The tab carries the fact, since a key set is invisible from anywhere else in the app.
+      expect(await fresh.$eval('.tabs button.settings', (el) => el.className)).toContain('custom')
       expect(await fresh.evaluate(() => localStorage.getItem('codeview:openrouter-key'))).toBe(
         'sk-or-test-key',
       )
 
       // A question against a keyed OpenRouter model now streams a real reply rather than
       // complaining.
+      await openChat(fresh)
       await fresh.select('.model', 'openrouter-gpt-4o-mini')
       await new Promise((resolve) => setTimeout(resolve, 200))
       await fresh.type('.composer textarea', 'What does this do?')
@@ -804,12 +823,9 @@ describe('the chat pane picks a model honestly', () => {
       )
 
       // …and clearing it removes the stored value rather than writing an empty one.
-      const reloadedTabs = await fresh.$$('.tabs button')
-      await reloadedTabs[2]!.click()
-      await fresh.waitForSelector('.chat-pane')
-      await fresh.click('.prompt')
-      await fresh.click('.prompt-editor .key-row button')
-      await fresh.click('.prompt-editor .save')
+      await openSettings(fresh)
+      await fresh.click('.settings-pane .key-row button')
+      await saveSettings(fresh)
       await new Promise((resolve) => setTimeout(resolve, 100))
       expect(await fresh.evaluate(() => localStorage.getItem('codeview:openrouter-key'))).toBeNull()
     } finally {
@@ -826,16 +842,17 @@ describe('the chat pane picks a model honestly', () => {
       })
     })
     try {
-      await fresh.click('.prompt')
+      await openSettings(fresh)
       await fresh.type('.models-add .models-input', 'mistralai/mistral-large')
       // The second text input is the optional label.
       const labelInput = await fresh.$$('.models-add .models-input')
       await labelInput[1]!.type('Mistral Large')
       await fresh.click('.models-add button')
-      await fresh.click('.prompt-editor .save')
+      await saveSettings(fresh)
       await new Promise((resolve) => setTimeout(resolve, 150))
 
       // It shows up in the picker under the label given it, alongside the shipped three.
+      await openChat(fresh)
       const options = await fresh.$$eval('.model option', (nodes) =>
         nodes.map((node) => node.textContent?.trim()),
       )
@@ -862,16 +879,17 @@ describe('the chat pane picks a model honestly', () => {
       )
 
       // Removing it again takes it back out of the picker and out of storage.
-      await fresh.click('.prompt')
+      await openSettings(fresh)
       await new Promise((resolve) => setTimeout(resolve, 100))
       expect(await fresh.$$eval('.models-remove', (nodes) => nodes.length)).toBe(1)
       await fresh.click('.models-remove')
       expect(await fresh.$$eval('.models-remove', (nodes) => nodes.length)).toBe(0)
-      await fresh.click('.prompt-editor .save')
+      await saveSettings(fresh)
       await new Promise((resolve) => setTimeout(resolve, 150))
       expect(
         await fresh.evaluate(() => localStorage.getItem('codeview:openrouter-models')),
       ).toBeNull()
+      await openChat(fresh)
       expect(
         await fresh.$$eval('.model option', (nodes) =>
           nodes.map((node) => node.textContent?.trim()),
@@ -962,18 +980,24 @@ describe('the chat pane picks a model honestly', () => {
       }) as typeof window.fetch
     })
     try {
-      await fresh.click('.prompt')
+      await openSettings(fresh)
       // A bare host is the spelling readers reach for, and it is stored canonical.
       await fresh.type('#local-server-url', 'localhost:11434')
-      await fresh.click('.prompt-editor .save')
+      await saveSettings(fresh)
       await new Promise((resolve) => setTimeout(resolve, 400))
 
       expect(await fresh.evaluate(() => localStorage.getItem('codeview:local-server-url'))).toBe(
         'http://localhost:11434/v1',
       )
+      // The field shows what was *kept*, not what was typed — which is the only way a reader
+      // learns the scheme and the `/v1` were added for them.
+      expect(await fresh.$eval('#local-server-url', (el) => (el as HTMLInputElement).value)).toBe(
+        'http://localhost:11434/v1',
+      )
 
       // Both models the server reported are now in the picker, from the one `/models` call that
       // also settled whether anything was listening.
+      await openChat(fresh)
       const options = await fresh.$$eval('.model option', (nodes) =>
         nodes.map((node) => node.textContent?.trim()),
       )
@@ -1084,15 +1108,16 @@ describe('the chat pane picks a model honestly', () => {
       }) as typeof window.fetch
     })
     try {
-      await fresh.click('.prompt')
+      await openSettings(fresh)
       await fresh.type('.models-add.local .models-input', 'deepseek-r1:8b')
       const labelInput = await fresh.$$('.models-add.local .models-input')
       await labelInput[1]!.type('DeepSeek R1')
       await fresh.click('.models-add.local .models-think input')
       await fresh.click('.models-add.local button')
-      await fresh.click('.prompt-editor .save')
+      await saveSettings(fresh)
       await new Promise((resolve) => setTimeout(resolve, 300))
 
+      await openChat(fresh)
       expect(
         await fresh.$$eval('.model option', (nodes) =>
           nodes.map((node) => node.textContent?.trim()),
@@ -1405,16 +1430,14 @@ describe('the chat pane picks a model honestly', () => {
           configurable: true,
         })
       })
-      const openChat = async () => {
+      const reopenChat = async () => {
         await fresh.waitForSelector('.row')
-        const tabs = await fresh.$$('.tabs button')
-        await tabs[2]!.click()
-        await fresh.waitForSelector('.chat-pane')
+        await openChat(fresh)
         await new Promise((resolve) => setTimeout(resolve, 400))
       }
 
       await fresh.goto(URL, { waitUntil: 'networkidle0' })
-      await openChat()
+      await reopenChat()
       await fresh.click('.prompt')
       await fresh.$eval('.prompt-text', (el) => {
         const box = el as HTMLTextAreaElement
@@ -1428,7 +1451,7 @@ describe('the chat pane picks a model honestly', () => {
       )
 
       await fresh.reload({ waitUntil: 'networkidle0' })
-      await openChat()
+      await reopenChat()
       expect(await fresh.$eval('.prompt', (el) => el.className)).toContain('custom')
       await fresh.click('.prompt')
       expect(await fresh.$eval('.prompt-text', (el) => (el as HTMLTextAreaElement).value)).toBe(

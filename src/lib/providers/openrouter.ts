@@ -56,7 +56,7 @@ export const openrouter: Provider = {
     // it) should still fail plainly rather than send an unauthenticated request. Captured once and
     // closed over by every session this engine opens.
     const key = getOpenRouterKey()
-    if (!key) throw new Error('OpenRouter needs an API key — add one in the chat settings.')
+    if (!key) throw new Error('OpenRouter needs an API key — add one in the settings tab.')
 
     return openAiEngine(
       {

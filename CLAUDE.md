@@ -128,7 +128,7 @@ disappearing — `Availability`'s `'needs-key'` — and `useModel`'s `engine()`/
 load one without a key, throwing a message that names the missing key specifically, before ever
 attempting a request. The four shipped OpenRouter entries (GPT-4o mini, Claude Haiku 4.5, Claude
 Sonnet 5, GLM-5.3 Flash) are not the whole story: a reader can
-add any OpenRouter-hosted slug of their own from the same settings panel
+add any OpenRouter-hosted slug of their own from the same settings tab
 (`providers/openrouterModels.ts`, `localStorage` key `codeview:openrouter-models`, turned into an
 ordinary `ModelChoice` by `toModelChoice` so nothing downstream treats it differently). **A shipped
 slug is a promise OpenRouter can withdraw**: `anthropic/claude-3.5-haiku` was retired from its
@@ -180,11 +180,31 @@ each pick a different one, and a server that writes `<think>` into `content` nee
 first field alone left the switch dead there, a thinking model thinking whatever it said. Both are
 sent **only** for an entry the reader flagged, since these servers disagree about unknown body
 fields and a discovered entry must not be what finds that out; what `/models` cannot say the
-settings panel now can, listing the discovered models each with a `thinks` box that _names_ the
+settings pane now can, listing the discovered models each with a `thinks` box that _names_ the
 model (the hand-added override the list already was) rather than adding a flag of its own. The failure that matters is the one with no
 `Response` at all: `fetch` rejects with a `TypeError`, and `networkMessage` names the address and
 all three causes rather than letting "Failed to fetch" stand. Its address is no part of a share
 link, for the key's reason and one more — it means nothing wherever the link is opened.
+
+**How a model is reached is a fifth tab, not a pane's own setting.** `SettingsPane.vue` is the
+cogwheel at the far end of the row — no word on it, and `margin-left: auto` away from the four tabs
+that are things to look at rather than things to set — and it holds the OpenRouter key, the reader's
+added OpenRouter slugs, the local server's address and the models named on it by hand. Those four
+were the chat's own settings panel while the chat was the only thing that spent them, which had the
+agents tab sending a reader into a conversation they did not want in order to configure a run: they
+are the same facts whichever pane asks, so they sit beside both. What did _not_ move is what belongs
+to one asker — the chat's brief and its `Start from` shelf (its cogwheel now says **Prompt**, and
+goes gold only for a rewritten brief), the agents' team and each agent's own model. The picker and
+the `think` switch stay in both toolbars: they are the choice, not the configuration, and a reader
+changing model mid-conversation should not have to leave it. Its own fields are **drafts under one
+Save**, and that is load-bearing rather than inherited: `App.vue` probes the server whenever the
+stored address changes, so a field writing through per keystroke would ask a dozen half-typed hosts
+on the way to the real one. Each draft then _follows_ its stored value (`watch` per prop), since an
+address is stored canonical and a draft left holding `localhost:11434` would read as unsaved against
+the `http://localhost:11434/v1` that was kept. The tab's cogwheel goes gold once any of the four is
+set — a configured key is invisible from everywhere else in the app — and `probe()` now runs on
+opening this tab too, since the local server's discovery call _is_ that probe and its list is what
+the tab exists to show.
 
 `MODELS` in `chat.ts` is a static list, so `providers/index.ts`'s `allModels()` is what actually merges the
 shipped catalogue with the reader's own — `usableModels()` and the new `findModel()` (the one
@@ -348,7 +368,7 @@ naming the model, filed against the agent, rather than running it on something e
 **The hunters are a shelf, not a mode.** `src/lib/hunters.ts` is one `Record<string, string>` —
 the name the picker shows, the complete system prompt — built from a shared opening and one of two
 closings around the per-class half in `FOCUS`, so a change to how a finding is reported is one edit
-rather than sixteen. Both panes offer them (`ChatPane`'s settings panel, and every agent card in
+rather than sixteen. Both panes offer them (`ChatPane`'s prompt editor, and every agent card in
 `AgentsPane`, where the two shipped briefs sit in the same select), and picking one **only writes
 the textarea**: there is no hunter id kept, no new key in a link and nothing downstream that knows
 a brief came from here — an edited hunter is simply a brief of the reader's own, which is why the
