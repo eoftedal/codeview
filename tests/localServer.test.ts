@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { normalizeBaseUrl } from '../src/lib/providers/localServerUrl'
 import { toModelChoice } from '../src/lib/providers/localServerModels'
+import { localReasoningFields } from '../src/lib/providers/localServer'
 
 // The storage and discovery halves of this provider are browser-bound and covered by the e2e
 // suite, the same way the OpenRouter key and its added models are. What is pure is the reading of
@@ -80,5 +81,27 @@ describe('toModelChoice', () => {
   it('takes the default code budget, or a smaller one named by hand', () => {
     expect(toModelChoice(entry).maxCodeChars).toBe(14_000)
     expect(toModelChoice({ ...entry, maxCodeChars: 4_000 }).maxCodeChars).toBe(4_000)
+  })
+})
+
+describe('localReasoningFields', () => {
+  it('sends nothing for an entry nobody flagged, whichever way the switch is', () => {
+    // These servers disagree about unknown body fields, and a discovered entry must not be the
+    // one that finds out.
+    expect(localReasoningFields(false, true)).toEqual({})
+    expect(localReasoningFields(false, false)).toEqual({})
+  })
+
+  it('asks in both dialects, since Ollama reads one and llama.cpp and vLLM the other', () => {
+    expect(localReasoningFields(true, true)).toEqual({
+      chat_template_kwargs: { enable_thinking: true },
+      reasoning_effort: 'medium',
+    })
+    // `none` is what Ollama turns a thinking model off with; `enable_thinking: false` alone never
+    // reached its template, which is how the switch used to do nothing there.
+    expect(localReasoningFields(true, false)).toEqual({
+      chat_template_kwargs: { enable_thinking: false },
+      reasoning_effort: 'none',
+    })
   })
 })

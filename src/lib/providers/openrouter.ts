@@ -75,6 +75,12 @@ export const openrouter: Provider = {
         reasoningFields: (reasons, asked) => (reasons ? { reasoning: { enabled: asked } } : {}),
         errorMessage,
         networkMessage: () => 'OpenRouter could not be reached — check this machine’s connection.',
+        // A provider dropping the connection after the response was committed arrives inside the
+        // stream, with the provider's own words where it gave any.
+        streamError: (error) =>
+          error?.message
+            ? `OpenRouter: ${error.message}`
+            : 'OpenRouter: the provider stopped mid-answer without saying why',
       },
       { model, thinking, sampling, thinkingSampling },
     )

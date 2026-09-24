@@ -342,6 +342,10 @@ describe('embedding parameters', () => {
   async function open(query: string) {
     const fresh = await browser.newPage()
     await fresh.setViewport({ width: 1400, height: 1000 })
+    // A query with no `src` falls back to whatever the last page stored — and the test before
+    // this group deliberately leaves a two-line edit in `localStorage` to prove a reload keeps it.
+    // Cleared here so these pages start from the sample, whatever ran before them.
+    await fresh.evaluateOnNewDocument(() => localStorage.clear())
     await fresh.goto(`${URL}${query}`, { waitUntil: 'networkidle0' })
     await fresh.waitForSelector('.view-line')
     await new Promise((resolve) => setTimeout(resolve, 600))
@@ -623,7 +627,8 @@ describe('the chat pane picks a model honestly', () => {
       )
       expect(options).toEqual([
         'GPT-4o mini (OpenRouter) · no download',
-        'Claude 3.5 Haiku (OpenRouter) · no download',
+        'Claude Haiku 4.5 (OpenRouter) · no download',
+        'Claude Sonnet 5 (OpenRouter) · no download',
         'GLM-5.3 Flash (OpenRouter) · no download',
       ])
       expect(await fresh.$eval('.chat-pane', (el) => el.textContent)).not.toContain(
@@ -657,7 +662,8 @@ describe('the chat pane picks a model honestly', () => {
       expect(options).toEqual([
         'Browser built-in · no download',
         'GPT-4o mini (OpenRouter) · no download',
-        'Claude 3.5 Haiku (OpenRouter) · no download',
+        'Claude Haiku 4.5 (OpenRouter) · no download',
+        'Claude Sonnet 5 (OpenRouter) · no download',
         'GLM-5.3 Flash (OpenRouter) · no download',
       ])
     } finally {

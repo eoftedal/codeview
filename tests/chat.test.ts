@@ -172,8 +172,27 @@ describe('the model catalogue', () => {
       'qwen3.5-9b',
       'gemma-4-e2b',
       'gemma-4-e4b',
+      'openrouter-claude-haiku',
+      'openrouter-claude-sonnet',
       'openrouter-glm-5.3-flash',
     ])
+  })
+
+  it('points the Claude entries at slugs OpenRouter still serves, flagged as reasoning', () => {
+    // `anthropic/claude-3.5-haiku` was retired from OpenRouter's catalogue, and a retired slug
+    // fails on the first question. The id outlives the slug, so a remembered pick still lands.
+    expect(modelById('openrouter-claude-haiku')).toMatchObject({
+      provider: 'openrouter',
+      model: 'anthropic/claude-haiku-4.5',
+      thinking: true,
+    })
+    expect(modelById('openrouter-claude-sonnet')).toMatchObject({
+      provider: 'openrouter',
+      model: 'anthropic/claude-sonnet-5',
+      thinking: true,
+    })
+    // GPT-4o mini lists no `reasoning` parameter on OpenRouter, so it must never be sent one.
+    expect(modelById('openrouter-gpt-4o-mini')?.thinking).toBeUndefined()
   })
 
   it('runs each ONNX model at the quantisation its own repo asks for', () => {

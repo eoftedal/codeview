@@ -20,7 +20,7 @@ const props = defineProps<{
   roleIsDefault: boolean
   /** The reader's OpenRouter key, or '' if none is set. Only OpenRouter models need it. */
   openrouterKey: string
-  /** OpenRouter models the reader has added themselves, beyond the shipped three. */
+  /** OpenRouter models the reader has added themselves, beyond the shipped ones. */
   openrouterModels: CustomOpenRouterModel[]
   /** The address of the reader's own model server, or '' if none is set. This is what the local
    *  provider offers models at all for: with no address there are no local entries to pick. */
@@ -158,16 +158,29 @@ function removeLocalModel(model: string): void {
  *  site, which is exactly when this goes wrong. */
 const origin = computed(() => location.origin)
 
-/** What the server reported, as opposed to what the reader named: the picker's local entries less
- *  the hand-added ones. Shown as a count, since the names are already in the picker above. */
-const discoveredCount = computed(
-  () =>
-    props.models.filter(
+/**
+ * What the server reported and the reader has not named: the picker's local entries less the
+ * hand-added ones, saved and drafted alike. Listed by name rather than counted, so that any of them
+ * can be flagged as thinking in place — `/models` cannot say which of them reason, and the think
+ * switch is only ever sent for an entry marked so. Flagging one *names* it, which is the override
+ * the hand-added list already is: it moves up into that list, with a Remove of its own that puts
+ * it back here.
+ */
+const discovered = computed(() =>
+  props.models
+    .filter(
       (entry) =>
         entry.provider === 'localserver' &&
-        !props.localServerModels.some((named) => named.model === entry.model),
-    ).length,
+        !props.localServerModels.some((named) => named.model === entry.model) &&
+        !localModelsDraft.value.some((named) => named.model === entry.model),
+    )
+    .map((entry) => entry.model ?? entry.id),
 )
+
+function flagDiscovered(model: string): void {
+  if (localModelsDraft.value.some((entry) => entry.model === model)) return
+  localModelsDraft.value = [...localModelsDraft.value, { model, label: model, thinking: true }]
+}
 
 const settingsChanged = computed(
   () =>
@@ -368,8 +381,10 @@ watch(
 
         <label class="key-label">OpenRouter models</label>
         <p class="hint">
-          Beyond the three shipped above — any model OpenRouter itself lists. Enter the slug from
-          its model page (for example <code>mistralai/mistral-large</code>).
+          Beyond the ones shipped above — any model OpenRouter itself lists. Enter the slug from its
+          model page (for example <code>mistralai/mistral-large</code>), and tick <em>thinks</em> if
+          that page lists <code>reasoning</code> among its parameters: the think switch is only sent
+          for a model marked so.
         </p>
         <ul v-if="modelsDraft.length > 0" class="models-list">
           <li v-for="entry in modelsDraft" :key="entry.model" class="models-row">
@@ -428,9 +443,24 @@ watch(
           />
           <button :disabled="!localUrlDraft" @click="localUrlDraft = ''">Clear</button>
         </div>
-        <p v-if="localServerUrl && discoveredCount > 0" class="hint">
-          {{ discoveredCount }} model{{ discoveredCount === 1 ? '' : 's' }} found on the server.
-        </p>
+        <template v-if="localServerUrl && discovered.length > 0">
+          <p class="hint">
+            Found on the server. The listing cannot say which of them reason, so tick
+            <em>thinks</em> on one that does: the think switch is only sent for a model marked so.
+          </p>
+          <ul class="models-list local discovered">
+            <li v-for="name in discovered" :key="name" class="models-row">
+              <span class="models-label" :title="name">{{ name }}</span>
+              <label
+                class="models-think"
+                title="Offers the thinking checkbox and asks it to reason"
+              >
+                <input type="checkbox" @change="flagDiscovered(name)" />
+                thinks
+              </label>
+            </li>
+          </ul>
+        </template>
         <p v-else-if="localServerUrl" class="hint warn">
           No models found there yet — the address may be wrong, the server down, or it may not list
           them. Name one below to use it anyway.
@@ -777,6 +807,11 @@ button:disabled {
 }
 
 .models-remove {
+  margin-left: auto;
+}
+
+/* A discovered row has no Remove; its checkbox takes that seat. */
+.models-list.discovered .models-think {
   margin-left: auto;
 }
 

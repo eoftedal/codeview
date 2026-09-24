@@ -441,9 +441,15 @@ export const MODELS: readonly ModelChoice[] = [
   // OpenRouter is the one hosted, opt-in exception in this catalogue: nothing downloads, so `size`
   // is `'no download'` the way `builtin`'s is, but unlike `builtin` a question sent to one of these
   // leaves this machine for OpenRouter's API. Every entry's `label` says so on its face, not only
-  // in the tooltip `note`, since a tooltip is easy to miss. Kept to three for the same reason the
+  // in the tooltip `note`, since a tooltip is easy to miss. Kept to four for the same reason the
   // on-device list is short: an entry here is a promise it works, not the whole OpenRouter
-  // catalogue. Needs a key (`providers/openrouterKey.ts`) — see `Availability`'s `'needs-key'`.
+  // catalogue — and a slug OpenRouter retires breaks that promise on the first question, which is
+  // how Claude 3.5 Haiku left this list. Needs a key (`providers/openrouterKey.ts`) — see
+  // `Availability`'s `'needs-key'`.
+  //
+  // `thinking` on an entry here means its slug lists `reasoning` among the `supported_parameters`
+  // OpenRouter's `/models` reports, which is what `reasoning: { enabled }` is sent against. GPT-4o
+  // mini lists no such parameter, so it is not flagged and is never sent the field.
   {
     id: 'openrouter-gpt-4o-mini',
     provider: 'openrouter',
@@ -454,12 +460,26 @@ export const MODELS: readonly ModelChoice[] = [
     note: 'Hosted by OpenRouter — code leaves this machine for this option only. Needs an API key.',
   },
   {
+    // The id predates the slug: it was `anthropic/claude-3.5-haiku` until OpenRouter retired that
+    // one, and keeping the id means a remembered pick or a team link naming it lands here rather
+    // than on nothing.
     id: 'openrouter-claude-haiku',
     provider: 'openrouter',
-    label: 'Claude 3.5 Haiku (OpenRouter)',
+    label: 'Claude Haiku 4.5 (OpenRouter)',
     size: 'no download',
     maxCodeChars: 60_000,
-    model: 'anthropic/claude-3.5-haiku',
+    model: 'anthropic/claude-haiku-4.5',
+    thinking: true,
+    note: 'Hosted by OpenRouter — code leaves this machine for this option only. Needs an API key.',
+  },
+  {
+    id: 'openrouter-claude-sonnet',
+    provider: 'openrouter',
+    label: 'Claude Sonnet 5 (OpenRouter)',
+    size: 'no download',
+    maxCodeChars: 60_000,
+    model: 'anthropic/claude-sonnet-5',
+    thinking: true,
     note: 'Hosted by OpenRouter — code leaves this machine for this option only. Needs an API key.',
   },
   {

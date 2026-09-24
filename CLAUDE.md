@@ -126,20 +126,32 @@ app), and it is never included in a share link (`copyShareLink`/`buildFragment` 
 of them). An OpenRouter entry with no key configured stays visible in the picker rather than
 disappearing — `Availability`'s `'needs-key'` — and `useModel`'s `engine()`/`engineFor()` refuse to
 load one without a key, throwing a message that names the missing key specifically, before ever
-attempting a request. The three shipped OpenRouter entries are not the whole story: a reader can
+attempting a request. The four shipped OpenRouter entries (GPT-4o mini, Claude Haiku 4.5, Claude
+Sonnet 5, GLM-5.3 Flash) are not the whole story: a reader can
 add any OpenRouter-hosted slug of their own from the same settings panel
 (`providers/openrouterModels.ts`, `localStorage` key `codeview:openrouter-models`, turned into an
-ordinary `ModelChoice` by `toModelChoice` so nothing downstream treats it differently).
+ordinary `ModelChoice` by `toModelChoice` so nothing downstream treats it differently). **A shipped
+slug is a promise OpenRouter can withdraw**: `anthropic/claude-3.5-haiku` was retired from its
+catalogue and failed on the first question, which is how the Haiku entry moved to 4.5 — under the
+same id, so a remembered pick or a team link still lands. Check a slug against
+`https://openrouter.ai/api/v1/models` (public, no key) before shipping one, and read `thinking` off
+its `supported_parameters`: an entry is flagged only where that list has `reasoning`, since that is
+what `reasoning: { enabled }` is sent against and GPT-4o mini has no such parameter.
 
 **`localserver` is the fifth provider and the opposite of an exception**: a server the reader
 started — Ollama, LM Studio, llama.cpp, vLLM — reached over loopback, so the code never leaves the
 machine and nothing downloads into the browser. It sits beside `openrouter` only because the four of
 them speak the same API, and `providers/openaiCompatible.ts` is that shared half: one SSE read loop
-carrying the three rules that drift the moment they are copied — the partial answer pushed into the
+carrying the four rules that drift the moment they are copied — the partial answer pushed into the
 history on _both_ the success and the error path, the `DOMException('Aborted', 'AbortError')` that
-`stream.ts`'s `isAbort` is keyed to, and `fold.end()` closing a `<think>` the stream left open. What
-is left in each provider is its four own facts: endpoint, headers, ceiling, and the wording of a
-failure. **Its gate is the base URL, not `import.meta.env.DEV`**, and the reasoning matters because
+`stream.ts`'s `isAbort` is keyed to, `fold.end()` closing a `<think>` the stream left open, and an
+`error` object inside an SSE chunk **failing** the answer rather than ending it — that chunk, with
+`finish_reason: 'error'` beside it, is the only way OpenRouter can report a provider dying once the
+response is committed, and reading only the delta turned it into a short answer that happened to
+stop (`tests/openaiCompatible.test.ts`). `useChat` keeps what streamed before such a failure as an
+answer of its own ahead of the failed row, as the agents pane already did. What
+is left in each provider is its five own facts: endpoint, headers, ceiling, the wording of a
+failure, and the wording of one reported mid-stream. **Its gate is the base URL, not `import.meta.env.DEV`**, and the reasoning matters because
 the obvious premise is wrong: a page on GitHub Pages _can_ fetch `http://localhost` — loopback is
 carved out of mixed-content blocking, the Secure Contexts spec counting `127.0.0.1`, `[::1]` and the
 `localhost` name as potentially trustworthy. What actually stands in the way is the reader's own to
@@ -162,9 +174,14 @@ onto a different model on every reload. A failed probe deliberately keeps the li
 for a minute is not evidence it is gone. Three reasoning field names are read, not one
 (`reasoning`, `reasoning_content`, `thinking`), because OpenRouter, llama.cpp/LM Studio and Ollama
 each pick a different one, and a server that writes `<think>` into `content` needs nothing —
-`markdown.ts` already folds it. `enable_thinking` rides `chat_template_kwargs` and is sent **only**
-for an entry the reader flagged, since these servers disagree about unknown body fields and a
-discovered entry must not be what finds that out. The failure that matters is the one with no
+`markdown.ts` already folds it. The thinking switch is asked in **two dialects at once**
+(`localReasoningFields`): `chat_template_kwargs.enable_thinking` for llama.cpp and vLLM, and
+`reasoning_effort` (`none` / `medium`) for Ollama, whose OpenAI endpoint reads nothing else — the
+first field alone left the switch dead there, a thinking model thinking whatever it said. Both are
+sent **only** for an entry the reader flagged, since these servers disagree about unknown body
+fields and a discovered entry must not be what finds that out; what `/models` cannot say the
+settings panel now can, listing the discovered models each with a `thinks` box that _names_ the
+model (the hand-added override the list already was) rather than adding a flag of its own. The failure that matters is the one with no
 `Response` at all: `fetch` rejects with a `TypeError`, and `networkMessage` names the address and
 all three causes rather than letting "Failed to fetch" stand. Its address is no part of a share
 link, for the key's reason and one more — it means nothing wherever the link is opened.
@@ -172,7 +189,7 @@ link, for the key's reason and one more — it means nothing wherever the link i
 `MODELS` in `chat.ts` is a static list, so `providers/index.ts`'s `allModels()` is what actually merges the
 shipped catalogue with the reader's own — `usableModels()` and the new `findModel()` (the one
 lookup `useModel`, `useAgents` and the agents pane use in place of `chat.ts`'s own `modelById`,
-which only knows the shipped three) both go through it. Adding or removing one does not touch the
+which only knows the shipped ones) both go through it. Adding or removing one does not touch the
 GPU/builtin side of the picker, so `useModel.refreshModels()` exists as a narrow escape hatch —
 called from `App.vue`'s watch on the reader's list — that reapplies whatever `probe` already
 settled about the GPU without re-probing it. That engine is now
@@ -329,19 +346,30 @@ than resolved so a team survives a machine that cannot run what it names; `engin
 naming the model, filed against the agent, rather than running it on something else.
 
 **The hunters are a shelf, not a mode.** `src/lib/hunters.ts` is one `Record<string, string>` —
-the name the picker shows, the complete system prompt — built from a shared opening and closing
-around the per-class half in `FOCUS`, so a change to how a finding is reported is one edit rather
-than sixteen. Both panes offer them (`ChatPane`'s settings panel, and every agent card in
+the name the picker shows, the complete system prompt — built from a shared opening and one of two
+closings around the per-class half in `FOCUS`, so a change to how a finding is reported is one edit
+rather than sixteen. Both panes offer them (`ChatPane`'s settings panel, and every agent card in
 `AgentsPane`, where the two shipped briefs sit in the same select), and picking one **only writes
 the textarea**: there is no hunter id kept, no new key in a link and nothing downstream that knows
 a brief came from here — an edited hunter is simply a brief of the reader's own, which is why the
 select shows a name only while the text still equals that brief exactly and says _your own wording_
-otherwise. They are deliberately shorter than `DEFAULT_ROLE` and capped at `HUNTER_CHAR_CAP`: brief
-and code share one window, and a reviewer that already knows the class it is hunting does not need
-`REVIEWER_BRIEF`'s vocabulary lesson. Two invariants `tests/hunters.test.ts` holds: each carries the
-citation-and-honesty rules (check the name is on the line, one numbered step per hop, say plainly
-when nothing is found) and hunts one class only — and none may contain a `--8<--` line, since a
-hunter usually ends up as an agent's role and rides a team bundle.
+otherwise. They are deliberately shorter than `DEFAULT_ROLE` and capped at `HUNTER_CHAR_CAP`, and
+**short means the tokens a hunt sends, not the file**: the opening and closing ride every hunt, so
+they are where a saved character counts sixteen times over, and they were over half of each hunter
+before they were cut. The opening is one line and teaches no taint vocabulary — a flow hunter's own
+"what removes the taint" is the only version a single-issue hunt needs, and the five checklist
+classes (BOLA, function-level authorization, CSRF, authentication, secrets) have no use for one.
+Those five get the `check` closing, which asks for a where and a what-is-missing, because a
+hop-by-hop path is the wrong shape for a missing decorator and each of their class halves already
+says what to name; the rest get `flow`, which _shows_ the path shape as three numbered example hops
+rather than describing it, since a small model copies a shape it is shown far more reliably than
+one it is told about. The class halves are the concrete part — named sinks, named traps — and are
+where the tokens should go; what was cut from them was the prose around the lists, chiefly the
+reasons for a rule, which a model does not need. `tests/hunters.test.ts` holds the invariants: each
+carries the citation-and-honesty rules (check the name is on the line, say plainly when nothing is
+found) and hunts one class only, a flow hunter carries the numbered-hop shape and a checklist hunter
+does not, the opening stays one line — and none may contain a `--8<--` line, since a hunter usually
+ends up as an agent's role and rides a team bundle.
 
 **The context window is a catalogue field, and the budgets follow it.** WebLLM's MLC list compiles
 every model here to a 4 096-token override, and `ModelChoice.contextTokens` is what it actually runs
@@ -526,7 +554,7 @@ each field is spread in only when set, never sent as null.
   `src`/`lang`/`filename` form for a lone tab: shorter, and every existing link and embed keeps
   working. It never touches the reader's own address bar any more — only the clipboard (falling
   back to putting the link in the notice text if that write is refused) — since the address bar is
-  a live view of *their* buffer, not the one being handed to someone else.
+  a live view of _their_ buffer, not the one being handed to someone else.
 - **The fragment is dropped from the address bar once, right after every composable that reads it
   (`useBuffer`, `useChat`, `useAgents`) has captured what it needs, in `App.vue`.** Each parses
   `location.hash` synchronously on construction even though applying a linked value is itself
@@ -535,7 +563,7 @@ each field is spread in only when set, never sent as null.
   the link's content, since `fromParams` would still be true; dropping the hash means a reload
   falls back to `localStorage` instead, which every edit already keeps current. `dropFragment` in
   `share.ts` is the one place that does this — a no-op when there is no hash, which is the common
-  case — and it is *not* a watcher on ongoing edits: once dropped, there is nothing left to change
+  case — and it is _not_ a watcher on ongoing edits: once dropped, there is nothing left to change
   out from under.
 - **The caret rule.** A caret sits _between_ characters, so a cursor at the end of a word is one past
   the identifier it belongs to. Both `findNodeAtOffset` and `identifierAt` look one character left

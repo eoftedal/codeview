@@ -180,6 +180,11 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
       } else if (!aborted) {
         messages.value = [
           ...messages.value,
+          // What streamed before the failure is kept, as it is on a stop: a server that dropped
+          // the connection mid-answer said something first, and that something is also what the
+          // session's history holds — a follow-up would otherwise be about text the reader can
+          // no longer see.
+          ...(partial ? [{ id: nextId++, role: 'assistant' as const, text: partial }] : []),
           { id: nextId++, role: 'assistant', text: messageOf(caught), failed: true },
         ]
       }

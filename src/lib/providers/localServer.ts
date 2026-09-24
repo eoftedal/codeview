@@ -63,6 +63,40 @@ function networkMessage(): string {
   )
 }
 
+/** An error the server reported inside the stream rather than as a status — a runtime that hit a
+ *  fault mid-answer, in its own words where it gave any. */
+function streamError(error: { message?: string } | undefined): string {
+  return error?.message
+    ? `Local server: ${error.message}`
+    : 'Local server: the answer stopped with an error the server did not describe'
+}
+
+/**
+ * How a local server is asked to think, or not, on a question — for an entry the reader flagged as
+ * able to. Two fields, because these servers read two different ones and each ignores the other:
+ *
+ * - `chat_template_kwargs.enable_thinking` is llama.cpp's and vLLM's road to a model's own
+ *   template switch (Qwen3, Gemma 4, GLM) — the same flag the ONNX pipeline reaches through
+ *   `tokenizer_encode_kwargs`;
+ * - `reasoning_effort` is what Ollama's `/v1/chat/completions` reads, and it reads nothing else —
+ *   `chat_template_kwargs` never reaches its template, which is why the first field alone left
+ *   the switch dead there. `"none"` turns a thinking model off; any effort turns a model with a
+ *   plain on/off mode on, and names a level on one that has levels (gpt-oss). llama.cpp and vLLM
+ *   read it too, for the templates that have an effort to apply.
+ *
+ * Sent **only** for a flagged entry: these servers disagree about unknown body fields, and a
+ * discovered entry — which `/models` cannot flag, though the settings panel now can — must not be
+ * the one that finds out. Ollama also answers a thinking request on a model that has no such mode
+ * with an error saying so, which is the right answer for a reader who flagged one that cannot.
+ */
+export function localReasoningFields(reasons: boolean, asked: boolean): Record<string, unknown> {
+  if (!reasons) return {}
+  return {
+    chat_template_kwargs: { enable_thinking: asked },
+    reasoning_effort: asked ? 'medium' : 'none',
+  }
+}
+
 export const localServer: Provider = {
   /**
    * No URL is this provider's `'needs-key'`: a fact about the reader's own settings rather than
@@ -96,15 +130,10 @@ export const localServer: Provider = {
         // Unlike OpenRouter's fleet, one local runtime accepts this uniformly: it is the reader's
         // own server, and a model's own `generation_config` is what the catalogue leaves alone.
         repetitionPenalty: true,
-        // `chat_template_kwargs` is llama.cpp's and vLLM's road to a model's own
-        // `enable_thinking`, which is the same flag the ONNX pipeline reaches through
-        // `tokenizer_encode_kwargs`. Sent **only** for an entry the reader flagged as thinking:
-        // these four servers disagree about unknown body fields, and a discovered entry — which
-        // can never be flagged, since `/models` does not say — must not be the one that finds out.
-        reasoningFields: (reasons, asked) =>
-          reasons ? { chat_template_kwargs: { enable_thinking: asked } } : {},
+        reasoningFields: localReasoningFields,
         errorMessage,
         networkMessage,
+        streamError,
       },
       { model, thinking, sampling, thinkingSampling },
     )
