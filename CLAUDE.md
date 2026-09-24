@@ -105,6 +105,35 @@ the label still names the attribute that was asked about — the same "nearest t
 than TypeScript: `db.run()` on a namespace import returns null there, since nothing local stands for
 `run` itself, while Python reports the import with `definedIn`.
 
+**The Python trace is `flow.ts`'s walk over the binder instead of over a language service.**
+`python/flow.ts` produces the same `FlowNode`s, the same steps and origins and the same budgets, so
+the pane and the decorations cannot tell which language answered — and the fixtures are written in
+the same indented `label: excerpt [origin]` shape, which is how the two stay comparable line for
+line. The two questions `flow.ts` asks the service are answered differently here: **reassignments
+are free**, since the binder already records every binding of a name in a scope, while **call sites
+cost a scan** of every `call` node in every open tab — which is why a trace stays on an explicit
+request and is never wired to cursor movement.
+
+Three Python-specific rules, each of which was a wrong answer before it was a rule. **An f-string is
+not a literal**: `isConstant` is false for any string carrying an `interpolation`, and every `{…}`
+becomes an operand, which is most of what a taint review is looking at. **Constructing a class is a
+call to its `__init__`**, and nothing in the source says so — the call site reads `Connection(host)`
+— so `callSitesOf` matches constructions of the enclosing class when the target is named `__init__`;
+without it every constructor parameter dead-ends as `entry`, which is most of the state in
+object-shaped code. And **the argument shift belongs to the call site, not to its syntax**:
+`self` is implicit in both `o.m(x)` and `C(x)`, so both run one behind the parameters, but only the
+first has a receiver to detect — `CallSite.shift` carries it rather than re-deriving it, which is
+the off-by-one that reported the wrong value for every constructor argument.
+
+**A method call on a receiver we cannot name is matched on the name alone, and that is deliberate
+over-approximation.** `C().use(x)` and `self.conn.use(x)` leave `o.use` unresolvable, and dropping
+them would _under_-approximate — a trace that silently misses a path is the one failure this tool
+refuses. So where the name is declared exactly once across the open tabs it is accepted on the name;
+where it is declared more than once, matching would be a guess between them, so only a resolvable
+receiver counts. `TracePane`'s "no backward trace" branch is now unreachable, since every shipped
+language has one — **leave it**: it is what a language added without a trace shows instead of an
+empty pane, and `AnalysisBackend.trace` stays optional for the same reason.
+
 **Two independent TypeScript setups exist, and conflating them causes confusion.**
 
 1. `src/lib/analyzer.ts` — our own `ts.LanguageService` over the open files, running `noLib` and

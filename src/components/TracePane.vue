@@ -133,12 +133,14 @@ provide(traceContextKey, {
 
     <div class="body" @mouseleave="emit('hover', null)">
       <TraceRow v-if="trace" :id="trace.root" :depth="0" />
+      <!-- Every language shipped today has a trace, so this branch is unreachable — and it stays,
+           because it is what a language added without one shows instead of an empty pane. -->
       <p v-else-if="!supported" class="empty">
-        The backward trace is <strong>TypeScript and JavaScript only</strong>.
+        This language has <strong>no backward trace</strong>.
         <br />
-        It follows a value through assignments, returns and call-site arguments using the TypeScript
-        language service's reference index. There is no equivalent for this language here, and
-        guessing at one would quietly miss paths — which is worse than not offering it.
+        Following a value needs every place a name is written and every place a function is called,
+        and neither is available here. Guessing at it would quietly miss paths — worse than not
+        offering it at all.
         <br />
         The syntax tree and the definition highlight work as normal.
       </p>

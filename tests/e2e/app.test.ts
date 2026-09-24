@@ -314,20 +314,37 @@ describe('python', () => {
     await fresh.close()
   })
 
-  it('offers no trace, and explains why rather than doing nothing', async () => {
-    const fresh = await openPython(`#src=${encodeURIComponent(SOURCE)}&lang=py&filename=app.py`)
-    const tabs = await fresh.$$('nav button')
-    for (const tab of tabs) {
-      if ((await tab.evaluate((el) => el.textContent))?.includes('Trace')) {
-        await tab.click()
-        break
-      }
-    }
-    await new Promise((resolve) => setTimeout(resolve, 300))
-    expect(await fresh.$eval('button.run', (el) => (el as HTMLButtonElement).disabled)).toBe(true)
-    expect(
-      await fresh.$eval('.empty', (el) => el.textContent?.replace(/\s+/g, ' ') ?? ''),
-    ).toContain('TypeScript and JavaScript only')
+  it('traces a value back to its sources, across the tab that declares it', async () => {
+    const bundle = [
+      '--8<-- app.py',
+      'from db import fetch',
+      '',
+      'def handler():',
+      '    row = fetch()',
+      '    return row',
+      '--8<-- db.py',
+      'def fetch():',
+      '    return "seed"',
+    ].join('\n')
+    const fresh = await openPython(`#files=${encodeURIComponent(bundle)}&active=app.py`)
+
+    await clickAt('return row', 8, 0, fresh)
+    const tabs = await fresh.$$('.tabs button')
+    await tabs[1]!.click()
+    await fresh.waitForSelector('.trace-pane')
+    // Switching to the pane does not run anything — the trace costs a scan, so it waits to be asked.
+    expect(await fresh.$eval('.trace-pane .run', (el) => (el as HTMLButtonElement).disabled)).toBe(
+      false,
+    )
+    await fresh.click('.trace-pane .run')
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    const rows = await fresh.$$eval('.trace-pane .row', (nodes) =>
+      nodes.map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
+    )
+    // The chain leaves app.py through the import and ends on the literal in db.py.
+    expect(rows.join(' | ')).toContain('fetch()')
+    expect(rows.some((row) => row.includes('"seed"'))).toBe(true)
     await fresh.close()
   })
 

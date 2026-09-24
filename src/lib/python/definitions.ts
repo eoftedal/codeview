@@ -108,6 +108,19 @@ function present(
   }
 }
 
+/**
+ * How a binding is worded and where it sits — the same answer the definition header gives, so a
+ * trace's terminal names a declaration exactly as the pane above it would. The TypeScript side's
+ * `describeDeclaration` plays this role for `flow.ts`.
+ */
+export function describePythonBinding(
+  binding: Binding,
+  text: string,
+): { span: Span; reason: DefinitionReason; label: string } {
+  const { primary, reason } = present(binding, text)
+  return { span: primary, reason, label: `${reason} \`${binding.name}\`` }
+}
+
 /* ------------------------------------------------------------------ the caret */
 
 /**
@@ -151,7 +164,7 @@ function isAttributeName(identifier: Node): boolean {
  * saying nothing.
  */
 /** The open tab an import statement names, if any. */
-function moduleOf(
+export function moduleOf(
   statement: Node,
   from: PythonFile,
   files: readonly PythonFile[],

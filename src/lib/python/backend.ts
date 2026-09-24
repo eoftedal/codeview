@@ -13,8 +13,10 @@ import type { Parser, Tree } from '@vscode/tree-sitter-wasm'
 import type { AstTree, BuildOptions } from '../astTree'
 import type { AnalysisBackend, BackendFile } from '../backend'
 import type { DefinitionResult } from '../definitions'
+import type { FlowTrace } from '../flow'
 import { buildTreeSitterTree } from '../treeSitterTree'
 import { resolvePythonDefinition, type PythonFile } from './definitions'
+import { tracePythonOrigins } from './flow'
 import { loadPythonParser } from './runtime'
 
 interface Entry {
@@ -40,6 +42,25 @@ export function createPythonBackend(): AnalysisBackend {
     if (!entry || !parser) return null
     if (!entry.tree) entry.tree = parser.parse(entry.text)
     return entry.tree
+  }
+
+  /**
+   * Every open Python tab, parsed — which is what lets a definition and a trace cross an import.
+   * Null before the grammar has loaded.
+   */
+  function current(): { active: PythonFile; open: PythonFile[] } | null {
+    const parsed = treeFor(active)
+    const entry = files.get(active)
+    if (!parsed || !entry) return null
+
+    const open: PythonFile[] = []
+    for (const name of files.keys()) {
+      const tree = treeFor(name)
+      const file = files.get(name)
+      if (tree && file) open.push({ name, root: tree.rootNode, text: file.text })
+    }
+    const self = open.find((file) => file.name === active)
+    return self ? { active: self, open } : null
   }
 
   return {
@@ -77,23 +98,13 @@ export function createPythonBackend(): AnalysisBackend {
     },
 
     resolve(offset: number): DefinitionResult | null {
-      const parsed = treeFor(active)
-      const entry = files.get(active)
-      if (!parsed || !entry) return null
+      const program = current()
+      return program && resolvePythonDefinition(program.active, program.open, offset)
+    },
 
-      // Every open Python tab is available to the resolver, which is what lets a definition cross
-      // an import. Each is parsed only if an import actually reaches for it.
-      const open: PythonFile[] = []
-      for (const name of files.keys()) {
-        const tree = treeFor(name)
-        const file = files.get(name)
-        if (tree && file) open.push({ name, root: tree.rootNode, text: file.text })
-      }
-      return resolvePythonDefinition(
-        { name: active, root: parsed.rootNode, text: entry.text },
-        open,
-        offset,
-      )
+    trace(offset: number): FlowTrace | null {
+      const program = current()
+      return program && tracePythonOrigins(program.active, program.open, offset)
     },
 
     async ready(): Promise<void> {

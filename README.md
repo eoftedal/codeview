@@ -189,10 +189,23 @@ Anything else — `obj.method()` where `obj` came from a function's return value
 showing where `obj` itself came from, and says so by pointing at that declaration instead. It never
 guesses at an attribute.
 
+The **backward trace works too**, and follows the same rules as the TypeScript one — assignments,
+returns, call-site arguments, across tabs wherever an import leads. Three Python-specific points are
+worth knowing:
+
+- **Every interpolation of an f-string is followed.** `f"SELECT {name}"` is not a literal; `name` is
+  a step in the chain, which is usually the whole point.
+- **Constructing a class is treated as a call to its `__init__`**, because nothing in the source
+  says so — the call site reads `Connection(host)`. Without that link every constructor parameter
+  would dead-end as an entry point.
+- **A method call on a receiver the tool cannot name** — `C().use(x)`, `self.conn.use(x)` — is
+  matched on the method name alone, but only where that name is declared exactly once across the
+  open tabs. That over-approximates, which a _may_-analysis is allowed to do; where the name is
+  declared more than once, matching would be a guess between them, so only a receiver that resolves
+  counts.
+
 What Python support does **not** do:
 
-- **No backward trace.** The trace rides the TypeScript language service's reference index, and
-  there is no equivalent here. The pane says so rather than offering a button that does nothing.
 - **No cross-language resolution.** A `.py` tab and a `.ts` tab are in separate programs. Python's
   `import db` never finds `db.ts`, and there is no build system here to say that it should.
 - `from m import *` binds nothing, so every name it would have brought in reads as external.
