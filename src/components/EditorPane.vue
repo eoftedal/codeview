@@ -157,11 +157,13 @@ function applyHover(): void {
 function applyFlow(): void {
   if (!model || !flowDecorations) return
   flowDecorations.set(
-    props.flow.map((step) =>
-      step.external
+    props.flow.map((step) => {
+      // No ruler mark for a `via`: it is not a step, and the overview ruler is a map of the path.
+      if (step.weak) return decoration(step.span, 'cv-flow-weak')
+      return step.external
         ? decoration(step.span, 'cv-flow-external', '#f7768e')
-        : decoration(step.span, 'cv-flow', '#9ece6a'),
-    ),
+        : decoration(step.span, 'cv-flow', '#9ece6a')
+    }),
   )
 }
 

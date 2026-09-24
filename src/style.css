@@ -60,6 +60,16 @@ body {
 }
 
 /* Flow trace: every step in the path, with external origins picked out. */
+
+/* A declaration the walk passed through rather than stepped on — the parameter a value arrives as.
+   Dashed, because a fainter version of the step tint is either invisible or reads as a step: the
+   distinction has to be in the kind of mark, not its strength. First in the file, so that where it
+   overlaps a real step (a parameter's own default, say) the step's background wins. */
+.cv-flow-weak {
+  background: color-mix(in srgb, var(--flow) 10%, transparent);
+  border-bottom: 1px dashed color-mix(in srgb, var(--flow) 60%, transparent);
+}
+
 .cv-flow {
   background: color-mix(in srgb, var(--flow) 13%, transparent);
   border-radius: 2px;

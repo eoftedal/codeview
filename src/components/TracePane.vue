@@ -6,7 +6,7 @@ import { isExternalOrigin, type FlowTarget, type FlowTrace } from '../lib/flow'
 
 const props = defineProps<{
   trace: FlowTrace | null
-  /** Label of the value the trace starts from, for the run button's wording. */
+  /** Label of the value under the cursor — what the run button would trace, not what it did. */
   target: string | null
   /** The tab on screen. A step in another file is labelled with its own, and selecting it opens
    *  that tab. */
@@ -92,8 +92,10 @@ provide(traceContextKey, {
   <section class="trace-pane">
     <header>
       <div class="toolbar">
+        <!-- Always "Trace": the button acts on whatever is under the cursor now, which is rarely
+             what the trace on screen was run from, and "Retrace" claimed otherwise. -->
         <button class="run" @click="emit('run')">
-          {{ trace ? 'Retrace' : 'Trace' }}<span v-if="target"> {{ target }}</span>
+          Trace<span v-if="target"> {{ target }}</span>
         </button>
         <template v-if="trace">
           <button @click="expandAll">Expand</button>

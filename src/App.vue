@@ -14,7 +14,7 @@ import { useChat } from './composables/useChat'
 import { useModel } from './composables/useModel'
 import { findNodeAtOffset } from './lib/astTree'
 import type { DefinitionResult, Span } from './lib/definitions'
-import { isExternalOrigin, type FlowTarget, type FlowTrace } from './lib/flow'
+import { isExternalOrigin, type FlowSpan, type FlowTarget, type FlowTrace } from './lib/flow'
 import { dropFragment } from './lib/share'
 import { useOpenRouterKey } from './lib/providers/openrouterKey'
 import { useOpenRouterModels } from './lib/providers/openrouterModels'
@@ -136,14 +136,17 @@ const hoverSpan = computed(() => {
   return spanOf(hoveredId.value)
 })
 
-const flowSpans = computed(() =>
-  (trace.value?.nodes ?? [])
-    .filter((node) => node.file === fileName.value)
-    .map((node) => ({
-      span: node.span,
-      external: isExternalOrigin(node.origin),
-    })),
-)
+const flowSpans = computed(() => {
+  const here = fileName.value
+  const spans: FlowSpan[] = []
+  for (const node of trace.value?.nodes ?? []) {
+    // A declaration the walk only passed through — the parameter a value arrives as. Pushed ahead
+    // of the steps so that where the two overlap, the step is the one that reads.
+    if (node.via?.file === here) spans.push({ span: node.via.span, external: false, weak: true })
+    if (node.file === here) spans.push({ span: node.span, external: isExternalOrigin(node.origin) })
+  }
+  return spans
+})
 
 function refreshDefinition(): void {
   definition.value = analysis.resolve(cursorOffset.value)

@@ -195,6 +195,74 @@ describe('across function calls', () => {
   })
 })
 
+describe('declarations the walk passes through', () => {
+  /** The `via` span's text, which is what the editor ends up tinting. */
+  const viaText = (source: string, excerpt: string, others: OtherFiles = {}): string | null => {
+    const trace = traceAt(source, 'ts', others)
+    const node = trace?.nodes.find((step) => step.excerpt === excerpt)
+    if (!node?.via) return null
+    const text = (others[node.via.file] ?? source.replace('|', '')) as string
+    return text.slice(node.via.span.start, node.via.span.end)
+  }
+
+  // The identifier → declaration hop stays collapsed so a chain does not double. That leaves the
+  // parameter a value arrives as unmarked in the editor, since the children are at the call sites —
+  // another function, often another file. `via` is that span, for decoration only: not a step.
+  it('records the parameter a use resolves to, without adding a row', () => {
+    const source = [
+      'function inner(a: string) {',
+      '  return a|',
+      '}',
+      'function outer(b: string) {',
+      '  return inner(b)',
+      '}',
+      "outer('x')",
+    ].join('\n')
+    expect(render(source)).toEqual([
+      'parameter `a`: a: string',
+      '  passed to `inner`: b',
+      "    passed to `outer`: 'x' [literal]",
+    ])
+    expect(viaText(source, 'b')).toBe('b: string')
+  })
+
+  it('leaves the root alone, which already is the declaration', () => {
+    const source = ['function inner(a: string) {', '  return a|', '}', "inner('x')"].join('\n')
+    expect(traceAt(source)?.nodes[0]?.via).toBeUndefined()
+  })
+
+  // A parameter nothing calls ends at its own declaration, so it has a row already.
+  it('leaves a terminal parameter alone', () => {
+    const source = ['function solo(p: string) {', '  return p|', '}'].join('\n')
+    const trace = traceAt(source)
+    expect(render(source)).toEqual(['parameter `p`: p: string [entry]'])
+    expect(trace?.nodes.every((node) => node.via === undefined)).toBe(true)
+  })
+
+  it('keeps the mark in the file the parameter is declared in', () => {
+    const source = [
+      'function query(strings: TemplateStringsArray, ...values: any[]) {',
+      '  return valu|es',
+      '}',
+      'export function getProductById(productId: string) {',
+      '  return query`SELECT ${productId}`',
+      '}',
+    ].join('\n')
+    const others = {
+      'server.ts': [
+        "import { getProductById } from './main'",
+        "app.get('/p/:id', (req) => getProductById(req.params.id))",
+      ].join('\n'),
+    }
+    const trace = traceAt(source, 'ts', others)!
+    const hop = trace.nodes.find((node) => node.excerpt === 'productId')!
+    // The step continues into server.ts; the parameter it arrived as stays behind in main.ts.
+    expect(hop.children.map((id) => trace.nodes[id]!.file)).toEqual(['server.ts'])
+    expect(hop.via?.file).toBe('main.ts')
+    expect(viaText(source, 'productId', others)).toBe('productId: string')
+  })
+})
+
 describe('terminals', () => {
   it('marks an unresolvable global as external', () => {
     expect(render('const secret = process.env.TOKEN\nsecr|et')).toEqual([
@@ -262,6 +330,126 @@ describe('opaque calls', () => {
     expect(render(source)).toEqual([
       "variable `v`: const v = parse('literal')",
       "  initialised from: parse('literal') [import]",
+    ])
+  })
+})
+
+describe('tagged templates', () => {
+  // A tagged template is a call: the tag is the callee, the `${…}` substitutions are the arguments.
+  it('keeps a tainted substitution under a tag no open file declares', () => {
+    const source = [
+      "import { sql } from './db'",
+      'const id = process.argv',
+      'const q = sql`SELECT * FROM u WHERE id = ${id}`',
+      'q|',
+    ].join('\n')
+    expect(render(source)).toEqual([
+      'variable `q`: const q = sql`SELECT * FROM u WHERE id = ${id}`',
+      '  initialised from: sql`SELECT * FROM u WHERE id = ${id}` [import]',
+      '    flows into the call: id',
+      '      initialised from: process.argv [external]',
+    ])
+  })
+
+  it('walks into a tag declared in the buffer and back out to the substitution', () => {
+    const source = [
+      'function sql(strings: TemplateStringsArray, ...values: string[]) {',
+      "  return values.join('')",
+      '}',
+      'const q = sql`SELECT ${process.argv}`',
+      'q|',
+    ].join('\n')
+    expect(render(source)).toEqual([
+      'variable `q`: const q = sql`SELECT ${process.argv}`',
+      '  initialised from: sql`SELECT ${process.argv}`',
+      "    returned by `sql`: values.join('') [external]",
+      '      flows into the call: values',
+      '        passed to `sql`: process.argv [external]',
+    ])
+  })
+
+  it('reaches a rest parameter from the substitutions at a tagged call site', () => {
+    const source = [
+      'function sql(strings: TemplateStringsArray, ...values: string[]) {',
+      '  return valu|es',
+      '}',
+      'const first = process.argv',
+      "const q = sql`SELECT ${first} AND ${'lit'}`",
+    ].join('\n')
+    expect(render(source)).toEqual([
+      'parameter `values`: ...values: string[]',
+      '  passed to `sql`: first',
+      '    initialised from: process.argv [external]',
+      "  passed to `sql`: 'lit' [literal]",
+    ])
+  })
+
+  // The strings array is handed to the tag first, so a parameter runs one ahead of the
+  // substitutions — and the shift belongs to the call site, not to the function.
+  it('shifts the index per call site, not per function', () => {
+    const source = [
+      'function sql(strings: TemplateStringsArray, ...values: string[]) {',
+      '  return valu|es',
+      '}',
+      'const a = sql`x${tagged}`',
+      "const b = sql(['x'], direct)",
+    ].join('\n')
+    expect(render(source)).toEqual([
+      'parameter `values`: ...values: string[]',
+      '  passed to `sql`: tagged [external]',
+      '  passed to `sql`: direct [external]',
+    ])
+  })
+
+  it('shifts a named parameter the same way a rest one is shifted', () => {
+    const source = [
+      'function one(strings: TemplateStringsArray, first: string) {',
+      '  return fir|st',
+      '}',
+      'const q = one`a${process.argv}b`',
+    ].join('\n')
+    expect(render(source)).toEqual([
+      'parameter `first`: first: string',
+      '  passed to `one`: process.argv [external]',
+    ])
+  })
+
+  // Nothing in the source fills the strings array in — the runtime builds it — so this branch ends
+  // at the declaration rather than pretending a substitution reached it.
+  it('ends at the strings parameter, which no call site fills in', () => {
+    const source = [
+      'function sql(strings: TemplateStringsArray, ...values: string[]) {',
+      '  return strin|gs',
+      '}',
+      'const q = sql`SELECT ${process.argv}`',
+    ].join('\n')
+    expect(render(source)).toEqual(['parameter `strings`: strings: TemplateStringsArray [entry]'])
+  })
+
+  // The tag sits in the callee slot, so its receiver is kept for the same reason `untrusted.trim()`
+  // keeps `untrusted`.
+  it('keeps the receiver of a tag reached through an object', () => {
+    const source = [
+      'const conn = process.argv',
+      'const q = conn.sql`SELECT ${process.env.X}`',
+      'q|',
+    ].join('\n')
+    expect(render(source)).toEqual([
+      'variable `q`: const q = conn.sql`SELECT ${process.env.X}`',
+      '  initialised from: conn.sql`SELECT ${process.env.X}` [external]',
+      '    flows into the call: conn',
+      '      initialised from: process.argv [external]',
+      '    flows into the call: process.env.X [external]',
+    ])
+  })
+
+  // A tag's return value is not the string, so this is reported by its tag rather than collapsing
+  // to the literal an untagged `SELECT 1` would be.
+  it('reports a tag with no substitutions by its tag, not as a literal', () => {
+    const source = ["import { sql } from './db'", 'const q = sql`SELECT 1`', 'q|'].join('\n')
+    expect(render(source)).toEqual([
+      'variable `q`: const q = sql`SELECT 1`',
+      '  initialised from: sql`SELECT 1` [import]',
     ])
   })
 })
@@ -416,6 +604,36 @@ app.get('/product/:id', (req) => {
       '                main.ts `.id` read from: req.params',
       '                  main.ts `.params` read from: req',
       '                    main.ts parameter `req`: req [callback]',
+    ])
+  })
+
+  it('walks a tagged template into another tab and back out to the request', () => {
+    expect(
+      renderAcross(
+        `import { sql } from './db'
+
+app.get('/p/:id', (req) => {
+  const row = sql\`SELECT \${req.params.id}\`
+  return row|
+})
+`,
+        {
+          'db.ts': `export function sql(strings, ...values) {\n  return run(strings.join('?'), values)\n}\n`,
+        },
+      ),
+    ).toEqual([
+      'main.ts variable `row`: const row = sql`SELECT ${req.params.id}`',
+      '  main.ts initialised from: sql`SELECT ${req.params.id}`',
+      "    db.ts returned by `sql`: run(strings.join('?'), values) [external]",
+      "      db.ts flows into the call: strings.join('?') [external]",
+      '        db.ts flows into the call: strings',
+      '          db.ts parameter `strings`: strings [entry]',
+      '      db.ts flows into the call: values',
+      // Out of db.ts and back to the request: the substitution is an argument in the other file.
+      '        main.ts passed to `sql`: req.params.id',
+      '          main.ts `.id` read from: req.params',
+      '            main.ts `.params` read from: req',
+      '              main.ts parameter `req`: req [callback]',
     ])
   })
 

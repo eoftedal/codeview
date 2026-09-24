@@ -158,6 +158,15 @@ a call leads into the callee's `return` statements; a parameter leads out to eve
 argument sitting at its index. That last edge is the one that makes it worth having — it is the step
 you otherwise make by hand, scrolling to find who calls this thing.
 
+**A tagged template is a call**, and the walk treats it as one: in `` sql`SELECT ${id}` `` the tag
+`sql` is the callee and the `${…}` substitutions are the arguments. The trace goes into the `return`
+statements of `sql` when `sql` is one of the open files, and keeps every substitution as a child when
+it is not — which is the edge an injection trace turns on. Parameters run one place ahead of the
+substitutions, because the runtime hands the tag its strings array first: substitution 0 arrives in
+parameter 1 of `sql(strings, ...values)`, so tracing `values` still reaches every interpolated
+expression at every tagged call site. `strings` is the one parameter nothing in the source fills in,
+so that branch ends at the declaration rather than pretending a substitution reached it.
+
 The walk ends where it honestly can:
 
 | Terminal          | Meaning                                                       |
@@ -165,7 +174,7 @@ The walk ends where it honestly can:
 | `defined here`    | a constant, a function, or an object built on the spot        |
 | `another module`  | an import of something no tab holds — `express`, `node:fs`    |
 | `outside`         | a name with no declaration at all — a global, say             |
-| `uncalled here`   | a parameter of a function nothing open calls                  |
+| `uncalled here`   | a parameter no call site in the open files fills in           |
 | `caller supplies` | a parameter of a function handed to something else to invoke  |
 | `seen above`      | a cycle — the same declaration is already expanded further up |
 
@@ -174,13 +183,17 @@ callee's body wherever it lives — and back out again, because find-all-referen
 too, so a parameter still reaches the argument at every call site including the ones in other tabs.
 Each step is labelled with the file it is in (`store.ts:6`), the summary says how many files the
 path touched, and clicking a step in another tab opens it. The editor only decorates the steps in
-the tab on screen: a span is an offset into one file and means nothing in another.
+the tab on screen: a span is an offset into one file and means nothing in another. The parameter a
+value _arrives_ as is marked too, with a dashed underline rather than a step's tint — the walk
+collapses the hop from a name to its declaration, so that parameter is on the path without being a
+step, and where the trace leaves for the call sites it would otherwise go unmarked entirely.
 
 `noLib` does the interesting work at the end. Because nothing resolves into the standard library,
 **a name with no definition is by construction external** — so `process.env.TOKEN` and
 `document.location` fall out as sources with no list of dangerous globals to maintain. An
 unresolvable call keeps its arguments and its receiver as children, so `untrusted.trim()` still
-leads back to `untrusted` rather than dead-ending on an unknown method.
+leads back to `untrusted` rather than dead-ending on an unknown method — and a tag no open file
+declares keeps its substitutions the same way.
 
 The same cut runs through property chains, and it is why the walk does not stop at the first thing
 it cannot type. In an express handler, `Request` never resolves, so `req.params.id` has no
@@ -218,7 +231,7 @@ and no alias analysis. Concretely, it will miss things.
 - **Mutation.** `arr.push(tainted)` followed by `arr[0]` is not tracked.
 - **`this` and class fields** assigned in a constructor are only partly followed.
 - **Standard library calls** report as external, since `noLib` means `Math.max` is as unknown as
-  anything else. Honest, but noisy.
+  anything else, `` String.raw`…` `` included. Honest, but noisy.
 
 A trace runs only when asked, and is dropped as soon as the buffer changes — every span in it is an
 offset into text that has since moved. Unlike the definition highlight, which is one lookup per

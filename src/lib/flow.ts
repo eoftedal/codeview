@@ -45,6 +45,12 @@ export type FlowStep =
 export type FlowOrigin =
   'literal' | 'import' | 'external' | 'entry' | 'callback' | 'cycle' | 'budget'
 
+/** A step's location: which file, and where in it. Spans mean nothing without the file now. */
+export interface FlowTarget {
+  span: Span
+  file: string
+}
+
 export interface FlowNode {
   id: number
   span: Span
@@ -65,6 +71,16 @@ export interface FlowNode {
   children: number[]
   /** For a `cycle` terminal: the id of the node that already expanded this declaration. */
   seenAs?: number
+  /**
+   * A declaration the walk passed *through* without giving it a row.
+   *
+   * The identifier→declaration hop is collapsed so a chain does not double, which is right for the
+   * pane but leaves a gap in the editor: where a parameter continues out to its call sites, the
+   * children land at the arguments — in another function, often another file — so nothing marks the
+   * parameter the value actually arrives as. This is that span, for decorating only; it is
+   * deliberately not a step, and the trace's length and shape are unchanged by it.
+   */
+  via?: FlowTarget
 }
 
 export interface FlowTrace {
@@ -95,12 +111,8 @@ export function isExternalOrigin(origin: FlowOrigin | undefined): boolean {
 export interface FlowSpan {
   span: Span
   external: boolean
-}
-
-/** A step's location: which file, and where in it. Spans mean nothing without the file now. */
-export interface FlowTarget {
-  span: Span
-  file: string
+  /** A `via` declaration rather than a step: marked, but not part of the path's length. */
+  weak?: boolean
 }
 
 interface Walk {
@@ -204,6 +216,43 @@ function operandsOf(expr: ts.Expression): ts.Expression[] {
   return []
 }
 
+/**
+ * Call-like expressions: something invoked, with values fed into it. A tagged template is one — the
+ * tag is invoked with the template's pieces — it just keeps its callee and its arguments under
+ * different names.
+ */
+type CallLike = ts.CallExpression | ts.NewExpression | ts.TaggedTemplateExpression
+
+function isCallLike(node: ts.Node): node is CallLike {
+  return (
+    ts.isCallExpression(node) || ts.isNewExpression(node) || ts.isTaggedTemplateExpression(node)
+  )
+}
+
+/** What is being invoked: a tagged template keeps it in `tag`, a call in `expression`. */
+function calleeOf(call: CallLike): ts.LeftHandSideExpression {
+  return ts.isTaggedTemplateExpression(call) ? call.tag : call.expression
+}
+
+/**
+ * The expressions fed in. For a tagged template those are its `${…}` substitutions: the cooked
+ * strings handed to the tag first are assembled by the runtime, not written anywhere in the source,
+ * so there is no expression to walk for them.
+ */
+function argumentsOf(call: CallLike): readonly ts.Expression[] {
+  if (!ts.isTaggedTemplateExpression(call)) return call.arguments ?? []
+  const template = call.template
+  return ts.isTemplateExpression(template) ? template.templateSpans.map((s) => s.expression) : []
+}
+
+/**
+ * How far ahead of `argumentsOf` a parameter index runs. A tag is invoked with that strings array
+ * first, so substitution 0 of a tagged template lands in parameter 1 of `sql(strings, ...values)`.
+ */
+function argumentOffset(call: CallLike): number {
+  return ts.isTaggedTemplateExpression(call) ? 1 : 0
+}
+
 /** Where to ask TypeScript about an expression: a property access resolves through its name. */
 function lookupPosition(expr: ts.Expression, sf: ts.SourceFile): number {
   if (ts.isPropertyAccessExpression(expr)) return expr.name.getStart(sf)
@@ -241,24 +290,16 @@ function calleeName(fn: ts.Node): ts.Identifier | null {
 }
 
 /** The call a reference to a callee name belongs to, if it is one. */
-function callAt(sf: ts.SourceFile, position: number): ts.CallExpression | ts.NewExpression | null {
+function callAt(sf: ts.SourceFile, position: number): CallLike | null {
   const node = findTsNodeAtOffset(sf, position)
   const parent = node.parent
   if (!parent) return null
 
-  if ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression === node) {
-    return parent
-  }
+  if (isCallLike(parent) && calleeOf(parent) === node) return parent
   // `obj.m(x)` — the reference is the property name, so the call is one level further out.
   if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
     const grand = parent.parent
-    if (
-      grand &&
-      (ts.isCallExpression(grand) || ts.isNewExpression(grand)) &&
-      grand.expression === parent
-    ) {
-      return grand
-    }
+    if (grand && isCallLike(grand) && calleeOf(grand) === parent) return grand
   }
   return null
 }
@@ -339,6 +380,9 @@ interface ArgumentSource {
  * Finds the enclosing function's call sites through its name's references, then takes the argument
  * at the parameter's index. A call site that omits the argument falls back to the parameter's own
  * default, which is how `connect()` reaches `settings = config`.
+ *
+ * A tagged call site's arguments are its substitutions, which start one parameter late — see
+ * `argumentOffset`.
  */
 function argumentsFor(walk: Walk, param: ts.ParameterDeclaration): ArgumentSource[] {
   const fn = param.parent
@@ -367,12 +411,18 @@ function argumentsFor(walk: Walk, param: ts.ParameterDeclaration): ArgumentSourc
     const call = callAt(refSf, ref.textSpan.start)
     if (!call) continue
 
-    const args = call.arguments ?? ([] as unknown as ts.NodeArray<ts.Expression>)
+    const args = argumentsOf(call)
+    // A tag's parameters run one ahead of its substitutions, so `strings` reads past the front of
+    // the list and finds nothing: `args[-1]` is undefined and it falls back to its own default,
+    // exactly as a call site that omits an argument does. A rest parameter that swallows the
+    // strings array still collects every substitution after it, hence the clamp rather than a
+    // bail-out.
+    const position = index - argumentOffset(call)
     if (param.dotDotDotToken) {
-      for (const arg of Array.from(args).slice(index)) take(arg)
+      for (const arg of args.slice(Math.max(position, 0))) take(arg)
       continue
     }
-    const arg = args[index] ?? param.initializer
+    const arg = args[position] ?? param.initializer
     if (arg) take(arg)
   }
   return sources
@@ -425,7 +475,7 @@ function expand(walk: Walk, node: FlowNode, expression: ts.Expression, depth: nu
     return
   }
 
-  if (ts.isCallExpression(expr) || ts.isNewExpression(expr)) {
+  if (isCallLike(expr)) {
     expandCall(walk, node, expr, depth)
     return
   }
@@ -481,16 +531,10 @@ function expand(walk: Walk, node: FlowNode, expression: ts.Expression, depth: nu
   node.origin = 'external'
 }
 
-function expandCall(
-  walk: Walk,
-  node: FlowNode,
-  call: ts.CallExpression | ts.NewExpression,
-  depth: number,
-): void {
+function expandCall(walk: Walk, node: FlowNode, call: CallLike, depth: number): void {
   const sf = call.getSourceFile()
-  const target = ts.isPropertyAccessExpression(call.expression)
-    ? call.expression.name
-    : call.expression
+  const callee = calleeOf(call)
+  const target = ts.isPropertyAccessExpression(callee) ? callee.name : callee
   const hit = ts.isIdentifier(target)
     ? declarationAt(walk.service, sf, sf.fileName, target.getStart(sf))
     : null
@@ -548,20 +592,25 @@ function expandCall(
  * A call we cannot see inside. Everything fed in could contribute to what comes out — the receiver
  * included, so `untrusted.trim()` still leads back to `untrusted`. Over-approximate on purpose.
  */
-function expandOpaqueCall(
-  walk: Walk,
-  node: FlowNode,
-  call: ts.CallExpression | ts.NewExpression,
-  depth: number,
-): void {
+function expandOpaqueCall(walk: Walk, node: FlowNode, call: CallLike, depth: number): void {
   const parts: ts.Expression[] = []
-  if (ts.isPropertyAccessExpression(call.expression)) parts.push(call.expression.expression)
-  for (const arg of call.arguments ?? []) parts.push(arg)
+  const callee = calleeOf(call)
+  if (ts.isPropertyAccessExpression(callee)) parts.push(callee.expression)
+  for (const arg of argumentsOf(call)) parts.push(arg)
 
   for (const part of parts) {
     if (isConstant(unwrap(part))) continue
     node.children.push(traceValue(walk, part, 'operand', 'flows into the call', depth + 1))
   }
+}
+
+/** True when a node already points at this declaration — the root, asked about it directly. */
+function coversDeclaration(node: FlowNode, span: Span, sf: ts.SourceFile): boolean {
+  return (
+    span.start === node.span.start &&
+    span.end === node.span.end &&
+    fileLabel(sf.fileName) === node.file
+  )
 }
 
 /**
@@ -581,11 +630,7 @@ function terminateAtDeclaration(
 ): void {
   const sf = decl.getSourceFile()
   const view = describeDeclaration(decl, sf, name)
-  if (
-    view.span.start === node.span.start &&
-    view.span.end === node.span.end &&
-    fileLabel(sf.fileName) === node.file
-  ) {
+  if (coversDeclaration(node, view.span, sf)) {
     node.origin = origin
     return
   }
@@ -675,6 +720,14 @@ function expandParameter(
     terminateAtDeclaration(walk, node, param, name, origin)
     return
   }
+  // The walk leaves for the call sites from here, so this declaration gets no row of its own and
+  // no child sits inside it. Record it for the editor, unless the node already is it.
+  const sf = param.getSourceFile()
+  const view = describeDeclaration(param, sf, name)
+  if (!coversDeclaration(node, view.span, sf)) {
+    node.via = { span: view.span, file: fileLabel(sf.fileName) }
+  }
+
   for (const source of sources) {
     node.children.push(
       traceValue(walk, source.expr, 'argument', `passed to \`${source.callee}\``, depth + 1),
