@@ -265,3 +265,47 @@ describe('across files', () => {
     ])
   })
 })
+
+describe('a value carried inside a wrapper', () => {
+  const WRAPPER = {
+    'wrapper.py': 'class Wrapper:\n    def __init__(self, value):\n        self.value = value\n',
+  }
+
+  it('follows a value into a wrapper object and out the other side', () => {
+    // The shape that motivated this: a value is read from a request, put in an object, the object
+    // is passed down, and the value is read back out. `w` is untyped, so `w.value` cannot be named
+    // — but the attribute's *name* rides the fallback branch and a construction of a class that
+    // has one answers it.
+    expect(
+      renderAcross(`def run(w):\n    return w.valu|e\n`, {
+        ...WRAPPER,
+        'controller.py':
+          'from wrapper import Wrapper\nfrom main import run\n\ndef handle(request):\n    run(Wrapper(request.args["id"]))\n',
+      }),
+    ).toEqual([
+      'main.py parameter `w`: w',
+      '  controller.py passed to `run`: Wrapper(request.args["id"])',
+      '    wrapper.py initialised from: value',
+      '      controller.py passed to `Wrapper`: request.args["id"]',
+      '        controller.py element of: request.args',
+      '          controller.py `.args` read from: request',
+      '            controller.py parameter `request`: request [entry]',
+    ])
+  })
+
+  it('still calls a construction a literal when no attribute is being sought', () => {
+    expect(render(`from wrapper import Wrapper\n\nw = Wrapper("x")\nuse(w|)\n`, WRAPPER)).toEqual([
+      'variable `w`: w = Wrapper("x")',
+      '  initialised from: Wrapper("x") [literal]',
+    ])
+  })
+
+  it('and when the class has no such attribute', () => {
+    expect(
+      render(`def run(w):\n    return w.missin|g\n`, {
+        ...WRAPPER,
+        'c.py': 'from wrapper import Wrapper\nfrom main import run\n\nrun(Wrapper("x"))\n',
+      }).join('\n'),
+    ).toContain('[literal]')
+  })
+})

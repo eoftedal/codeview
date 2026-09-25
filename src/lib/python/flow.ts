@@ -22,9 +22,24 @@ import type { Node } from '@vscode/tree-sitter-wasm'
 import type { Span } from '../definitions'
 import type { FlowNode, FlowOrigin, FlowStep, FlowTrace } from '../flow'
 import { isExternalOrigin } from '../flow'
-import { bindingAt, describePythonBinding, moduleOf, type PythonFile } from './definitions'
+import {
+  bindingAt,
+  describePythonBinding,
+  identifierAt,
+  moduleOf,
+  type PythonFile,
+} from './definitions'
 import { importedName } from './modules'
-import { buildScopes, lookup, scopeAt, type Binding, type Scope, type ScopeTree } from './scopes'
+import {
+  buildScopes,
+  lookup,
+  ownAttributeOf,
+  scopeAt,
+  scopeForNode,
+  type Binding,
+  type Scope,
+  type ScopeTree,
+} from './scopes'
 
 // The same figures lib/flow.ts uses. A trace that behaves differently depending on the language it
 // is reading would be a worse tool than one that stops in the same place.
@@ -392,6 +407,18 @@ function functionOf(parameter: Node): Node | null {
 
 /* ------------------------------------------------------------------ the walk */
 
+/**
+ * The attribute a branch is still looking for.
+ *
+ * When `obj.value` cannot be named — `obj` is an untyped parameter, which is most of Python — the
+ * walk falls back to tracing `obj` itself. That used to end at `Wrapper(ident)` and call it a
+ * literal, losing the taint exactly where a wrapper object carries it. Carrying the attribute's
+ * name down that branch lets a construction of a class that *has* such an attribute connect back
+ * to the argument that set it. It rides through argument, assignment and return hops unchanged, is
+ * consumed by the first construction that can answer it, and where no branch can, nothing changes.
+ */
+type Seeking = string | undefined
+
 function traceValue(
   walk: Walk,
   file: PythonFile,
@@ -399,9 +426,10 @@ function traceValue(
   step: FlowStep,
   label: string,
   depth: number,
+  seeking?: Seeking,
 ): number {
   const node = addNode(walk, file, spanOf(expression), step, label)
-  expand(walk, node, file, expression, depth)
+  expand(walk, node, file, expression, depth, seeking)
   return node.id
 }
 
@@ -411,6 +439,7 @@ function expand(
   file: PythonFile,
   expression: Node,
   depth: number,
+  seeking?: Seeking,
 ): void {
   if (depth >= MAX_DEPTH || walk.nodes.length >= MAX_NODES) {
     node.origin = 'budget'
@@ -426,7 +455,7 @@ function expand(
   }
 
   if (expr.type === 'call') {
-    expandCall(walk, node, file, expr, depth)
+    expandCall(walk, node, file, expr, depth, seeking)
     return
   }
 
@@ -457,7 +486,15 @@ function expand(
       const attribute = expr.childForFieldName('attribute')
       if (object && attribute) {
         node.children.push(
-          traceValue(walk, file, object, 'property', `\`.${attribute.text}\` read from`, depth + 1),
+          traceValue(
+            walk,
+            file,
+            object,
+            'property',
+            `\`.${attribute.text}\` read from`,
+            depth + 1,
+            attribute.text,
+          ),
         )
         return
       }
@@ -466,7 +503,7 @@ function expand(
     const where = hit.definedIn
       ? (walk.files.find((candidate) => candidate.name === hit.definedIn) ?? file)
       : file
-    expandBinding(walk, node, follow({ binding: hit.binding, file: where }, walk), depth)
+    expandBinding(walk, node, follow({ binding: hit.binding, file: where }, walk), depth, seeking)
     return
   }
 
@@ -497,7 +534,14 @@ function lookupOffset(expr: Node): number {
   return expr.childForFieldName('attribute')?.startIndex ?? expr.startIndex
 }
 
-function expandCall(walk: Walk, node: FlowNode, file: PythonFile, call: Node, depth: number): void {
+function expandCall(
+  walk: Walk,
+  node: FlowNode,
+  file: PythonFile,
+  call: Node,
+  depth: number,
+  seeking?: Seeking,
+): void {
   const identifier = calleeIdentifier(call)
   const hit = identifier
     ? bindingAt(walk.scopes(file), file, identifier.startIndex, {
@@ -524,8 +568,18 @@ function expandCall(walk: Walk, node: FlowNode, file: PythonFile, call: Node, de
     return
   }
 
-  // Constructing a class makes a fresh value right here.
+  // Constructing a class makes a fresh value right here — unless this branch is still looking for
+  // one of its attributes, in which case the object is a wrapper and the taint is inside it.
   if (target.binding.reason === 'class') {
+    if (seeking) {
+      const owner = scopeForNode(walk.scopes(target.file), target.binding.declNode)
+      // The wrapper's own attributes only; one declared on a base class is not followed here.
+      const attribute = owner && ownAttributeOf(owner, seeking, call.startIndex)
+      if (attribute) {
+        expandBinding(walk, node, { binding: attribute, file: target.file }, depth)
+        return
+      }
+    }
     node.origin = 'literal'
     return
   }
@@ -631,7 +685,13 @@ function terminateAtBinding(walk: Walk, node: FlowNode, hit: Located, origin: Fl
   node.children.push(child.id)
 }
 
-function expandBinding(walk: Walk, node: FlowNode, hit: Located, depth: number): void {
+function expandBinding(
+  walk: Walk,
+  node: FlowNode,
+  hit: Located,
+  depth: number,
+  seeking?: Seeking,
+): void {
   const key = keyOf(hit)
   const seen = walk.expanded.get(key)
   if (seen !== undefined) {
@@ -650,7 +710,7 @@ function expandBinding(walk: Walk, node: FlowNode, hit: Located, depth: number):
   }
 
   if (binding.reason === 'parameter') {
-    expandParameter(walk, node, hit, depth)
+    expandParameter(walk, node, hit, depth, seeking)
     return
   }
 
@@ -667,7 +727,7 @@ function expandBinding(walk: Walk, node: FlowNode, hit: Located, depth: number):
     for (const [index, write] of writes.entries()) {
       const step: FlowStep = index === 0 ? 'initializer' : 'assignment'
       const label = index === 0 ? 'initialised from' : 'reassigned'
-      node.children.push(traceValue(walk, file, write, step, label, depth + 1))
+      node.children.push(traceValue(walk, file, write, step, label, depth + 1, seeking))
     }
     return
   }
@@ -736,7 +796,13 @@ function sourceOfBinder(declaration: Node): { expr: Node; step: FlowStep; label:
   return null
 }
 
-function expandParameter(walk: Walk, node: FlowNode, hit: Located, depth: number): void {
+function expandParameter(
+  walk: Walk,
+  node: FlowNode,
+  hit: Located,
+  depth: number,
+  seeking?: Seeking,
+): void {
   const { binding, file } = hit
   const declaration = functionOf(binding.declNode)
   if (!declaration) {
@@ -779,6 +845,7 @@ function expandParameter(walk: Walk, node: FlowNode, hit: Located, depth: number
         'argument',
         `passed to \`${source.callee}\``,
         depth + 1,
+        seeking,
       ),
     )
   }
@@ -839,7 +906,15 @@ export function tracePythonOrigins(
   const where = hit.definedIn
     ? (files.find((candidate) => candidate.name === hit.definedIn) ?? active)
     : active
-  expandBinding(walk, root, follow({ binding: hit.binding, file: where }, walk), 0)
+
+  // Tracing *at* `obj.value` roots on `obj`'s declaration — the walk never passes through `expand`,
+  // so the attribute being asked about would be lost before the first hop. Seed it here, or the
+  // most natural place to put the cursor is the one place the wrapper walk does not happen.
+  const identifier = identifierAt(active.root, offset)
+  const seeking =
+    hit.viaObject && identifier?.parent?.type === 'attribute' ? identifier.text : undefined
+
+  expandBinding(walk, root, follow({ binding: hit.binding, file: where }, walk), 0, seeking)
 
   return {
     nodes: walk.nodes,

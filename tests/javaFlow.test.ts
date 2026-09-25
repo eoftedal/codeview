@@ -190,3 +190,91 @@ describe('across tabs', () => {
     ])
   })
 })
+
+describe('a value carried inside a wrapper', () => {
+  const WRAPPER = {
+    'Wrapper.java':
+      'class Wrapper {\n    private final String value;\n    Wrapper(String value) { this.value = value; }\n    String getValue() { return value; }\n}\n',
+  }
+
+  it('follows a value into a wrapper object and out through its getter', () => {
+    // Java writes the receiver's type down, so this needs no inference: `w.getValue()` resolves,
+    // the getter returns the field, the field was set by the constructor, and the constructor was
+    // called with the tainted value.
+    expect(
+      renderAcross(
+        `class Service {\n    void run(Wrapper w) {\n        String v = w.getValue();\n        use(|v);\n    }\n}\n`,
+        {
+          ...WRAPPER,
+          'Controller.java':
+            'class Controller {\n    void handle(Request request) {\n        new Service().run(new Wrapper(request.getParameter("id")));\n    }\n}\n',
+        },
+      ),
+    ).toEqual([
+      'Main.java variable `v`: String v = w.getValue();',
+      '  Main.java initialised from: w.getValue()',
+      '    Wrapper.java returned from: value',
+      '      Wrapper.java initialised from: value',
+      '        Controller.java passed to `Wrapper`: request.getParameter("id") [external]',
+      '          Controller.java flows into the call: request',
+      '            Controller.java parameter `request`: Request request [entry]',
+    ])
+  })
+
+  it('reads a var receiver’s type off the construction', () => {
+    // `var` puts the type on the `new` rather than on the declaration, and `var` is how most
+    // modern Java spells a local — without this the receiver is opaque.
+    expect(
+      renderAcross(
+        `class Service {\n    void run() {\n        var w = new Wrapper("x");\n        String v = w.getValue();\n        use(|v);\n    }\n}\n`,
+        WRAPPER,
+      ),
+    ).toEqual([
+      'Main.java variable `v`: String v = w.getValue();',
+      '  Main.java initialised from: w.getValue()',
+      '    Wrapper.java returned from: value',
+      '      Wrapper.java initialised from: value',
+      '        Main.java passed to `Wrapper`: "x" [literal]',
+    ])
+  })
+})
+
+describe('a record used as a value wrapper', () => {
+  // The shape a Spring controller takes: a path variable is wrapped in a record, the record is
+  // passed to a repository, and the repository unwraps it into a query.
+  const PRODUCT_ID = {
+    'ProductId.java':
+      'public record ProductId(\n    String value\n) {\n    public ProductId {\n        UUID.fromString(value);\n    }\n}\n',
+  }
+  const CONTROLLER = {
+    'Controller.java':
+      'class Controller {\n    public ProductDto productById(@PathVariable String id) {\n        var productId = new ProductId(id);\n        return repo.getPizza(productId);\n    }\n}\n',
+  }
+
+  it('reads a record accessor as the component, and the component as the constructor argument', () => {
+    // Two things nothing in the source writes down: a record generates `value()` per component,
+    // and the component *is* the canonical constructor's parameter. Without both, this ends at
+    // `new ProductId(id)` and the path variable is never reached.
+    expect(
+      renderAcross(
+        `class ProductRepository {\n    public Optional<Product> getPizza(ProductId id) {\n        var i = id.value();\n        return query("... WHERE id='" + |i + "'");\n    }\n}\n`,
+        { ...PRODUCT_ID, ...CONTROLLER },
+      ),
+    ).toEqual([
+      'Main.java variable `i`: var i = id.value();',
+      '  Main.java initialised from: id.value()',
+      '    Controller.java passed to `ProductId`: id',
+      '      Controller.java parameter `id`: @PathVariable String id [entry]',
+    ])
+  })
+
+  it('reports every construction of the record, not just the one that led here', () => {
+    // A may-analysis: a second `new ProductId(…)` elsewhere is another way the value could arrive.
+    const out = renderAcross(
+      `class ProductRepository {\n    public Optional<Product> getPizza(ProductId id) {\n        var i = id.value();\n        return query(|i);\n    }\n    Product map(Row rs) { return new Product(new ProductId(rs.getString("id"))); }\n}\n`,
+      { ...PRODUCT_ID, ...CONTROLLER },
+    )
+    expect(out.join('\n')).toContain('passed to `ProductId`: rs.getString("id")')
+    expect(out.join('\n')).toContain('passed to `ProductId`: id')
+  })
+})

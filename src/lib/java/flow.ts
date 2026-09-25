@@ -248,6 +248,48 @@ function callSitesOf(walk: Walk, target: Located): CallSite[] {
   return sites
 }
 
+function argumentsIn(call: Node): number {
+  const args = call.childForFieldName('arguments')
+  return args ? args.namedChildren.filter((child) => child !== null).length : 0
+}
+
+/**
+ * A record component, which is a parameter of the canonical constructor as much as it is a field.
+ * `record ProductId(String value)` declares both, and neither is written down anywhere to walk to.
+ */
+function recordComponent(binding: Binding): { record: Node; index: number } | null {
+  const declaration = binding.declNode
+  if (declaration.type !== 'formal_parameter') return null
+  const list = declaration.parent
+  if (list?.type !== 'formal_parameters') return null
+  const record = list.parent
+  if (record?.type !== 'record_declaration') return null
+  const index = list.namedChildren
+    .filter((child): child is Node => child !== null)
+    .findIndex((child) => child.id === declaration.id)
+  return index >= 0 ? { record, index } : null
+}
+
+/**
+ * Every `new R(…)` across the open tabs, matched on the type's name.
+ *
+ * A type name is far more distinctive than a method name, so this over-approximates much less than
+ * the equivalent rule for methods — and under-approximating would lose the only edge a record
+ * component has, since its value arrives through the canonical constructor and nowhere else.
+ */
+function constructionsOf(walk: Walk, record: Node): CallSite[] {
+  const name = record.childForFieldName('name')?.text
+  if (!name) return []
+  const sites: CallSite[] = []
+  for (const file of walk.files) {
+    for (const call of nodesOfType(file.root, 'object_creation_expression')) {
+      if (call.childForFieldName('type')?.text !== name) continue
+      sites.push({ call, file, callee: name, shift: 0 })
+    }
+  }
+  return sites
+}
+
 /** A constructor declares a method whose name is its own type's. */
 function isConstructor(target: Located): boolean {
   return target.binding.declNode.type === 'constructor_declaration'
@@ -417,6 +459,13 @@ function expandCall(walk: Walk, node: FlowNode, file: JavaFile, call: Node, dept
     return
   }
 
+  // A record generates an accessor per component, so `id.value()` calls a method that is nowhere
+  // written down — the name resolves to the component itself. Reading it is what the call does.
+  if (target.binding.reason === 'property' && argumentsIn(call) === 0) {
+    expandBinding(walk, node, target, depth)
+    return
+  }
+
   if (target.binding.reason !== 'function') {
     node.origin = 'external'
     expandOpaqueCall(walk, node, file, call, depth)
@@ -528,6 +577,14 @@ function expandBinding(walk: Walk, node: FlowNode, hit: Located, depth: number):
     return
   }
 
+  // A record component has no assignment to find: it *is* the canonical constructor's parameter,
+  // so its value comes from every `new R(…)` at that position.
+  const component = recordComponent(binding)
+  if (component) {
+    supplyFrom(walk, node, hit, constructionsOf(walk, component.record), component.index, depth)
+    return
+  }
+
   const writes = writesFor(walk, hit)
   if (writes.length > 0) {
     for (const [index, write] of writes.entries()) {
@@ -626,6 +683,30 @@ function expandParameter(walk: Walk, node: FlowNode, hit: Located, depth: number
     (parameter) => parameterNameOf(parameter) === binding.name,
   )
 
+  supplyFrom(
+    walk,
+    node,
+    hit,
+    sites,
+    index,
+    depth,
+    declaration.type === 'lambda_expression' ? 'callback' : 'entry',
+  )
+}
+
+/**
+ * Hand a declaration the arguments its call sites supply at `index`. Shared by an ordinary
+ * parameter and by a record component, which is one in all but spelling.
+ */
+function supplyFrom(
+  walk: Walk,
+  node: FlowNode,
+  hit: Located,
+  sites: readonly CallSite[],
+  index: number,
+  depth: number,
+  empty: FlowOrigin = 'entry',
+): void {
   const supplied: { expr: Node; file: JavaFile; callee: string }[] = []
   for (const site of sites) {
     const argument = argumentFor(site, index)
@@ -633,14 +714,14 @@ function expandParameter(walk: Walk, node: FlowNode, hit: Located, depth: number
   }
 
   if (supplied.length === 0) {
-    const origin: FlowOrigin = declaration.type === 'lambda_expression' ? 'callback' : 'entry'
-    terminateAtBinding(walk, node, hit, origin)
+    terminateAtBinding(walk, node, hit, empty)
     return
   }
 
-  const span = spanOf(binding.declNode)
-  if (!(node.file === file.name && node.span.start === span.start)) {
-    node.via = { span, file: file.name }
+  // The walk leaves for the call sites from here, so this declaration gets no row of its own.
+  const span = spanOf(hit.binding.declNode)
+  if (!(node.file === hit.file.name && node.span.start === span.start)) {
+    node.via = { span, file: hit.file.name }
   }
 
   for (const source of supplied) {

@@ -323,11 +323,36 @@ function declaredTypeName(binding: Binding): string | null {
   const declared =
     binding.declNode.childForFieldName('type') ??
     binding.declNode.namedChildren.find((child) => child?.type === 'type_identifier')
-  if (!declared) return null
+
+  // `var` writes the type on the `new` instead of on the declaration, so read it from there.
+  // Without this a `var` receiver is opaque, and `var` is how most modern Java spells a local.
+  if (!declared || declared.text === 'var') return constructedTypeName(binding.declNode)
+
   if (declared.type === 'type_identifier') return declared.text
   // `List<Db>` and friends: take the head, which is the type being named.
   if (declared.type === 'generic_type') {
     return declared.namedChildren.find((child) => child?.type === 'type_identifier')?.text ?? null
+  }
+  return null
+}
+
+/** The type a declaration's initializer constructs — `var w = new Wrapper(…)`. */
+function constructedTypeName(declaration: Node): string | null {
+  for (const declarator of declaration.namedChildren) {
+    if (declarator?.type !== 'variable_declarator') continue
+    const value = declarator.childForFieldName('value')
+    if (value?.type !== 'object_creation_expression') continue
+    const type = value.childForFieldName('type')
+    if (type?.type === 'type_identifier') return type.text
+    if (type?.type === 'generic_type') {
+      return type.namedChildren.find((child) => child?.type === 'type_identifier')?.text ?? null
+    }
+  }
+  // A try-with-resources writes `var r = open()` with the value on the resource itself.
+  const resourceValue = declaration.childForFieldName('value')
+  if (resourceValue?.type === 'object_creation_expression') {
+    const type = resourceValue.childForFieldName('type')
+    if (type?.type === 'type_identifier') return type.text
   }
   return null
 }

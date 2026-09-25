@@ -198,6 +198,12 @@ worth knowing:
 - **Constructing a class is treated as a call to its `__init__`**, because nothing in the source
   says so — the call site reads `Connection(host)`. Without that link every constructor parameter
   would dead-end as an entry point.
+- **A value carried inside a wrapper object is followed through it.** A value read from a request,
+  stored on an object, passed down and read back out is the shape most taint actually takes, and
+  `w.value` on an untyped `w` cannot be named. So the attribute's _name_ rides the fallback branch,
+  and a construction of a class that has such an attribute connects back to the argument that set
+  it — the chain runs from the read, through the constructor, to the request. A construction with
+  no attribute being sought is still just a literal.
 - **A method call on a receiver the tool cannot name** — `C().use(x)`, `self.conn.use(x)` — is
   matched on the method name alone, but only where that name is declared exactly once across the
   open tabs. That over-approximates, which a _may_-analysis is allowed to do; where the name is
@@ -236,6 +242,20 @@ says what `db` is on the line, so `db.load()` follows into `Db.load` — the mem
 has to decline. It works for a local, a field or a parameter whose type names a type in an open tab;
 a receiver whose type is not written down locally (a chained call, a field of a type from outside)
 leaves its members unresolvable, and the answer degrades to where the receiver came from.
+
+**A record is followed through as a value wrapper**, which is what records are mostly used for. Two
+things a record declares without writing them down anywhere: an accessor per component, so
+`id.value()` calls a method that appears nowhere; and the component itself, which _is_ the canonical
+constructor's parameter. Both are resolved, so a value wrapped in a record — the common Spring shape
+of a path variable turned into a `ProductId` and handed to a repository — traces from the unwrapped
+read all the way back to the request. Every `new ProductId(…)` across the open tabs is reported, not
+just the one that led there: a may-analysis shows every way the value could arrive.
+
+**A `var` receiver reads its type off the construction.** `var w = new Wrapper(x)` writes the type
+on the `new` rather than on the declaration, and `var` is how most modern Java spells a local — so
+`w.getValue()` follows into `Wrapper` either way. A wrapper object therefore needs no special
+handling here: the getter returns the field, the field was set by the constructor, and the
+constructor was called with the value.
 
 **A type in the same package needs no import**, and that is the shape most pasted pairs of files
 take — so an unresolved type name also looks for a tab declaring a top-level type of that name.

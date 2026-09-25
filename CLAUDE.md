@@ -125,6 +125,31 @@ object-shaped code. And **the argument shift belongs to the call site, not to it
 first has a receiver to detect — `CallSite.shift` carries it rather than re-deriving it, which is
 the off-by-one that reported the wrong value for every constructor argument.
 
+**A wrapper object is followed through, and that is what `Seeking` is for.** A value read from a
+request, stored on an object, passed down and read back out is the shape most taint takes — and in
+Python `w.value` on an untyped `w` cannot be named, so the walk falls back to tracing `w` and used
+to stop at `Wrapper(ident)` calling it a literal, losing the taint exactly where the wrapper carries
+it. The attribute's _name_ now rides that fallback branch: it passes through argument, assignment
+and return hops unchanged, and is **consumed by the first construction of a class that has such an
+attribute**, which then expands to the constructor argument that set it. Where no branch can answer
+it, nothing changes — a construction with nothing being sought is still a literal. It is seeded in
+two places, and missing either one breaks the common case: `expand`'s `viaObject` branch, and
+`tracePythonOrigins` itself, because tracing _at_ `obj.value` roots on `obj`'s declaration and never
+passes through `expand` at all. Java needs none of this — it writes the receiver's type down — but
+it does need `var` read off the `new`, since `var` is how most modern Java spells a local and a
+`var` receiver is otherwise opaque.
+
+**A record is a value wrapper, and two of its members are written down nowhere.** `record
+ProductId(String value)` generates an accessor per component — so `id.value()` calls a method that
+appears in no source — and the component _is_ the canonical constructor's parameter, so its value
+arrives through `new ProductId(…)` and nowhere else. `expandCall` therefore treats a zero-argument
+invocation resolving to a `property` as a read of that component, and `expandBinding` routes a
+record component through `supplyFrom` against `constructionsOf` rather than looking for an
+assignment it will never find. Missing either one ends the trace at `new ProductId(id)` calling it a
+literal, which is precisely where a Spring controller's path variable disappears. Constructions are
+matched on the **type name**, which over-approximates far less than the equivalent rule for methods
+— a type name is distinctive — and under-approximating would lose the component's only edge.
+
 **A method call on a receiver we cannot name is matched on the name alone, and that is deliberate
 over-approximation.** `C().use(x)` and `self.conn.use(x)` leave `o.use` unresolvable, and dropping
 them would _under_-approximate — a trace that silently misses a path is the one failure this tool
