@@ -139,16 +139,30 @@ passes through `expand` at all. Java needs none of this — it writes the receiv
 it does need `var` read off the `new`, since `var` is how most modern Java spells a local and a
 `var` receiver is otherwise opaque.
 
-**A record is a value wrapper, and two of its members are written down nowhere.** `record
-ProductId(String value)` generates an accessor per component — so `id.value()` calls a method that
-appears in no source — and the component _is_ the canonical constructor's parameter, so its value
-arrives through `new ProductId(…)` and nowhere else. `expandCall` therefore treats a zero-argument
-invocation resolving to a `property` as a read of that component, and `expandBinding` routes a
-record component through `supplyFrom` against `constructionsOf` rather than looking for an
-assignment it will never find. Missing either one ends the trace at `new ProductId(id)` calling it a
-literal, which is precisely where a Spring controller's path variable disappears. Constructions are
-matched on the **type name**, which over-approximates far less than the equivalent rule for methods
-— a type name is distinctive — and under-approximating would lose the component's only edge.
+**Reading a member follows the receiver, and that is a correctness rule rather than a tuning one.**
+`id.value()` asks about one field of _this_ object. Expanding the member on its own reaches every
+construction of the type across the open tabs — including a repository that also _builds_ a
+`ProductId` when mapping a row, which nothing ever passes to the method being read. That is a path
+that **cannot happen**, and a false path costs a reviewer more than a missing one; it is also not
+what the "stated limits beat silent misses" rule is about, since following the receiver loses no real
+flow. So Java carries `Seeking` the way Python does: the member's name rides the receiver's own chain
+and is consumed by `constructorIndexFor` at the construction that actually made it. An earlier
+version scanned every `new R(…)`, and that is what produced the false branch.
+
+**A record's two members are written down nowhere**, which is what makes the above necessary rather
+than merely tidy. `record ProductId(String value)` generates an accessor per component — so
+`id.value()` calls a method that appears in no source — and the component _is_ the canonical
+constructor's parameter, so it has no assignment to walk to. `expandCall` treats a zero-argument
+invocation resolving to a `property` as a read of that component, and `accessorField` gives a
+hand-written `return value;` getter the same treatment, so records and plain wrappers take one path.
+`constructorIndexFor` then answers "which argument lands in this member": by position for a record,
+and from `this.x = p` in the constructor body for a class. Miss any of it and the trace ends at
+`new ProductId(id)` calling it a literal — precisely where a Spring controller's `@PathVariable`
+disappears.
+
+**Tracing _at_ a member read roots on the expression, not on the declaration.** `traceJavaOrigins`
+checks for that shape before its usual rooting, because expanding the declaration is the very thing
+that reaches every object of the type.
 
 **A method call on a receiver we cannot name is matched on the name alone, and that is deliberate
 over-approximation.** `C().use(x)` and `self.conn.use(x)` leave `o.use` unresolvable, and dropping
@@ -246,6 +260,73 @@ a cross-file one impossible to follow, since following it _is_ switching tabs.
 **Tab names are module paths.** `./db` finds the tab called `db.ts`, `db.js`, `lib/db.ts` or
 `lib/index.ts` — TypeScript's bundler resolution, given a host whose files are the open tabs. Two
 tabs may therefore not share a name (`renameFile` refuses), or an import would be ambiguous.
+
+**A folder open is two completely different mechanisms wearing one button.** `src/lib/upload.ts` is
+the seam: a **directory picker** (`webkitdirectory`, its own `<input>` — the attribute belongs to the
+element, not the click, so one input cannot ask for both) has already walked the tree by the time
+`change` fires, handing over a flat `FileList` whose entries each carry a `webkitRelativePath`, root
+segment included and `accept` ignored; a **drop** hands over none of that — `dataTransfer.files`
+holds one bogus entry per folder that fails on first read — so the tree is walked here, from entries
+that must be taken out of the `DataTransfer` **synchronously, before the first await**, since it is
+emptied the moment the handler yields. Hence `filesFromDrop`'s synchronous prologue and
+`onDrop` awaiting nothing ahead of it. `readEntries` returns a **batch at a time** (Chrome's is 100)
+and signals the end with an empty one, so it is called until it does — reading one batch would
+quietly open 100 files of a 150-file directory. The walk is **breadth-first**, which is not a style
+choice: depth-first plus a bound stops inside the first subdirectory it entered and never reaches the
+files beside it, while a level at a time means whatever the bound cuts is the deepest thing found,
+which the tab cap was going to discard anyway. A handle is asked for only for a name a backend can
+read, which is what makes skipping a repository's images and lockfiles cost nothing — **except at
+depth 0**, where a loose dropped file is kept whatever its extension, because a dropped `notes.md`
+deserves the word `openFiles` already has for it and silence reads as a broken drop target.
+
+**A folder's files arrive under their paths, and that is the whole reason it works.** A project holds
+two `index.ts` as a matter of course, and `openFiles` refreshes a tab whose name matches — so bare
+basenames would have the second file silently overwrite the first. A path is also already what a tab
+name _is_ (`lib/db.ts` resolves), so `./db` between two files of the same folder resolves exactly as
+it does between two hand-made tabs. `arrangeForOpen` drops the picked folder's own segment — every
+path shares it, so it says nothing, and relative imports are untouched because every path shifts
+equally — and drops nothing when they do **not** all share one, which is what a drop of two folders,
+or of a folder beside a loose file, looks like. What it deliberately does _not_ do is reorder:
+`tests/e2e/app.test.ts` pins both the strip's order and that the **last** file picked is the one you
+land on, and a folder is no reason to change either. So depth is spent where it is actually needed —
+`fitToStrip` returns a **set**, not a list, precisely so the cap can be decided on depth while the
+tabs still open in arrival order. `MAX_OPEN_FILES` is 50 because every tab is a Monaco model, a file
+in its language's program, a call-site scan for every trace and a section of a chat's prompt; the
+clip is stated, like the code listing's, and a refresh of a name already open costs no room against
+it. Readability is settled before the cap for the same reason: a file this viewer cannot parse must
+not take a place from one it can. `FileTabs` then shows the directory and the basename apart, with
+the directory taking practically all of the shrinking (`flex: 0 999 auto`) — end-truncating
+`src/lib/very-long-nam…` would be a strip of tabs that cannot be told from one another.
+
+**Quick open is Cmd+P, and both halves of it are decided by things outside this app.** The keybinding
+is on `window` in the **capture** phase, in `App.vue`, and each word of that is load-bearing: Monaco
+handles keys on its own node, which is a descendant, so a bubbling listener arrives after the editor
+has had its say; and Cmd+P is the _browser's_ print shortcut, which nothing but `preventDefault`
+stops. It is deliberately **not** `editor.addAction` the way trace is — the palette has to answer
+from the tree and the panes too, where the editor holds no focus and none of its actions run. Ctrl+P
+is accepted alongside Cmd+P since both spell "the command key" to a reader arriving from an editor
+and Monaco binds neither, while Cmd+Shift+P is deliberately left to the browser: a command palette is
+what that means elsewhere, and this app has no commands to offer.
+
+`src/lib/quickOpen.ts` is the pure half, and the matcher is a **subsequence** because that is the
+gesture readers bring — `slb` for `src/lib/base.ts`. What makes such a thing usable or useless is
+only ever the ranking, since every file in a tree matches a short query somehow, so the score is
+three things and no more: letters that run together, letters that start a word, and letters in the
+file's own name rather than the directories above it. The one non-obvious piece of the
+implementation is that it tries **every** starting position rather than the first — greedy from the
+left alone matches `store` against the `s` of `src/lib/store.ts` and scores it as scattered. Ties go
+to the shorter name, then alphabetically, so the list never reshuffles between two equal scores.
+`segmentsFor` cuts the name into runs for rendering, ending one wherever _either_ the match or the
+directory prefix changes, so a row stays a `v-for` and never `v-html`.
+
+**The palette lists files by recency, and that is what the order is for.** `useBuffer.recentFiles`
+puts the tab on screen first and the one before it second, and the palette arms the **second** row —
+which is the entire reason `recent` exists: arming the first would make Enter a no-op, while arming
+the one below it makes Cmd+P–Enter a toggle between the two files a reader is working in, as it is in
+an editor. `recent` is not persisted and is never cleaned up on a close: a reload has no history
+worth restoring, and a stale id simply finds no file when the order is read back, which is cheaper
+than watching for closes. Picking hands focus back to the buffer (`EditorPane.focus`), so the palette
+is never a detour that leaves you typing into nothing.
 
 **The cursor offset is the single source of truth for selection.** `AstNode.id` is a pre-order index
 that is only stable within one parse, so after every re-parse `App.vue` re-derives the selection from

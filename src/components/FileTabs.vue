@@ -40,6 +40,21 @@ function closeMenu(): void {
   menu.value = null
 }
 
+/**
+ * A tab opened from a folder is named by its path, and the end of a path is the half that says
+ * which file this is — so the two are shown apart and it is the directory that gives way when the
+ * strip runs out of room. An end-truncated `src/lib/very-long-nam…` would be a row of tabs that
+ * cannot be told from one another.
+ */
+function dirOf(name: string): string {
+  const cut = name.lastIndexOf('/')
+  return cut < 0 ? '' : `${name.slice(0, cut)}/`
+}
+
+function baseOf(name: string): string {
+  return name.slice(name.lastIndexOf('/') + 1)
+}
+
 /** No sidebar to rename from, so the tab itself is the handle: right-click, then edit in place. */
 function startRename(id: string): void {
   const file = props.files.find((open) => open.id === id)
@@ -134,7 +149,10 @@ onBeforeUnmount(() => {
           @keydown.esc.prevent="cancelRename"
           @blur="commitRename"
         />
-        <span v-else class="file-name">{{ file.name }}</span>
+        <span v-else class="file-name">
+          <span v-if="dirOf(file.name)" class="file-dir">{{ dirOf(file.name) }}</span>
+          <span class="file-base">{{ baseOf(file.name) }}</span>
+        </span>
         <button
           v-if="closable()"
           class="close"
@@ -228,11 +246,32 @@ onBeforeUnmount(() => {
 }
 
 .file-name {
+  display: flex;
+  min-width: 0;
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
+}
+
+.file-dir,
+.file-base {
+  min-width: 0;
+  overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Both may shrink, but the directory absorbs practically all of it: flex shrinks in proportion to
+   the factor, so 999 against 1 means the file's own name only starts losing characters once the
+   path in front of it has nothing left to give. */
+.file-dir {
+  flex: 0 999 auto;
+  color: var(--dim);
+  opacity: 0.7;
+}
+
+.file-base {
+  flex: 0 1 auto;
 }
 
 .rename {

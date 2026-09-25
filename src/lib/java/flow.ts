@@ -20,7 +20,7 @@ import type { Node } from '@vscode/tree-sitter-wasm'
 import type { Span } from '../definitions'
 import type { FlowNode, FlowOrigin, FlowStep, FlowTrace } from '../flow'
 import { isExternalOrigin } from '../flow'
-import { bindingAt, type JavaFile } from './definitions'
+import { bindingAt, identifierAt, typeScopeFor, type JavaFile } from './definitions'
 import { importedName, moduleFor } from './modules'
 import { buildScopes, scopeAt, type Binding, type Scope, type ScopeTree } from './scopes'
 
@@ -248,46 +248,73 @@ function callSitesOf(walk: Walk, target: Located): CallSite[] {
   return sites
 }
 
+/**
+ * The field a method just hands back — `String getValue() { return value; }`, the shape almost
+ * every getter takes. Recognising it turns the call into a read of that field on the receiver,
+ * which is what keeps the walk on this object rather than on the type.
+ */
+function accessorField(declaration: Node): string | null {
+  const body = declaration.childForFieldName('body')
+  if (body?.type !== 'block') return null
+  const statements = body.namedChildren.filter((child): child is Node => child !== null)
+  if (statements.length !== 1 || statements[0]!.type !== 'return_statement') return null
+  const value = statements[0]!.namedChildren.find((child): child is Node => child !== null)
+  if (!value) return null
+  if (value.type === 'identifier') return value.text
+  if (value.type === 'field_access' && value.childForFieldName('object')?.type === 'this') {
+    return value.childForFieldName('field')?.text ?? null
+  }
+  return null
+}
+
+/**
+ * Which argument of `new T(…)` ends up in member `name`.
+ *
+ * A record says so by position: its components *are* the canonical constructor's parameters. A
+ * class says so in its constructor body, `this.value = v`, so the parameter feeding that assignment
+ * is the one to follow — falling back to a parameter of the same name, which is how constructors
+ * are written when they are not written by hand at all.
+ */
+function constructorIndexFor(walk: Walk, call: Node, file: JavaFile, name: string): number | null {
+  const typeName = call.childForFieldName('type')?.text
+  if (!typeName) return null
+  const found = typeScopeFor(typeName, file, walk.files, walk.scopes)
+  if (!found) return null
+  const declaration = found.scope.node
+
+  if (declaration.type === 'record_declaration') {
+    const components = (declaration.childForFieldName('parameters')?.namedChildren ?? []).filter(
+      (child): child is Node => child !== null,
+    )
+    const index = components.findIndex((child) => parameterNameOf(child) === name)
+    return index >= 0 ? index : null
+  }
+
+  for (const constructor of nodesOfType(declaration, 'constructor_declaration')) {
+    const parameters = parametersOf(constructor)
+    for (const assignment of nodesOfType(constructor, 'assignment_expression')) {
+      const left = assignment.childForFieldName('left')
+      const field =
+        left?.type === 'field_access' && left.childForFieldName('object')?.type === 'this'
+          ? left.childForFieldName('field')
+          : left?.type === 'identifier'
+            ? left
+            : null
+      if (field?.text !== name) continue
+      const right = assignment.childForFieldName('right')
+      if (right?.type !== 'identifier') continue
+      const index = parameters.findIndex((parameter) => parameterNameOf(parameter) === right.text)
+      if (index >= 0) return index
+    }
+    const byName = parameters.findIndex((parameter) => parameterNameOf(parameter) === name)
+    if (byName >= 0) return byName
+  }
+  return null
+}
+
 function argumentsIn(call: Node): number {
   const args = call.childForFieldName('arguments')
   return args ? args.namedChildren.filter((child) => child !== null).length : 0
-}
-
-/**
- * A record component, which is a parameter of the canonical constructor as much as it is a field.
- * `record ProductId(String value)` declares both, and neither is written down anywhere to walk to.
- */
-function recordComponent(binding: Binding): { record: Node; index: number } | null {
-  const declaration = binding.declNode
-  if (declaration.type !== 'formal_parameter') return null
-  const list = declaration.parent
-  if (list?.type !== 'formal_parameters') return null
-  const record = list.parent
-  if (record?.type !== 'record_declaration') return null
-  const index = list.namedChildren
-    .filter((child): child is Node => child !== null)
-    .findIndex((child) => child.id === declaration.id)
-  return index >= 0 ? { record, index } : null
-}
-
-/**
- * Every `new R(…)` across the open tabs, matched on the type's name.
- *
- * A type name is far more distinctive than a method name, so this over-approximates much less than
- * the equivalent rule for methods — and under-approximating would lose the only edge a record
- * component has, since its value arrives through the canonical constructor and nowhere else.
- */
-function constructionsOf(walk: Walk, record: Node): CallSite[] {
-  const name = record.childForFieldName('name')?.text
-  if (!name) return []
-  const sites: CallSite[] = []
-  for (const file of walk.files) {
-    for (const call of nodesOfType(file.root, 'object_creation_expression')) {
-      if (call.childForFieldName('type')?.text !== name) continue
-      sites.push({ call, file, callee: name, shift: 0 })
-    }
-  }
-  return sites
 }
 
 /** A constructor declares a method whose name is its own type's. */
@@ -345,6 +372,16 @@ function methodOf(parameter: Node): Node | null {
 
 /* ------------------------------------------------------------------ the walk */
 
+/**
+ * The member a branch is still looking for.
+ *
+ * Reading `id.value()` asks about one field of **this** object. Expanding the field on its own
+ * instead reaches every construction of the type — including ones the value never came from, which
+ * is a path that cannot happen rather than merely a noisy one. So the member's name rides the
+ * receiver's own chain and is consumed by the construction that actually made it.
+ */
+type Seeking = string | undefined
+
 function traceValue(
   walk: Walk,
   file: JavaFile,
@@ -352,13 +389,21 @@ function traceValue(
   step: FlowStep,
   label: string,
   depth: number,
+  seeking?: Seeking,
 ): number {
   const node = addNode(walk, file, spanOf(expression), step, label)
-  expand(walk, node, file, expression, depth)
+  expand(walk, node, file, expression, depth, seeking)
   return node.id
 }
 
-function expand(walk: Walk, node: FlowNode, file: JavaFile, expression: Node, depth: number): void {
+function expand(
+  walk: Walk,
+  node: FlowNode,
+  file: JavaFile,
+  expression: Node,
+  depth: number,
+  seeking?: Seeking,
+): void {
   if (depth >= MAX_DEPTH || walk.nodes.length >= MAX_NODES) {
     node.origin = 'budget'
     walk.truncated = true
@@ -373,7 +418,7 @@ function expand(walk: Walk, node: FlowNode, file: JavaFile, expression: Node, de
   }
 
   if (expr.type === 'method_invocation' || expr.type === 'object_creation_expression') {
-    expandCall(walk, node, file, expr, depth)
+    expandCall(walk, node, file, expr, depth, seeking)
     return
   }
 
@@ -397,7 +442,15 @@ function expand(walk: Walk, node: FlowNode, file: JavaFile, expression: Node, de
       const field = expr.childForFieldName('field')
       if (object && field) {
         node.children.push(
-          traceValue(walk, file, object, 'property', `\`.${field.text}\` read from`, depth + 1),
+          traceValue(
+            walk,
+            file,
+            object,
+            'property',
+            `\`.${field.text}\` read from`,
+            depth + 1,
+            field.text,
+          ),
         )
         return
       }
@@ -408,6 +461,7 @@ function expand(walk: Walk, node: FlowNode, file: JavaFile, expression: Node, de
       node,
       follow({ binding: hit.binding, file: fileOf(walk, hit.definedIn, file) }, walk),
       depth,
+      seeking,
     )
     return
   }
@@ -435,7 +489,14 @@ function lookupOffset(expr: Node): number {
   return expr.childForFieldName('field')?.startIndex ?? expr.startIndex
 }
 
-function expandCall(walk: Walk, node: FlowNode, file: JavaFile, call: Node, depth: number): void {
+function expandCall(
+  walk: Walk,
+  node: FlowNode,
+  file: JavaFile,
+  call: Node,
+  depth: number,
+  seeking?: Seeking,
+): void {
   const identifier = calleeName(call)
   const hit = identifier ? hitAt(walk, file, identifier.startIndex) : null
 
@@ -453,16 +514,49 @@ function expandCall(walk: Walk, node: FlowNode, file: JavaFile, call: Node, dept
     return
   }
 
-  // `new Db(...)` builds the object right here.
+  // `new Db(...)` builds the object right here — unless this branch is still looking for one of
+  // its members, in which case the object is a wrapper and the value went in through this call.
   if (call.type === 'object_creation_expression') {
+    if (seeking) {
+      const index = constructorIndexFor(walk, call, file, seeking)
+      const argument =
+        index === null ? null : argumentFor({ call, file, callee: '', shift: 0 }, index)
+      if (argument) {
+        node.children.push(
+          traceValue(
+            walk,
+            file,
+            argument,
+            'argument',
+            `passed to \`${calleeName(call)?.text ?? 'it'}\``,
+            depth + 1,
+          ),
+        )
+        return
+      }
+    }
     node.origin = 'literal'
     return
   }
 
+  const receiver = call.childForFieldName('object')
+
   // A record generates an accessor per component, so `id.value()` calls a method that is nowhere
-  // written down — the name resolves to the component itself. Reading it is what the call does.
-  if (target.binding.reason === 'property' && argumentsIn(call) === 0) {
-    expandBinding(walk, node, target, depth)
+  // written down — the name resolves to the component itself. A trivial getter (`return value;`)
+  // is the same read spelled by hand. Either way the value belongs to *this* object, so the walk
+  // follows the receiver and carries the member's name, rather than expanding the member on its
+  // own and reaching every construction of the type.
+  const read =
+    target.binding.reason === 'property' && argumentsIn(call) === 0
+      ? target.binding.name
+      : target.binding.reason === 'function' && argumentsIn(call) === 0
+        ? accessorField(target.binding.declNode)
+        : null
+
+  if (read && receiver) {
+    node.children.push(
+      traceValue(walk, file, receiver, 'property', `\`.${read}\` read from`, depth + 1, read),
+    )
     return
   }
 
@@ -552,7 +646,13 @@ function terminateAtBinding(walk: Walk, node: FlowNode, hit: Located, origin: Fl
   node.children.push(child.id)
 }
 
-function expandBinding(walk: Walk, node: FlowNode, hit: Located, depth: number): void {
+function expandBinding(
+  walk: Walk,
+  node: FlowNode,
+  hit: Located,
+  depth: number,
+  seeking?: Seeking,
+): void {
   const key = keyOf(hit)
   const seen = walk.expanded.get(key)
   if (seen !== undefined) {
@@ -569,19 +669,11 @@ function expandBinding(walk: Walk, node: FlowNode, hit: Located, depth: number):
     return
   }
   if (binding.reason === 'parameter') {
-    expandParameter(walk, node, hit, depth)
+    expandParameter(walk, node, hit, depth, seeking)
     return
   }
   if (binding.reason === 'function' || binding.reason === 'class') {
     terminateAtBinding(walk, node, hit, 'literal')
-    return
-  }
-
-  // A record component has no assignment to find: it *is* the canonical constructor's parameter,
-  // so its value comes from every `new R(…)` at that position.
-  const component = recordComponent(binding)
-  if (component) {
-    supplyFrom(walk, node, hit, constructionsOf(walk, component.record), component.index, depth)
     return
   }
 
@@ -590,7 +682,7 @@ function expandBinding(walk: Walk, node: FlowNode, hit: Located, depth: number):
     for (const [index, write] of writes.entries()) {
       const step: FlowStep = index === 0 ? 'initializer' : 'assignment'
       const label = index === 0 ? 'initialised from' : 'reassigned'
-      node.children.push(traceValue(walk, file, write, step, label, depth + 1))
+      node.children.push(traceValue(walk, file, write, step, label, depth + 1, seeking))
     }
     return
   }
@@ -669,7 +761,13 @@ function sourceOfBinder(declaration: Node): { expr: Node; step: FlowStep; label:
   return null
 }
 
-function expandParameter(walk: Walk, node: FlowNode, hit: Located, depth: number): void {
+function expandParameter(
+  walk: Walk,
+  node: FlowNode,
+  hit: Located,
+  depth: number,
+  seeking?: Seeking,
+): void {
   const { binding, file } = hit
   const declaration = methodOf(binding.declNode)
   if (!declaration) {
@@ -691,6 +789,7 @@ function expandParameter(walk: Walk, node: FlowNode, hit: Located, depth: number
     index,
     depth,
     declaration.type === 'lambda_expression' ? 'callback' : 'entry',
+    seeking,
   )
 }
 
@@ -706,6 +805,7 @@ function supplyFrom(
   index: number,
   depth: number,
   empty: FlowOrigin = 'entry',
+  seeking?: Seeking,
 ): void {
   const supplied: { expr: Node; file: JavaFile; callee: string }[] = []
   for (const site of sites) {
@@ -733,6 +833,7 @@ function supplyFrom(
         'argument',
         `passed to \`${source.callee}\``,
         depth + 1,
+        seeking,
       ),
     )
   }
@@ -782,6 +883,35 @@ export function traceJavaOrigins(
   // The root is always in the file on screen: a declaration elsewhere is shown through whatever
   // named it here — an import, an `extends` clause, the receiver's declaration — while the label
   // still names what was asked about, and the expansion below crosses into the other tab.
+  // Tracing *at* `id.value()` asks where that value came from, not where the member is declared —
+  // and expanding the declaration would reach every object of the type rather than this one. Root
+  // on the expression and let `expandCall` follow the receiver.
+  const identifier = identifierAt(active.root, offset)
+  const access = identifier?.parent
+  const isMemberRead =
+    !!access &&
+    (access.type === 'field_access' || access.type === 'method_invocation') &&
+    (access.childForFieldName('field')?.id === identifier.id ||
+      access.childForFieldName('name')?.id === identifier.id) &&
+    access.childForFieldName('object') !== null
+
+  if (isMemberRead && access) {
+    const root = addNode(
+      walk,
+      active,
+      spanOf(access),
+      null,
+      `${hit.binding.reason} \`${hit.binding.name}\``,
+    )
+    expand(walk, root, active, access, 0)
+    return {
+      nodes: walk.nodes,
+      root: root.id,
+      externalCount: walk.nodes.filter((node) => isExternalOrigin(node.origin)).length,
+      truncated: walk.truncated,
+    }
+  }
+
   const shown = hit.file.name === active.name ? hit.binding.declNode : hit.anchor
   if (!shown) return null
   const root = addNode(

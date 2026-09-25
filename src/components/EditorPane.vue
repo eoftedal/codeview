@@ -4,6 +4,8 @@ import { monaco, monacoLanguageId, setupMonaco } from '../lib/monacoSetup'
 import type { Language } from '../lib/analyzer'
 import type { DefinitionResult, Span } from '../lib/definitions'
 import type { FlowSpan } from '../lib/flow'
+import type { NamedFile } from '../lib/files'
+import { filesFromDrop } from '../lib/upload'
 
 const props = defineProps<{
   modelValue: string
@@ -31,7 +33,7 @@ const emit = defineEmits<{
   cursor: [number]
   /** Alt+T or the context menu: trace the value at this offset back to its sources. */
   trace: [number]
-  openFiles: [File[]]
+  openFiles: [NamedFile[]]
 }>()
 
 setupMonaco()
@@ -333,13 +335,22 @@ function revealDefinition(): void {
   )
 }
 
-function onDrop(event: DragEvent): void {
+/** Not awaited before `filesFromDrop` is called: a `DataTransfer` is emptied the moment this
+ *  handler yields, and the folder walk starts from handles taken out of it synchronously. */
+async function onDrop(event: DragEvent): Promise<void> {
   dropActive.value = false
-  const dropped = [...(event.dataTransfer?.files ?? [])]
-  if (dropped.length) emit('openFiles', dropped)
+  const dropped = await filesFromDrop(event.dataTransfer)
+  // An empty list is still emitted: a folder holding nothing this viewer reads needs saying so.
+  if (dropped) emit('openFiles', dropped)
 }
 
-defineExpose({ revealDefinition })
+/** Hand the keyboard to the buffer. The quick-open palette calls it after a pick, so choosing a
+ *  file leaves you where you would be had you clicked its tab. */
+function focus(): void {
+  editor.value?.focus()
+}
+
+defineExpose({ revealDefinition, focus })
 </script>
 
 <template>
@@ -352,7 +363,9 @@ defineExpose({ revealDefinition })
   >
     <slot name="tabs" />
     <div ref="host" class="editor" />
-    <div v-if="dropActive" class="drop-hint">Drop .ts, .tsx, .js, .jsx, .py or .java files</div>
+    <div v-if="dropActive" class="drop-hint">
+      Drop .ts, .tsx, .js, .jsx, .py or .java files — or a folder of them
+    </div>
   </div>
 </template>
 

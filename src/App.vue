@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import AgentsPane from './components/AgentsPane.vue'
 import AstPane from './components/AstPane.vue'
 import ChatPane from './components/ChatPane.vue'
 import EditorPane from './components/EditorPane.vue'
 import FileTabs from './components/FileTabs.vue'
 import SettingsPane from './components/SettingsPane.vue'
+import QuickOpen from './components/QuickOpen.vue'
 import SplitPane from './components/SplitPane.vue'
 import TracePane from './components/TracePane.vue'
 import { useAgents } from './composables/useAgents'
@@ -17,6 +18,7 @@ import { findNodeAtOffset } from './lib/astTree'
 import type { DefinitionResult, Span } from './lib/definitions'
 import { isExternalOrigin, type FlowSpan, type FlowTarget, type FlowTrace } from './lib/flow'
 import { dropFragment } from './lib/share'
+import { filesFromInput } from './lib/upload'
 import { useOpenRouterKey } from './lib/providers/openrouterKey'
 import { useOpenRouterModels } from './lib/providers/openrouterModels'
 import { useLocalServerUrl } from './lib/providers/localServerUrl'
@@ -26,6 +28,7 @@ const SPLIT_KEY = 'codeview:split'
 
 const {
   files,
+  recentFiles,
   activeFileId,
   fileIds,
   text,
@@ -265,11 +268,47 @@ function shareLink(): void {
   })
 }
 
-const fileInput = ref<HTMLInputElement>()
+/**
+ * Quick open, on Cmd+P — or Ctrl+P, since both spell "the command key" to a reader arriving from an
+ * editor and neither is bound by Monaco. Shift is excluded: Cmd+Shift+P is a command palette
+ * elsewhere, and this app has no commands to offer, so swallowing it would only break the browser's.
+ *
+ * The listener is on `window` in the **capture** phase for two separate reasons: Monaco handles keys
+ * on its own node, which is a descendant, so bubbling would arrive after it; and Cmd+P is the
+ * browser's print shortcut, which only `preventDefault` stops. It is app-level rather than the
+ * editor's `addAction` because the palette must answer from the tree and the panes too, where the
+ * editor has no focus and no action of its runs.
+ */
+const quickOpenShowing = ref(false)
 
+function onGlobalKey(event: KeyboardEvent): void {
+  if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) return
+  if (event.key.toLowerCase() !== 'p') return
+  event.preventDefault()
+  event.stopPropagation()
+  quickOpenShowing.value = !quickOpenShowing.value
+}
+
+onMounted(() => window.addEventListener('keydown', onGlobalKey, true))
+onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKey, true))
+
+/** Picking a file hands the keyboard back to the editor, so the palette is never a detour that
+ *  leaves you typing into nothing. */
+function onQuickPick(id: string): void {
+  quickOpenShowing.value = false
+  selectFile(id)
+  void nextTick(() => editorPane.value?.focus())
+}
+
+/** Two inputs rather than one, because `webkitdirectory` is an attribute of the element and not of
+ *  the click: an input asking for a folder cannot also ask for files. */
+const fileInput = ref<HTMLInputElement>()
+const folderInput = ref<HTMLInputElement>()
+
+/** Both inputs land here — a folder's files arrive already walked, each carrying its path. */
 function onFilePicked(event: Event): void {
   const input = event.target as HTMLInputElement
-  const picked = [...(input.files ?? [])]
+  const picked = filesFromInput(input.files)
   if (picked.length) void openFiles(picked)
   input.value = ''
 }
@@ -293,6 +332,7 @@ function onFilePicked(event: Event): void {
           </button>
         </div>
         <button @click="fileInput?.click()">Open files</button>
+        <button @click="folderInput?.click()">Open folder</button>
         <button @click="shareLink()">Copy link</button>
         <button @click="reset()">Reset</button>
         <input
@@ -303,8 +343,25 @@ function onFilePicked(event: Event): void {
           accept=".ts,.tsx,.js,.jsx,.mjs,.cjs,.mts,.cts,.py,.pyi,.java"
           @change="onFilePicked"
         />
+        <!-- No `accept`: browsers ignore it on a directory pick and hand over the whole tree, so
+             what is worth reading is decided after the fact, on the paths. -->
+        <input
+          ref="folderInput"
+          class="hidden-input"
+          type="file"
+          webkitdirectory
+          multiple
+          @change="onFilePicked"
+        />
       </div>
     </header>
+
+    <QuickOpen
+      v-if="quickOpenShowing"
+      :files="recentFiles"
+      @pick="onQuickPick"
+      @close="quickOpenShowing = false"
+    />
 
     <p v-if="notice" class="notice" @click="notice = null">{{ notice }}</p>
 

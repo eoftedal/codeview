@@ -112,11 +112,7 @@ describe('across calls', () => {
       render(
         `class A { String f; A(String h) { this.f = h; } String g() { return this.f|; } void c() { new A("x"); } }`,
       ),
-    ).toEqual([
-      'property `f`: String f;',
-      '  initialised from: h',
-      '    passed to `A`: "x" [literal]',
-    ])
+    ).toEqual(['property `f`: this.f', '  initialised from: h', '    passed to `A`: "x" [literal]'])
   })
 
   it('shows what was fed into a call it cannot follow, minus the constants', () => {
@@ -213,8 +209,8 @@ describe('a value carried inside a wrapper', () => {
     ).toEqual([
       'Main.java variable `v`: String v = w.getValue();',
       '  Main.java initialised from: w.getValue()',
-      '    Wrapper.java returned from: value',
-      '      Wrapper.java initialised from: value',
+      '    Main.java `.value` read from: w',
+      '      Controller.java passed to `run`: new Wrapper(request.getParameter("id"))',
       '        Controller.java passed to `Wrapper`: request.getParameter("id") [external]',
       '          Controller.java flows into the call: request',
       '            Controller.java parameter `request`: Request request [entry]',
@@ -232,8 +228,8 @@ describe('a value carried inside a wrapper', () => {
     ).toEqual([
       'Main.java variable `v`: String v = w.getValue();',
       '  Main.java initialised from: w.getValue()',
-      '    Wrapper.java returned from: value',
-      '      Wrapper.java initialised from: value',
+      '    Main.java `.value` read from: w',
+      '      Main.java initialised from: new Wrapper("x")',
       '        Main.java passed to `Wrapper`: "x" [literal]',
     ])
   })
@@ -263,18 +259,24 @@ describe('a record used as a value wrapper', () => {
     ).toEqual([
       'Main.java variable `i`: var i = id.value();',
       '  Main.java initialised from: id.value()',
-      '    Controller.java passed to `ProductId`: id',
-      '      Controller.java parameter `id`: @PathVariable String id [entry]',
+      '    Main.java `.value` read from: id',
+      '      Controller.java passed to `getPizza`: productId',
+      '        Controller.java initialised from: new ProductId(id)',
+      '          Controller.java passed to `ProductId`: id',
+      '            Controller.java parameter `id`: @PathVariable String id [entry]',
     ])
   })
 
-  it('reports every construction of the record, not just the one that led here', () => {
-    // A may-analysis: a second `new ProductId(…)` elsewhere is another way the value could arrive.
+  it('ignores a construction the value never came through', () => {
+    // The repository also *builds* a ProductId when mapping a row. That object is never passed to
+    // `getPizza`, so it is not a way this value could have arrived — reporting it would be a path
+    // that cannot happen, which is worse than a noisy one. Following the receiver rather than the
+    // type is what excludes it.
     const out = renderAcross(
       `class ProductRepository {\n    public Optional<Product> getPizza(ProductId id) {\n        var i = id.value();\n        return query(|i);\n    }\n    Product map(Row rs) { return new Product(new ProductId(rs.getString("id"))); }\n}\n`,
       { ...PRODUCT_ID, ...CONTROLLER },
-    )
-    expect(out.join('\n')).toContain('passed to `ProductId`: rs.getString("id")')
-    expect(out.join('\n')).toContain('passed to `ProductId`: id')
+    ).join('\n')
+    expect(out).toContain('passed to `ProductId`: id')
+    expect(out).not.toContain('rs.getString')
   })
 })

@@ -32,6 +32,24 @@ and publishes it to https://eoftedal.github.io/codeview/ — see
 Paste or type into the editor, open local files (button or drag-and-drop), or share a
 buffer with **Copy link**. The open files are kept in `localStorage` between visits.
 
+**Open folder** takes a whole directory, and a folder can be dropped on the editor as well
+as picked. It is walked recursively; anything this viewer cannot parse is skipped without a
+word, and so is everything under a directory that holds no source worth reading —
+`node_modules`, `vendor`, `dist`, `build`, `out`, `target`, `coverage`, `__pycache__`,
+`venv`, and anything dotted, `.git` first among them. A folder you pick yourself is always
+walked, so dropping `dist` on purpose does open `dist`. Files arrive under their **paths**
+(`src/lib/db.ts`), which is what keeps two `index.ts` apart and what lets an import between
+them resolve; the picked folder's own name is dropped from the front, since every file
+shares it. At most 50 tabs stay open — a folder with more keeps the files nearest its root
+and says how many it left out, which is the point at which to open a subfolder instead.
+
+**Cmd+P** (Ctrl+P) is quick open: type part of a name and press ↵. The match is a
+subsequence, so `slb` finds `src/lib/base.ts`, and the ranking prefers letters that run
+together, letters that start a word, and letters in the file's own name over the directories
+above it. The list starts in the order the files were last shown, with the row below the
+current one armed — so Cmd+P then ↵ toggles between the two files you are working in. ↑↓ or
+tab moves, esc dismisses.
+
 Several files can be open at once, on a tab strip above the editor: **+** adds a blank one,
 **✕** closes one, and right-clicking a tab offers **Rename**, which also switches the
 language when the new extension calls for a different one. The tree and the editor show the
@@ -248,8 +266,15 @@ things a record declares without writing them down anywhere: an accessor per com
 `id.value()` calls a method that appears nowhere; and the component itself, which _is_ the canonical
 constructor's parameter. Both are resolved, so a value wrapped in a record — the common Spring shape
 of a path variable turned into a `ProductId` and handed to a repository — traces from the unwrapped
-read all the way back to the request. Every `new ProductId(…)` across the open tabs is reported, not
-just the one that led there: a may-analysis shows every way the value could arrive.
+read all the way back to the request. A plain class with a constructor and a getter reads the same
+way: a method whose body is just `return value;` is a read of that field.
+
+**Reading a member follows the receiver, not the type.** `id.value()` asks about one field of _this_
+object, so the walk continues along wherever `id` came from and consumes the member at the
+construction that actually made it. Expanding the member on its own would instead reach every
+construction of the type in the open tabs — including objects the value never came through, such as
+a repository that also _builds_ a `ProductId` when mapping a row. That is a path that cannot happen,
+which is worse than a noisy one.
 
 **A `var` receiver reads its type off the construction.** `var w = new Wrapper(x)` writes the type
 on the `new` rather than on the declaration, and `var` is how most modern Java spells a local — so
@@ -582,6 +607,8 @@ src/lib/definitions.ts     the definition rules                       (pure, tes
 src/lib/flow.ts            the backward provenance walk               (pure, tested)
 src/lib/share.ts           share-link encoding, bundles, fragments     (pure, tested)
 src/lib/files.ts           open-file naming and identity              (pure, tested)
+src/lib/upload.ts          picked and dropped files, folders walked
+src/lib/quickOpen.ts       the quick-open filter and its ranking     (pure, tested)
 src/lib/chat.ts            the provider contract, model catalogue, system prompt
 src/lib/markdown.ts        the answer renderer's block parser           (pure, tested)
 src/lib/monacoSetup.ts     Monaco theme and compiler options
@@ -592,6 +619,7 @@ src/composables/useChat.ts      model choice, session, streamed answers
 src/App.vue                shared selection state, wires the panes and the tabs
 src/components/EditorPane.vue   Monaco, a model per file, decorations, file drop
 src/components/FileTabs.vue     the tab strip: switch, close, rename, add
+src/components/QuickOpen.vue    the Cmd+P palette over the open files
 src/components/AstPane.vue      tree root, filter, breadcrumb, definition line
 src/components/AstNodeRow.vue   recursive row
 src/components/TracePane.vue    trace root, summary, external-source jump

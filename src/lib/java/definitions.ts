@@ -357,6 +357,22 @@ function constructedTypeName(declaration: Node): string | null {
   return null
 }
 
+/**
+ * The scope of a type named from `file`, for a caller that has a name and needs the declaration —
+ * the flow walk, resolving what `new ProductId(…)` constructs.
+ */
+export function typeScopeFor(
+  name: string,
+  file: JavaFile,
+  files: readonly JavaFile[],
+  scopes: Scopes,
+): { scope: Scope; file: JavaFile } | null {
+  const found = typeNamed(name, file, scopes(file), { files, scopes }, undefined)
+  if (!found) return null
+  const scope = scopeForNode(found.tree, found.binding.declNode)
+  return scope ? { scope, file: found.file } : null
+}
+
 /* ------------------------------------------------------------------ the answer */
 
 export interface JavaHit {

@@ -1,7 +1,9 @@
 import { computed, ref, watch } from 'vue'
 import type { Language } from '../lib/analyzer'
 import {
+  arrangeForOpen,
   createId,
+  fitToStrip,
   isLanguage,
   languageForFile,
   neighbourId,
@@ -9,7 +11,9 @@ import {
   uniqueName,
   untitledName,
   withLanguage,
+  MAX_OPEN_FILES,
   type CodeFile,
+  type NamedFile,
 } from '../lib/files'
 import { sampleFor } from '../lib/sample'
 import {
@@ -74,6 +78,52 @@ function readStored(): Stored | null {
   }
 }
 
+interface OpenOutcome {
+  /** How many files the pick or the drop actually handed over. Zero is a folder whose walk found
+   *  nothing worth opening in it, and has to be said: a drop that does nothing and says nothing
+   *  reads as a drop target that is broken. */
+  arrived: number
+  /** A message per refused file, in the order they were refused. */
+  rejected: string[]
+  unreadable: number
+  oversize: number
+  overflow: number
+}
+
+/**
+ * What to say about an open. A pick of two files names each one it refused and why, which is the
+ * only useful report at that size; a folder of four hundred gets counts instead, because four
+ * hundred reasons is not a notice. The cap's own line is separate and always given in full — it is
+ * the one outcome the reader has to act on, and the only one that leaves a file they asked for
+ * unopened.
+ */
+function openNotice({
+  arrived,
+  rejected,
+  unreadable,
+  oversize,
+  overflow,
+}: OpenOutcome): string | null {
+  if (arrived === 0) return 'Nothing opened — no files this viewer can parse in there.'
+  const lines: string[] = []
+  if (rejected.length > 0) {
+    if (rejected.length <= 3) lines.push(`Not opened — ${rejected.join('; ')}.`)
+    else {
+      const reasons: string[] = []
+      if (unreadable) reasons.push(`${unreadable} not a language this viewer reads`)
+      if (oversize) reasons.push(`${oversize} larger than 2 MB`)
+      lines.push(`Skipped ${rejected.length} files — ${reasons.join(', ')}.`)
+    }
+  }
+  if (overflow > 0) {
+    lines.push(
+      `${MAX_OPEN_FILES} files is all this viewer keeps open, so ${overflow} more ` +
+        `${overflow === 1 ? 'was' : 'were'} left out — open a subfolder for the rest.`,
+    )
+  }
+  return lines.length ? lines.join(' ') : null
+}
+
 /**
  * The open files, and where they came from. Priority on load: a link, which describes exactly one
  * file, then the last local session with all of its tabs, then the sample.
@@ -128,6 +178,31 @@ export function useBuffer() {
   const activeId = ref<string>(
     !fromParams && stored ? stored.activeId : (initial[0] as CodeFile).id,
   )
+
+  /**
+   * Which tab was showing, most recent first. The quick-open palette lists the files in this order,
+   * which is the whole of why it is kept: with the tab you are in at the head and the one before it
+   * next, Cmd+P then Enter is a toggle between two files, exactly as it is in an editor.
+   *
+   * Not persisted, and not cleaned up either. A reload has no history worth restoring — `activeId`
+   * alone says where to begin — and an id left behind by a closed tab simply finds no file when the
+   * order is read back, which is cheaper than watching for closes.
+   */
+  const recent = ref<string[]>([activeId.value])
+  watch(activeId, (id) => {
+    recent.value = [id, ...recent.value.filter((seen) => seen !== id)]
+  })
+
+  /** The open files, most recently shown first. A tab never shown since it arrived — every tab of a
+   *  restored session bar one — has no place in `recent`, and follows in strip order. */
+  const recentFiles = computed<CodeFile[]>(() => {
+    const byId = new Map(files.value.map((file) => [file.id, file]))
+    const ordered = recent.value
+      .map((id) => byId.get(id))
+      .filter((file): file is CodeFile => !!file)
+    const seen = new Set(ordered.map((file) => file.id))
+    return [...ordered, ...files.value.filter((file) => !seen.has(file.id))]
+  })
 
   /** Never null: closing the last tab is refused, so there is always a buffer to show. */
   const active = computed(
@@ -254,42 +329,77 @@ export function useBuffer() {
     if (detected) file.language = detected
   }
 
-  /** Open dropped or picked files as tabs. Re-opening a name already on the strip refreshes that
-   *  tab instead of stacking a second one beside it. */
-  async function openFiles(incoming: Iterable<File>): Promise<void> {
+  /**
+   * Open dropped or picked files as tabs — a handful of files, or a whole folder. Re-opening a name
+   * already on the strip refreshes that tab instead of stacking a second one beside it.
+   *
+   * A folder arrives as paths (`src/db.ts`), which is what keeps two `index.ts` apart and what makes
+   * an import between them resolve, and it arrives in bulk — so `MAX_OPEN_FILES` applies, and what
+   * it left out is said rather than quietly dropped. The last file opened is still the one left
+   * active, as it is for a pick of two.
+   */
+  async function openFiles(incoming: Iterable<NamedFile>): Promise<void> {
+    const picked = [...incoming]
+    /** One message per refused file, which is the right report for a pick of three and unreadable
+     *  for a folder of four hundred — hence the counts beside it. */
     const rejected: string[] = []
-    let opened: string | null = null
+    let unreadable = 0
+    let oversize = 0
 
-    for (const file of incoming) {
+    // Whether a file can be opened at all is knowable without reading it, and is settled before the
+    // cap is: one this viewer cannot parse must not take a place from one it can.
+    const openable: { name: string; file: File; language: Language }[] = []
+    for (const { name, file } of arrangeForOpen(picked)) {
+      const language = languageForFile(name)
+      if (!language) {
+        unreadable++
+        rejected.push(`${name} isn't a file this viewer can parse`)
+        continue
+      }
       if (file.size > MAX_FILE_BYTES) {
-        rejected.push(`${file.name} is larger than 2 MB`)
+        oversize++
+        rejected.push(`${name} is larger than 2 MB`)
         continue
       }
-      const detected = languageForFile(file.name)
-      if (!detected) {
-        rejected.push(`${file.name} isn't a file this viewer can parse`)
-        continue
-      }
-      const content = await file.text()
-      const existing = files.value.find((open) => open.name === file.name)
+      openable.push({ name, file, language })
+    }
+
+    // A name already on the strip is refreshed in place and costs no room; the rest compete for what
+    // is left of the cap, shallowest first. Deciding that here rather than in the loop is what lets
+    // the tabs still appear in the order they arrived, which is the order a reader picked them in.
+    const known = new Set(files.value.map((open) => open.name))
+    const fresh = openable.filter((entry) => !known.has(entry.name))
+    const taken = fitToStrip(fresh, MAX_OPEN_FILES - files.value.length)
+    const overflow = fresh.length - taken.size
+
+    let opened: string | null = null
+    const added: CodeFile[] = []
+    for (const entry of openable) {
+      const existing =
+        files.value.find((open) => open.name === entry.name) ??
+        added.find((open) => open.name === entry.name)
+      if (!existing && !taken.has(entry)) continue
+      const text = await entry.file.text()
       if (existing) {
-        existing.text = content
-        existing.language = detected
+        existing.text = text
+        existing.language = entry.language
         opened = existing.id
       } else {
-        const added: CodeFile = {
+        const file: CodeFile = {
           id: createId(),
-          name: file.name,
-          text: content,
-          language: detected,
+          name: entry.name,
+          text,
+          language: entry.language,
         }
-        files.value = [...files.value, added]
-        opened = added.id
+        added.push(file)
+        opened = file.id
       }
     }
 
+    // One assignment rather than one per file: each would be a reparse and a write to localStorage.
+    if (added.length) files.value = [...files.value, ...added]
     if (opened) activeId.value = opened
-    notice.value = rejected.length ? `Not opened — ${rejected.join('; ')}.` : null
+    notice.value = openNotice({ arrived: picked.length, rejected, unreadable, oversize, overflow })
   }
 
   /**
@@ -357,6 +467,7 @@ export function useBuffer() {
 
   return {
     files,
+    recentFiles,
     activeFileId,
     fileIds,
     text,

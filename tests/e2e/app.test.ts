@@ -2553,6 +2553,307 @@ describe('the agents pane runs a line of agents', () => {
   })
 })
 
+/**
+ * A dropped folder, which is the one half of opening files that no unit test can reach: the walk
+ * runs on `FileSystemEntry` handles taken out of a live `DataTransfer`, and Puppeteer cannot drag a
+ * real directory onto the page. So the entries are synthesised — faithfully to the two things about
+ * the API that actually bite. `readEntries` hands back a **batch at a time** and ends with an empty
+ * one, so the fake hands over one child per call; and a `DataTransfer` is dead by the first await,
+ * which is why `filesFromDrop` takes every entry synchronously and why this breaks if it stops.
+ */
+describe('dropping a folder', () => {
+  /** A tree as plain data, so it crosses into the page without being stringified as code. */
+  interface Entry {
+    name: string
+    text?: string
+    children?: Entry[]
+  }
+
+  /** Drop `tree` on the editor pane and report what the strip and the notice say afterwards. */
+  async function dropTree(
+    tree: Entry | null,
+  ): Promise<{ tabs: (string | undefined)[]; notice: string | null }> {
+    const fresh = await browser.newPage()
+    try {
+      await fresh.setViewport({ width: 1400, height: 1000 })
+      await fresh.evaluateOnNewDocument(() => localStorage.clear())
+      await fresh.goto(URL, { waitUntil: 'networkidle0' })
+      await fresh.waitForSelector('.view-line')
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      return await fresh.evaluate(async (root: Entry | null) => {
+        const entryFor = (node: Entry): unknown =>
+          node.children
+            ? {
+                isFile: false,
+                isDirectory: true,
+                name: node.name,
+                createReader: () => {
+                  const children = node.children!.map(entryFor)
+                  let at = 0
+                  return {
+                    readEntries: (ok: (batch: unknown[]) => void) =>
+                      ok(at < children.length ? [children[at++]] : []),
+                  }
+                },
+              }
+            : {
+                isFile: true,
+                isDirectory: false,
+                name: node.name,
+                file: (ok: (file: File) => void) => ok(new File([node.text ?? ''], node.name)),
+              }
+
+        const event = new Event('drop', { bubbles: true, cancelable: true })
+        Object.defineProperty(event, 'dataTransfer', {
+          value: {
+            // A null tree is a drop carrying no files at all — a selection dragged about inside the
+            // editor, which bubbles a `drop` up here too.
+            items: root
+              ? [{ kind: 'file', webkitGetAsEntry: () => entryFor(root) }]
+              : [{ kind: 'string', type: 'text/plain' }],
+            files: [],
+          },
+        })
+        document.querySelector('.editor-pane')!.dispatchEvent(event)
+        await new Promise((resolve) => setTimeout(resolve, 900))
+
+        return {
+          tabs: [...document.querySelectorAll('.tab .file-name')].map((node) =>
+            node.textContent?.trim(),
+          ),
+          notice: document.querySelector('.notice')?.textContent?.trim() ?? null,
+        }
+      }, tree)
+    } finally {
+      await fresh.close()
+    }
+  }
+
+  it('walks the subfolders, skips what it cannot read, and names the tabs by path', async () => {
+    const result = await dropTree({
+      name: 'proj',
+      children: [
+        { name: 'app.ts', text: "import { load } from './lib/db'\nexport const a = load()\n" },
+        { name: 'README.md', text: '# not source\n' },
+        { name: 'node_modules', children: [{ name: 'index.js', text: 'module.exports = 1' }] },
+        { name: '.git', children: [{ name: 'hook.js', text: 'nope' }] },
+        {
+          name: 'lib',
+          children: [
+            { name: 'db.ts', text: 'export function load() {\n  return 1\n}\n' },
+            { name: 'notes.txt', text: 'nope' },
+          ],
+        },
+      ],
+    })
+
+    // `proj` itself is gone from every name — every file shared it — and the nested one keeps the
+    // path that makes `./lib/db` resolve to it. The markdown, the text file, `node_modules` and
+    // `.git` are all simply absent, and said nothing: that is what skipping means here.
+    expect(result.tabs).toEqual(['example.ts', 'app.ts', 'lib/db.ts'])
+    expect(result.notice).toBeNull()
+  })
+
+  it('says so when a folder holds nothing it can read, rather than doing nothing in silence', async () => {
+    const result = await dropTree({
+      name: 'docs',
+      children: [{ name: 'guide.md', text: '# hi\n' }],
+    })
+    expect(result.tabs).toEqual(['example.ts'])
+    expect(result.notice).toBe('Nothing opened — no files this viewer can parse in there.')
+  })
+
+  it('ignores a drop that carries no files at all', async () => {
+    const result = await dropTree(null)
+    expect(result.tabs).toEqual(['example.ts'])
+    expect(result.notice).toBeNull()
+  })
+})
+
+/**
+ * Quick open. The keyboard route is the whole feature, and two things about it can only be seen in a
+ * browser: the gesture has to survive Monaco having focus — it is registered on `window` in the
+ * capture phase for that reason — and Cmd+P is the browser's own print shortcut, so the same handler
+ * has to be the one that swallows it.
+ */
+describe('quick open', () => {
+  async function palettePage(): Promise<Page> {
+    const fresh = await browser.newPage()
+    await fresh.setViewport({ width: 1400, height: 1000 })
+    await fresh.evaluateOnNewDocument(() => localStorage.clear())
+    await fresh.goto(URL, { waitUntil: 'networkidle0' })
+    await fresh.waitForSelector('.view-line')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+
+    // Three more tabs, one of them nested, so there is something to search and a path to match in.
+    await fresh.evaluate(async () => {
+      const file = (name: string, text: string) => ({
+        isFile: true,
+        isDirectory: false,
+        name,
+        file: (ok: (given: File) => void) => ok(new File([text], name)),
+      })
+      const dir = (name: string, children: unknown[]) => ({
+        isFile: false,
+        isDirectory: true,
+        name,
+        createReader: () => {
+          let at = 0
+          return {
+            readEntries: (ok: (batch: unknown[]) => void) =>
+              ok(at < children.length ? [children[at++]] : []),
+          }
+        },
+      })
+      const event = new Event('drop', { bubbles: true, cancelable: true })
+      Object.defineProperty(event, 'dataTransfer', {
+        value: {
+          items: [
+            {
+              kind: 'file',
+              webkitGetAsEntry: () =>
+                dir('proj', [
+                  file('handler.ts', 'export const h = 1\n'),
+                  dir('lib', [
+                    file('store.ts', 'export const s = 2\n'),
+                    file('db.ts', 'export const d = 3\n'),
+                  ]),
+                ]),
+            },
+          ],
+          files: [],
+        },
+      })
+      document.querySelector('.editor-pane')!.dispatchEvent(event)
+      await new Promise((resolve) => setTimeout(resolve, 900))
+    })
+    return fresh
+  }
+
+  async function quickOpenKey(target: Page): Promise<void> {
+    await target.keyboard.down('Meta')
+    await target.keyboard.press('KeyP')
+    await target.keyboard.up('Meta')
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+
+  const rows = (target: Page) =>
+    target.$$eval('.quick-open .result .name', (nodes) =>
+      nodes.map((node) => node.textContent?.trim()),
+    )
+
+  const armed = (target: Page) =>
+    target.$eval('.quick-open .result.armed .name', (el) => el.textContent?.trim())
+
+  const activeTab = (target: Page) =>
+    target.$eval('.tab.active .file-name', (el) => el.textContent?.trim())
+
+  it('opens over the editor, filters as you type, and marks what matched', async () => {
+    const fresh = await palettePage()
+    try {
+      // Focus inside Monaco first: this is the case a listener on the editor's own node would win
+      // and one bound anywhere but the capture phase would lose.
+      await fresh.click('.editor')
+      await quickOpenKey(fresh)
+      expect(await fresh.$('.quick-open')).not.toBeNull()
+
+      await fresh.keyboard.type('lbdb')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      // A subsequence, not a substring: `lbdb` threads through `lib/db.ts` and nothing else.
+      expect(await rows(fresh)).toEqual(['lib/db.ts'])
+      expect(
+        await fresh.$$eval('.quick-open .result.armed .hit', (nodes) =>
+          nodes.map((node) => node.textContent),
+        ),
+      ).toEqual(['l', 'b', 'db'])
+
+      await fresh.keyboard.press('Enter')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      expect(await fresh.$('.quick-open')).toBeNull()
+      expect(await activeTab(fresh)).toBe('lib/db.ts')
+      // The keyboard is handed back to the buffer, so the palette is not a detour.
+      expect(await fresh.evaluate(() => document.activeElement?.closest('.editor') !== null)).toBe(
+        true,
+      )
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  /** The reason the list is ordered by recency at all: Cmd+P then Enter is a toggle between the two
+   *  files you are working in, which is the gesture readers arrive expecting. */
+  it('arms the file you were in before, so Cmd+P and Enter toggles between two', async () => {
+    const fresh = await palettePage()
+    try {
+      await fresh.click('.editor')
+      await quickOpenKey(fresh)
+      await fresh.keyboard.type('handler')
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      await fresh.keyboard.press('Enter')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      expect(await activeTab(fresh)).toBe('handler.ts')
+
+      await quickOpenKey(fresh)
+      // The tab on screen heads the list — arming it would make Enter do nothing — so the row below
+      // it is armed instead.
+      expect((await rows(fresh))[0]).toBe('handler.ts')
+      expect(await armed(fresh)).toBe('lib/db.ts')
+      await fresh.keyboard.press('Enter')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      expect(await activeTab(fresh)).toBe('lib/db.ts')
+
+      await quickOpenKey(fresh)
+      expect(await armed(fresh)).toBe('handler.ts')
+      await fresh.keyboard.press('Enter')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      expect(await activeTab(fresh)).toBe('handler.ts')
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('walks the list, says when nothing matches, and dismisses without picking', async () => {
+    const fresh = await palettePage()
+    try {
+      await fresh.click('.editor')
+      await quickOpenKey(fresh)
+      await fresh.keyboard.press('ArrowDown')
+      await fresh.keyboard.press('ArrowDown')
+      const walked = await armed(fresh)
+      await fresh.keyboard.press('Enter')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      expect(await activeTab(fresh)).toBe(walked)
+
+      // A query nothing answers says so, and Enter on it holds rather than dismissing: mid-word is
+      // far likelier than a request to close.
+      await quickOpenKey(fresh)
+      await fresh.keyboard.type('zzzz')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(await fresh.$eval('.quick-open .empty', (el) => el.textContent?.trim())).toBe(
+        'No open file matches that.',
+      )
+      await fresh.keyboard.press('Enter')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      expect(await fresh.$('.quick-open')).not.toBeNull()
+
+      const before = await activeTab(fresh)
+      await fresh.keyboard.press('Escape')
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      expect(await fresh.$('.quick-open')).toBeNull()
+      expect(await activeTab(fresh)).toBe(before)
+
+      // And the same key closes it again, so the gesture is a toggle in both directions.
+      await quickOpenKey(fresh)
+      expect(await fresh.$('.quick-open')).not.toBeNull()
+      await quickOpenKey(fresh)
+      expect(await fresh.$('.quick-open')).toBeNull()
+    } finally {
+      await fresh.close()
+    }
+  })
+})
+
 describe('runtime health', () => {
   it('reports no TypeScript errors on the sample', async () => {
     // Monaco keys its worker off the URI extension; an extensionless one flags valid TS as broken.

@@ -293,6 +293,21 @@ describe('a value carried inside a wrapper', () => {
     ])
   })
 
+  it('ignores a construction the value never came through', () => {
+    // A second, unrelated `Wrapper(...)` is not a way this value could have arrived. The walk
+    // rides the receiver's own chain, so only constructions on that chain are reached.
+    const out = renderAcross(
+      `def run(w):\n    other = Wrapper("never-flows-here")\n    return w.valu|e\n`,
+      {
+        ...WRAPPER,
+        'controller.py':
+          'from wrapper import Wrapper\nfrom main import run\n\ndef handle(request):\n    run(Wrapper(request.args["id"]))\n',
+      },
+    ).join('\n')
+    expect(out).toContain('request.args["id"]')
+    expect(out).not.toContain('never-flows-here')
+  })
+
   it('still calls a construction a literal when no attribute is being sought', () => {
     expect(render(`from wrapper import Wrapper\n\nw = Wrapper("x")\nuse(w|)\n`, WRAPPER)).toEqual([
       'variable `w`: w = Wrapper("x")',

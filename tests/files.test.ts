@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  arrangeForOpen,
+  fitToStrip,
   createId,
+  isIgnoredDir,
+  isIgnoredPath,
   languageForFile,
   neighbourId,
   sampleName,
@@ -99,5 +103,94 @@ describe('neighbourId', () => {
   it('has no answer for the last tab, or one it has never seen', () => {
     expect(neighbourId([file('a')], 'a')).toBeNull()
     expect(neighbourId(files, 'zz')).toBeNull()
+  })
+})
+
+describe('isIgnoredDir', () => {
+  it('steps over what a checkout holds but a review never reads', () => {
+    expect(isIgnoredDir('node_modules')).toBe(true)
+    expect(isIgnoredDir('target')).toBe(true)
+    expect(isIgnoredDir('__pycache__')).toBe(true)
+  })
+
+  it('steps over anything dotted, which is how .git is handled', () => {
+    expect(isIgnoredDir('.git')).toBe(true)
+    expect(isIgnoredDir('.venv')).toBe(true)
+  })
+
+  it('has nothing against an ordinary directory', () => {
+    expect(isIgnoredDir('src')).toBe(false)
+    expect(isIgnoredDir('lib')).toBe(false)
+  })
+})
+
+describe('isIgnoredPath', () => {
+  it('asks about the directories between the root and the file', () => {
+    expect(isIgnoredPath('proj/node_modules/pkg/index.js')).toBe(true)
+    expect(isIgnoredPath('proj/.git/hooks/pre-commit.js')).toBe(true)
+    expect(isIgnoredPath('proj/src/lib/db.ts')).toBe(false)
+  })
+
+  /** The reader's own pick is never second-guessed: dragging `dist` is asking for `dist`. */
+  it('exempts the picked folder itself', () => {
+    expect(isIgnoredPath('dist/bundle.js')).toBe(false)
+    expect(isIgnoredPath('node_modules/pkg/index.js')).toBe(false)
+  })
+
+  it('never examines the file’s own name', () => {
+    expect(isIgnoredPath('proj/src/.eslintrc.js')).toBe(false)
+    expect(isIgnoredPath('a.ts')).toBe(false)
+  })
+})
+
+describe('arrangeForOpen', () => {
+  const named = (...names: string[]) => names.map((name) => ({ name }))
+
+  it('drops the picked folder’s own segment, which every path shares', () => {
+    expect(arrangeForOpen(named('proj/a.ts', 'proj/src/b.ts'))).toEqual(named('a.ts', 'src/b.ts'))
+  })
+
+  it('leaves the names alone when there is no one root — two folders, or a folder and a file', () => {
+    expect(arrangeForOpen(named('b.ts', 'proj/src/a.ts'))).toEqual(named('b.ts', 'proj/src/a.ts'))
+    expect(arrangeForOpen(named('one.ts', 'two.ts'))).toEqual(named('one.ts', 'two.ts'))
+  })
+
+  it('leaves the order alone — it is the order the tabs will appear in', () => {
+    expect(
+      arrangeForOpen(named('p/src/lib/deep.ts', 'p/top.ts', 'p/src/mid.ts', 'p/also.ts')),
+    ).toEqual(named('src/lib/deep.ts', 'top.ts', 'src/mid.ts', 'also.ts'))
+  })
+
+  it('leaves out what lies under a directory it does not walk', () => {
+    expect(
+      arrangeForOpen(named('p/src/a.ts', 'p/node_modules/x/i.js', 'p/.git/h.js', 'p/dist/b.js')),
+    ).toEqual(named('src/a.ts'))
+  })
+
+  it('carries whatever else rides on the entry, since the file is the point of it', () => {
+    expect(arrangeForOpen([{ name: 'p/a.ts', size: 12 }])).toEqual([{ name: 'a.ts', size: 12 }])
+  })
+})
+
+describe('fitToStrip', () => {
+  const named = (...names: string[]) => names.map((name) => ({ name }))
+
+  it('takes everything when there is room for it', () => {
+    const picked = named('a.ts', 'src/b.ts')
+    expect(fitToStrip(picked, 5)).toEqual(new Set(picked))
+  })
+
+  it('keeps the shallowest, which is where a project’s entry points are', () => {
+    const picked = named('src/lib/deep.ts', 'top.ts', 'src/mid.ts', 'also.ts')
+    expect([...fitToStrip(picked, 3)].map((entry) => entry.name)).toEqual([
+      'also.ts',
+      'top.ts',
+      'src/mid.ts',
+    ])
+  })
+
+  it('takes nothing when the strip is already full', () => {
+    expect(fitToStrip(named('a.ts'), 0).size).toBe(0)
+    expect(fitToStrip(named('a.ts'), -3).size).toBe(0)
   })
 })
