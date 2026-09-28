@@ -1,13 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { createAnalyzer } from '../src/lib/analyzer'
 import { traceOrigins, type FlowNode, type FlowTrace } from '../src/lib/flow'
-import {
-  ANALYZE_TASK,
-  describeTraceScope,
-  traceQuestion,
-  traceToText,
-  tracedFiles,
-} from '../src/lib/traceText'
+import { mentionedFiles } from '../src/lib/mentions'
+import { ANALYZE_TASK, traceQuestion, traceToText, tracedFiles } from '../src/lib/traceText'
 
 /** A trace built by hand, for the shapes a fixture cannot conveniently produce — a walk that ran
  *  out of budget, an origin of every kind. */
@@ -130,6 +125,17 @@ describe('a trace copied as text', () => {
     expect(text).toContain('— the walk stopped at its budget here')
   })
 
+  it('says the excerpts are excerpts, since a rich trace is enough to fake an answer from', () => {
+    // The failure this closes: a trace carries an excerpt, a file and a line per step, which is
+    // enough to write a plausible review without opening anything — so a model that *could* read
+    // the files often reviews the trace instead. True on both paths: one holding the listing has
+    // the file already, one with `read_file` can go and get it.
+    const text = traceToText(traceOf(`const a = 'seed'\nconst b = |a\n`))
+    expect(text).toContain('single-line excerpts and not the code')
+    expect(text).toContain('check every step against the file it names')
+    expect(text).toContain('do not report a finding from this text alone')
+  })
+
   it('carries the limit with it, since a may-analysis read as a claim invents findings', () => {
     const text = traceToText(traceOf(`const a = 'seed'\nconst b = |a\n`))
     expect(text).toContain('may-analysis')
@@ -176,10 +182,36 @@ describe('handing a trace to the chat', () => {
     // hunter, a rewritten role — the way an orchestrator brief naming its own review beat the
     // task in the box.
     const question = traceQuestion(across())
-    expect(question.startsWith(`${ANALYZE_TASK}\n\n`)).toBe(true)
+    expect(question.startsWith(ANALYZE_TASK)).toBe(true)
     expect(question).toContain('Backward trace of variable `raw`')
     expect(ANALYZE_TASK.split('\n')).toHaveLength(1)
     expect(ANALYZE_TASK).not.toMatch(/taint|sink|vulnerab/i)
+  })
+
+  it('tags the files it cites, which is the whole of how it narrows the chat', () => {
+    // The scope rides the question rather than an argument beside it: the reader can see what
+    // narrowed the conversation, and can edit it before asking. What `useChat` then reads out of
+    // the question has to be exactly the files the trace names, in the same order.
+    const trace = across()
+    const question = traceQuestion(trace)
+    expect(question.split('\n')[0]).toBe(`${ANALYZE_TASK} @main.ts @db.ts`)
+    expect(mentionedFiles(question, ['main.ts', 'db.ts', 'unrelated.ts'])).toEqual([
+      'main.ts',
+      'db.ts',
+    ])
+  })
+
+  it('does not let an annotation in the trace itself name a file', () => {
+    // The text below the tags is full of `@`: `@PathVariable` in Java, `@app.route` in Python.
+    // A tag is resolved against the open tabs and nowhere else, so an annotation stays prose —
+    // and a file that happens to share its name is only tagged when the tag names it whole.
+    const trace = synthetic([
+      { label: 'parameter', excerpt: '@PathVariable String id', file: 'Controller.java' },
+    ])
+    expect(traceQuestion(trace)).toContain('@PathVariable')
+    expect(mentionedFiles(traceQuestion(trace), ['Controller.java', 'PathVariable.java'])).toEqual([
+      'Controller.java',
+    ])
   })
 
   it('names the files the trace cites, root first', () => {
@@ -216,17 +248,5 @@ describe('handing a trace to the chat', () => {
     )
     for (const file of cited) expect(tracedFiles(trace)).toContain(file)
     expect([...cited].sort()).toEqual([...tracedFiles(trace)].sort())
-  })
-})
-
-describe('the line a narrowed conversation shows', () => {
-  it('names the files, since the narrowing happened a tab away', () => {
-    // By the time an answer lands, the trace that explains why the model saw two files out of
-    // twelve is out of sight — and an answer over part of the code reads exactly like one over
-    // all of it. The chat and the agents show the same sentence, from here.
-    expect(describeTraceScope(['main.ts', 'db.ts'])).toBe(
-      'only the 2 files this trace touches (main.ts, db.ts)',
-    )
-    expect(describeTraceScope(['main.ts'])).toBe('only the file this trace touches (main.ts)')
   })
 })

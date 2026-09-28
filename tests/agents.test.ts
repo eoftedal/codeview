@@ -322,22 +322,55 @@ describe('the messages each hop is asked', () => {
   })
 
   it('gives the first agent the brief alone', () => {
-    expect(handoffMessage('Look at the routes.', null)).toBe('Look at the routes.')
+    const first = handoffMessage('Review this code.', 'Look at the routes.', null)
+    expect(first).toContain('Look at the routes.')
+    // And the reader's own words, which no model in the middle wrote.
+    expect(first).toContain('Review this code.')
+    expect(first).toMatch(/word for word/i)
   })
 
   it('gives every later agent the previous report verbatim, not a paraphrase', () => {
     const report = '1. `req.body.name` (routes.ts line 4) — source'
-    const message = handoffMessage('Check these.', { from: agent('Review'), output: report })
+    const message = handoffMessage('The reader’s task.', 'Check these.', {
+      from: agent('Review'),
+      output: report,
+    })
     expect(message).toContain('Check these.')
     expect(message).toContain(report)
+    // One verbatim copy per hop, and for a later agent it is the report. The task is not repeated
+    // into every window: this hop's job is the text in front of it, and a large task — a whole
+    // trace — would be a second copy competing with the code listing.
+    expect(message).not.toContain('The reader’s task.')
     expect(message).toContain('Review')
     expect(message).toMatch(/exactly as it was written/i)
+  })
+
+  it('carries a task too large to paraphrase, which is the one the orchestrator loses', () => {
+    // **Analyze with agents** hands over a whole trace. The orchestrator never sees the code, so
+    // its brief is a paraphrase by the one participant that can check nothing — and a trace
+    // summarised into a sentence is a trace the first agent never reads.
+    const trace = [
+      'Analyze this trace. @routes.ts @db.ts',
+      '',
+      '- variable `raw`: const raw = read() (routes.ts line 2)',
+      '  - returned by `read`: process.env.SEED (db.ts line 2) — from outside the open files',
+    ].join('\n')
+    const message = handoffMessage(trace, 'Have a look at the flow.', null)
+    expect(message).toContain('process.env.SEED (db.ts line 2)')
+    expect(message).toContain('@routes.ts @db.ts')
+  })
+
+  it('clips a task as it clips a report, since both compete with the code for one window', () => {
+    const huge = 'q'.repeat(MAX_RELAY_CHARS + 500)
+    const message = handoffMessage(huge, 'Check these.', null)
+    expect(message).toContain('truncated')
+    expect(message.length).toBeLessThan(huge.length + 500)
   })
 
   it('tells the agent the verbatim verdict wins over the brief describing it', () => {
     // The orchestrator is told not to rewrite a verdict, and mostly does not. "Mostly" is not
     // something the next agent can be left to resolve on its own.
-    const message = handoffMessage('Review found nothing much.', {
+    const message = handoffMessage('Task.', 'Review found nothing much.', {
       from: agent('Review'),
       output: 'CONFIRMED: SQL injection at db.ts line 9.',
     })
@@ -347,7 +380,10 @@ describe('the messages each hop is asked', () => {
 
   it('clips a report that would crowd out the code, and says it clipped it', () => {
     const huge = 'x'.repeat(MAX_RELAY_CHARS + 500)
-    const message = handoffMessage('Check these.', { from: agent('Review'), output: huge })
+    const message = handoffMessage('Task.', 'Check these.', {
+      from: agent('Review'),
+      output: huge,
+    })
     expect(message).toContain('truncated')
     expect(message.length).toBeLessThan(huge.length)
     expect(message).toContain('x'.repeat(100))
@@ -362,7 +398,7 @@ describe('the messages each hop is asked', () => {
 
     const report = 'x'.repeat(MAX_RELAY_CHARS + 500)
     const previous = { from: agent('Review'), output: report }
-    const wide = handoffMessage('Check these.', previous, relayLimit(60_000))
+    const wide = handoffMessage('Task.', 'Check these.', previous, relayLimit(60_000))
     expect(wide).not.toContain('truncated')
     expect(wide).toContain(report)
     // The orchestrator's two messages take the same limit, since it reads them on its own model.

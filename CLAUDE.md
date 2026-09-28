@@ -260,22 +260,21 @@ in TypeScript — because a record's compact canonical constructor is exactly wh
 value arrived untouched. A class that declares none has nothing to show and gets no row, and the
 row is only ever created when something will hang under it: a node nothing references would still
 be counted in the pane's step count. **`FlowNode.definedIn` carries the tab the type is declared in
-regardless**, because `tracedFiles` builds the _Analyze this trace_ scope out of the trace and a
+regardless**, because `tracedFiles` builds the _Analyze this trace_ tags out of the trace and a
 wrapper with no constructor of its own leaves no row in its own file — a model asked whether that
 path is validated cannot answer without the source. It is set on the construction's own row in all
 three languages, and `tracedFiles` takes it beside `file`.
 
-**`Analyze with agents` is `askAbout` for a run, and the two differ in one decided place.**
-`useAgents.runAbout(task, names)` clears the transcript, sets the task and runs, narrowing the
-run's single snapshot to those files in the order the trace named them. Where the chat hands a
-tool-calling model the whole buffer, a run is **always** narrowed: it has one snapshot and several
-readers, each possibly on a model of its own and only some of them able to read a file for
-themselves, so the one choice serving all of them is the question's own files. The scope is stored
-**with the task it was given for** and dropped in `run` when the task no longer matches — a reader
-who rewrites the box is asking something else, and answering it over the old selection would be a
-narrowing nobody chose — and `clear` drops it outright. `describeTraceScope` in `traceText.ts` is
-the one home of the sentence both panes show, because the narrowing was chosen a tab away from
-where the answer lands.
+**`Analyze with agents` is `askAbout` for a run, and neither takes a scope any more.**
+`useAgents.runAbout(task)` clears the transcript, sets the task and runs; the files come out of the
+task's own `@` tags, read in `run` at the moment Run is pressed. That is what makes a run's scope
+impossible to leave stale — an earlier version stored the names **with the task they were given
+for** and dropped them when the task no longer matched, because a reader who rewrites the box is
+asking something else; now the selection _is_ in the box, so rewriting it rewrites the selection and
+there is nothing to keep in step. A run still takes **one snapshot** of the buffer, and the tags are
+spent against it per agent rather than over the run: an agent handed the code is handed the tagged
+files alone, an agent that reads for itself gets the index of every tab and is pointed at them. One
+snapshot, several readings of it — which is also why a mixed team is unremarkable.
 
 **Rooting a member read on the expression is what makes a DTO in another tab traceable at all.**
 `resolveDefinition` answers null when the declaration is elsewhere and nothing local stands for it
@@ -321,25 +320,72 @@ What is copied is the whole trace, whatever is folded away — collapsing is how
 not a statement about which steps matter — and the feedback is the button's own label, not the
 app's notice line, because that line is up beside the share link that writes it.
 
-**`Analyze this trace` is the same text with the scope attached, and the scope is the whole point.**
-`useChat.askAbout(question, names)` opens a _new_ conversation over just those files — a session
-carries the code it was built with, so a scope cannot be applied to one already running — and
-`tracedFiles` is exactly the set `traceToText` cites, in first-mention order, because the budget is
-spent in order and what a tight one should clip is the far end of the path rather than the value
-the reader asked about. `App.vue` passes an **empty** scope for a model that reads the files
-itself: there is nothing to save by choosing for it, and the index of every tab is what lets it
-follow the trace wherever it leads. Three things follow the scope rather than the buffer once it is
-set — the files the session is built from, `stale` (editing a file the model was never shown must
-not cost the conversation) and the `clipped` line, which now states the narrowing whether or not
-anything was clipped, since the reader chose it a tab away and an answer over two files reads
-exactly like one over twelve. The **model** is told as well, through `CodeContext.partial`: the
-brief asks it to say when an answer depends on code it cannot see, and a listing whose first
-sentence claims to be every open file makes that impossible to judge — a model that believes it
-has the whole editor explains a gap by inventing something rather than by naming the file it
-would need. `newChat` drops it, which is what makes "New chat" mean the whole
+**A question names its own files, with `@`, and that is the only scoping mechanism there is.**
+`src/lib/mentions.ts` is the pure half: `mentionedFiles(text, names)` for what a question narrows
+to, `mentionAt`/`applyMention` for the completion a composer offers, `describeScope` for the line a
+narrowed pane shows and `describeDraftScope` for the line under the box before it is asked. A tag is
+resolved **against the open tabs and nowhere else** — the whole name as the tab spells it, or an
+unambiguous basename, the same forgiveness `read_file` shows — which is what leaves `@PathVariable`
+in a Java excerpt, `@app.route` in a Python one and an address in prose as the prose they are. It
+matters more than it looks: the text a reader pastes into that box is most often a trace, and a
+trace is full of annotations. A basename that two tabs answer to is refused rather than guessed, for
+the reason `tools.ts` refuses it — narrowing onto the wrong file is worse than not narrowing.
+
+**`Analyze this trace` writes those tags rather than passing a list beside the question.**
+`traceQuestion` puts `tracedFiles` in the first line as `@name` tags, in first-mention order,
+because the budget is spent in order and what a tight one should clip is the far end of the path
+rather than the value the reader asked about. `useChat.askAbout(question)` is then only "a new
+conversation, then `ask`" — everything about _which files_ is read back out of the question's text,
+by the same code a typed `@` goes through. The gain is not tidiness: what narrowed a conversation is
+visible **in** the conversation, it can be edited before it is sent, and `App.vue` no longer has to
+know whether the picked model reads its own files.
+
+**Only the question that _opens_ a conversation can _scope_ it**, because a session carries the code
+it was built with and cannot be handed different code without throwing the conversation away. What a
+later tag does instead is **add** — `withTaggedFiles` in `useChat` — and that is the one place where
+what the reader sees and what the model gets deliberately differ: the transcript keeps the question
+as it was typed, tags and all, while the model is handed the same question with
+`buildAddedCodeMessage`'s output in front of it. Only what it lacks is sent. A tagged file the
+conversation already carries is **named rather than sent twice** (`@db.ts @auth.ts` on the second
+question of a chat opened over `db.ts` costs one file, not two), and a model that reads its own
+files is told to read them and sent nothing — which is also what makes a tag on a follow-up
+worth anything on that path. The budget is what is _left_ (`maxCodeChars − spentCode`, floored at
+`MIN_ADDED_CHARS`), so a conversation cannot talk its way past its own window one tag at a time, and
+a file there was no room for is named to the model and kept out of `scopeFiles`. `ChatPane` says
+which of the three is about to happen, because all three are typed the same way. Three things follow
+the
+scope rather than the buffer once it is set — the files the session is built from, `stale` (editing
+a file the model was never shown must not cost the conversation) and the `clipped` line, which
+states the narrowing whether or not anything was clipped. **`stale` is measured against a map of
+name → text rather than one joined signature**, and that is what a growing conversation needs:
+folding a newly added file into a joined string would silently forgive every edit made to the others
+in the meantime. Being order-insensitive is a second, smaller win — switching tabs reorders the
+prompt without changing a character of it. The **model** is told as well, through
+`CodeContext.partial`: the brief asks it to say when an answer depends on code it cannot see, and a
+listing whose first sentence claims to be every open file makes that impossible to judge — a model
+that believes it has the whole editor explains a gap by inventing something rather than by naming
+the file it would need. `newChat` drops the tags, which is what makes "New chat" mean the whole
 buffer again. The question itself is bare — `ANALYZE_TASK` — because what _analyze_ means belongs
 to the brief, which is the reader's; `tests/traceText.test.ts` refuses taint vocabulary in it for
 the same reason `tests/agents.test.ts` refuses it in the orchestrator's.
+
+**A tag narrows what a model is _handed_ and never what it may _read_.** For a model without tools
+the two are the same thing, and `buildCodeMessage` gets the tagged files alone. For one with them
+they are not: `buildIndexMessage(files, named)` lists **every** tab and appends one line naming the
+tagged ones to start with, `fileTools` is built over every tab, and `clipped` stays null — nothing
+was withheld, so there is nothing to warn about. Narrowing the toolbox instead would spend the one
+advantage the tool path has, which is that a path leaving the tagged files is one the model can
+follow on its own. `useChat` and `useAgents` each make that choice at the single place they build
+the opening turn, so the two cannot drift.
+
+**`MentionBox.vue` is one component for both panes, and that is a correctness argument rather than
+a DRY one.** The composer must complete to names the parser will then resolve; two implementations
+that disagreed would offer a file and quietly not narrow to it. Its ranking is `quickOpen`'s — the
+same subsequence matcher Cmd+P uses, so `@slb` finds `src/lib/base.ts` in both places and a reader
+has one gesture for naming a file. Its keys are handled in **one** `keydown` handler rather than
+through `@keydown.enter.prevent` modifiers, because every key in it is conditional: Enter picks a
+completion while the list is open and asks the question while it is not, and a modifier cannot say
+"only when".
 
 **`noLib` is load-bearing twice over.** It keeps the bundle small, and it makes the trace's terminal
 condition principled: nothing outside the open files resolves, so a name with no definition _is_ an
@@ -650,7 +696,15 @@ and a name get lost — and it is defended three times over, since a model shown
 to write about it rewrites it by default: `DEFAULT_ORCHESTRATOR` forbids restating a report,
 `relayMessage` forbids it again at the point of asking, and `handoffMessage` closes with the line
 that actually settles it — where the brief and the report disagree, the report is authoritative.
-Weakening any of the three is how a "mitigated" reaches the next agent as a "confirmed"; what the _orchestrator_ is given is clipped at `MAX_RELAY_CHARS`, and the clip
+Weakening any of the three is how a "mitigated" reaches the next agent as a "confirmed". **The
+first agent gets the reader's task the same way, and for the same reason** — `handoffMessage` takes
+it and copies it in verbatim ahead of the brief. Every hop therefore carries exactly one copy no
+model in the middle wrote, and which one it is follows the chain: the task for the first agent, the
+previous report for each one after. The gap was invisible while a task was a sentence and obvious
+once it was not — **Analyze with agents** hands over a whole trace, the orchestrator boils it down
+to a line, and the first agent was briefed on a flow it had never seen. It is deliberately **not**
+repeated into every hop: a later agent already has a verbatim copy of its own, its job is the report
+in front of it, and a second copy of a trace would compete with the code listing for one window; what the _orchestrator_ is given is clipped at `MAX_RELAY_CHARS`, and the clip
 is stated. A run snapshots `promptFiles` once, so two agents cannot disagree about what line 12 says
 because the reader typed in between.
 
@@ -751,7 +805,17 @@ Their thought does not arrive in the text either — it is `delta.reasoning` (or
 `reasoning_content`, or `thinking`) beside `delta.content` — so `foldReasoning` in
 `providers/thoughts.ts` turns it into the `<think>` block everything else already handles, on every
 stream regardless of the thinking flag, since a custom slug or a local reasoning model may reason
-unasked. The shipped Review agent runs on `DEFAULT_REVIEW`, not `DEFAULT_ROLE`: the same
+unasked. **A server may also leak the model's own protocol into `content`**, and an MLX build of
+Gemma 4 does exactly that: the thought goes to `reasoning_content` and the closing `<channel|>` is
+left in the answer, arriving mid-sentence in front of the reader. `dropTokens` takes those out —
+gated by `protocolTokensFor(model)`, which is the whole of what keeps it from being a
+find-and-replace over everybody's answers, since those strings are Gemma's and this repository's own
+source is full of them. It is a **marker machine with a hold-back**, not a search per chunk, for
+`toolFilter`'s reason: nothing lines a delta up with a token, and a missed one is what the reader
+sees. It runs **per request** — a token cannot split across two HTTP responses — and what it filters
+is what reaches the history too, so a later question is not asked against protocol. They are
+**dropped rather than folded**: translating `<channel|>` into `</think>` would be right only where
+the opening marker leaked too, and a stray closer with no block open renders as literal `</think>`. The shipped Review agent runs on `DEFAULT_REVIEW`, not `DEFAULT_ROLE`: the same
 `REVIEWER_BRIEF` closed with "report every flow in full" instead of the chat's "keep answers
 short", because an agent's report is the next agent's entire input and a system prompt asking for
 brevity would beat any orchestrator brief asking for more.
@@ -799,6 +863,20 @@ even where a tool role exists, which on two of the ONNX templates it now does; w
 Gemma's template raises on two user turns in a row, so the seeded history has to stay alternating.
 The agents' orchestrator calls `chat(system)` with no second argument, which is now the whole
 mechanism by which it never sees a file.
+
+**No brief says how the code arrived, because no brief knows.** The same wording serves a model
+handed every open file, one handed the two a question tagged, and one handed an index and a
+`read_file` — so the claim belongs to the opening turn, which is the only thing that can tell them
+apart, and that is the whole reason the brief is left untouched by the choice below. A brief that
+says it is looking at the code is false on two of the three paths and false in the worst direction:
+it tells a model that could read a file that it need not. `hunters.ts` had this right from the start
+(`CITE`: "The code message already says how the files are numbered, so this does not"); the two
+shipped briefs and the acknowledgement did not, and `REVIEWER_BRIEF`, `DEFAULT_TRIAGE` and
+`CODE_ACK` were each rewritten to state only what is true on every path. `CODE_ACK` is the sharpest
+case — seeded as the model's _own_ voice directly after an index whose first sentence is "you have
+not seen any of their contents yet", "I have the files" wrote a contradiction into its mouth.
+`tests/chat.test.ts` holds the rule over every shipped template at once, hunters included, so the
+next one written cannot reintroduce it.
 
 **A model that can call a tool is given the files to _read_ instead of the files, and that is one
 decision made in one place.** `usesTools(choice)` — `ModelChoice.supportsTools` _and_ a provider
@@ -859,6 +937,24 @@ the files are on its side of the worker boundary.
 or Gemma build there fails the question outright rather than degrading. Chrome's Prompt API has no
 tool role. Both are handed the listing, unchanged.
 
+**A rich artefact is the tool path's own temptation, and the trace is the rich artefact.** A trace
+hands over an excerpt, a file and a line for every step — enough to write a plausible review from
+without opening anything — so a model that can call `read_file` will often answer from the trace
+instead of the code. Two things push back, both cheap: `traceToText`'s closing paragraph says the
+quoted lines are excerpts and not the code, and `buildIndexMessage`'s tagged line says **read them**
+rather than _start there_ — an instruction beats a suggestion when what it is competing with is a
+page of code excerpts already in the question. Neither is a guarantee, which is why the row below
+matters more than either.
+
+**A conversation that never read anything says so**, and that is the one case the rows above would
+otherwise leave blank. A model handed a toolbox can narrate "I must first read the files" and then
+end its turn — no call, no row, and a well-formed answer resting on nothing but the file list. Both
+tool providers therefore keep an `everRead` flag **per session** and emit `NO_READS_NOTE` as a
+closing row where it is still false; per session rather than per question, since a follow-up resting
+on a file already in the history is ordinary. It is worth having because the cause is usually
+outside this app — a server that does not translate its model's tool syntax into `tool_calls`, or a
+small model that plans instead of calling — and none of those are visible from the answer.
+
 **Every call is written into the answer as its own `<tool>` row** — `markdown.ts`'s third
 model-output block, beside `think` — and the difference between the two is the point. A thought is
 folded away; a tool row is **shown**, because what a model was allowed to read is the first thing
@@ -881,7 +977,7 @@ whose template has nowhere to put it. Both lists' saved rows now **toggle** in p
 showing a badge, through a setter that rewrites the draft immutably — `v-model` on a row would
 write straight through to the stored object and break the drafts-under-one-Save rule.
 
-**Pure vs. impure.** `src/lib/{agents,analyzer,astTree,definitions,files,flow,share}.ts` are pure and
+**Pure vs. impure.** `src/lib/{agents,analyzer,astTree,definitions,files,flow,mentions,share}.ts` are pure and
 unit-tested over fixture strings — as are `normalizeBaseUrl` and `toModelChoice`
 (`tests/localServer.test.ts`), the two halves of the local provider that touch neither storage nor
 the network; the rest of it, like the OpenRouter key and its added models, is browser-bound — — the analyzer's fixtures are now _sets_ of files, which is how

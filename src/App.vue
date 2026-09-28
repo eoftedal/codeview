@@ -17,8 +17,8 @@ import { useModel } from './composables/useModel'
 import { findNodeAtOffset } from './lib/astTree'
 import type { DefinitionResult, Span } from './lib/definitions'
 import { isExternalOrigin, type FlowSpan, type FlowTarget, type FlowTrace } from './lib/flow'
-import { traceQuestion, tracedFiles } from './lib/traceText'
-import { usesTools } from './lib/chat'
+import { promptFiles } from './lib/chat'
+import { traceQuestion } from './lib/traceText'
 import { dropFragment } from './lib/share'
 import { filesFromInput } from './lib/upload'
 import { useOpenRouterKey } from './lib/providers/openrouterKey'
@@ -109,6 +109,12 @@ watch(localServerModels.models, () => model.refreshModels(), { deep: true })
  *  conversation nor a run should survive only as long as a glance at the tree. */
 const chat = useChat(model, files, activeFileId)
 const agents = useAgents(model, files, activeFileId)
+
+/** What `@` completes against in both prompt boxes, in the order a prompt spends them — the file
+ *  on screen first, exactly as `promptFiles` orders the listing itself. */
+const promptFileNames = computed(() =>
+  promptFiles(files.value, activeFileId.value).map((file) => file.name),
+)
 
 // Every composable above has now read whatever it needs out of `location.hash` (the files, the
 // chat's brief, the agents' team) — each synchronously, on construction, even though applying a
@@ -205,39 +211,29 @@ function runTrace(offset: number = cursorOffset.value): void {
 }
 
 /**
- * Hand the trace on screen to the chat: a new conversation, the question, and the files.
+ * Hand the trace on screen to the chat: a new conversation, and the question.
  *
- * **Which files is the whole of the decision.** A trace names the few that the path runs through,
- * and a conversation opened over only those spends its budget on code the question is actually
- * about — the point of the button over copying the text into an ordinary chat. Unless the model
- * reads the files itself, where there is nothing to save by choosing for it: it is given the usual
- * index of every tab and fetches what the trace points at, so the scope is left empty.
+ * **Which files is the whole of the decision, and the question is where it is written.** A trace
+ * names the few files the path runs through, and `traceQuestion` tags them — so the conversation
+ * is narrowed by exactly the mechanism a reader typing `@db.ts` uses, the reader can see what
+ * narrowed it, and nothing here has to know whether the picked model reads its own files. That
+ * last part is `useChat`'s, at the one place the opening turn is built.
  */
 async function analyzeTrace(): Promise<void> {
   const current = trace.value
   if (!current) return
   activeTab.value = 'chat'
-  await chat.askAbout(
-    traceQuestion(current),
-    usesTools(model.choice.value) ? [] : tracedFiles(current),
-  )
+  await chat.askAbout(traceQuestion(current))
 }
 
-/**
- * The same trace, handed to a line of agents instead of to one conversation. Same question, same
- * files; what differs is who reads them.
- *
- * The files are **always** the trace's here, where the chat leaves a tool-calling model the whole
- * buffer to read from. A run has one snapshot and several readers — each agent may be on a model
- * of its own, and only some of them may be able to read a file for themselves — so the one choice
- * that has to serve all of them is the narrow one the question actually asks about. An agent that
- * can call a tool is given those files to read.
- */
+/** The same trace and the same tags, handed to a line of agents instead of to one conversation.
+ *  What differs is only who reads them — and, per agent, whether the tagged files are handed over
+ *  or merely pointed at. */
 async function analyzeTraceWithAgents(): Promise<void> {
   const current = trace.value
   if (!current) return
   activeTab.value = 'agents'
-  await agents.runAbout(traceQuestion(current), tracedFiles(current))
+  await agents.runAbout(traceQuestion(current))
 }
 
 function onSelectTraceStep(target: FlowTarget): void {
@@ -514,10 +510,13 @@ function onFilePicked(event: Event): void {
               :status="model.status.value"
               :progress="model.progress.value"
               :messages="chat.messages.value"
+              :files="promptFileNames"
               :pending="chat.pending.value"
               :busy="chat.busy.value"
               :stale="chat.stale.value"
               :clipped="chat.clipped.value"
+              :opened="chat.opened.value"
+              :scope-files="chat.scopeFiles.value"
               @update:model="model.model.value = $event"
               @update:thinking="model.thinking.value = $event"
               @update:role="chat.setRole($event)"
@@ -536,6 +535,7 @@ function onFilePicked(event: Event): void {
               :team="agents.team.value"
               :team-is-default="agents.teamIsDefault.value"
               :task="agents.task.value"
+              :files="promptFileNames"
               :steps="agents.steps.value"
               :pending="agents.pending.value"
               :pending-step="agents.pendingStep.value"

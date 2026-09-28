@@ -72,10 +72,17 @@ export function traceToText(trace: FlowTrace): string {
     '',
     ...lines,
     '',
-    // Both sentences earn their space. The first says how to read the indentation, which is the
-    // only thing carrying the shape of the path; the second is the limit, without which a
+    // Three sentences, each earning its space. The first says how to read the indentation, which
+    // is the only thing carrying the shape of the path. The second is the limit, without which a
     // may-analysis reads as a claim about what the code does.
-    'Each step is where the value above it came from. This is a may-analysis: every path that could reach the value is shown, with no aliasing and no path sensitivity, so a path here is one the code could take rather than one it does.',
+    //
+    // The third is about this text rather than about the trace, and it exists because of what a
+    // model does with a rich artefact: an excerpt per step, with files and line numbers, is
+    // *enough to write a plausible answer from* — so one that could open the files often does not
+    // bother, and reviews the trace instead of the code. Saying the excerpts are excerpts is the
+    // cheapest lever on that. It is true on both paths: a model holding the listing has the file
+    // in front of it, and a model with `read_file` can go and get it.
+    'Each step is where the value above it came from. This is a may-analysis: every path that could reach the value is shown, with no aliasing and no path sensitivity, so a path here is one the code could take rather than one it does. The lines quoted here are single-line excerpts and not the code: check every step against the file it names before you rely on it, and do not report a finding from this text alone.',
     ...(trace.truncated
       ? ['', 'The walk stopped at its budget before it finished, so this trace is incomplete.']
       : []),
@@ -90,10 +97,21 @@ export function traceToText(trace: FlowTrace): string {
  */
 export const ANALYZE_TASK = 'Analyze this trace.'
 
-/** The task and the trace as one question, which is what the button sends and what the transcript
- *  then shows — the reader sees exactly what was asked. */
+/**
+ * The task, the files and the trace as one question — what the button sends, and what the
+ * transcript then shows. The reader sees exactly what was asked.
+ *
+ * The files ride the question as `@` tags rather than as an argument beside it, and that is the
+ * whole of how **Analyze this trace** narrows a conversation now. It costs a line of the question
+ * and buys three things: what narrowed the conversation is visible *in* the conversation, it is
+ * editable before the question is sent — drop a tag, add a tab the trace never reached — and the
+ * pane needs no second channel for something the text can carry. `mentions.ts` resolves them, and
+ * resolves them against the open tabs, which is also why the `@PathVariable` in the trace below is
+ * read as the annotation it is and not as a file.
+ */
 export function traceQuestion(trace: FlowTrace): string {
-  return `${ANALYZE_TASK}\n\n${traceToText(trace)}`
+  const tags = tracedFiles(trace).map((name) => `@${name}`)
+  return `${[ANALYZE_TASK, ...tags].join(' ')}\n\n${traceToText(trace)}`
 }
 
 /**
@@ -123,15 +141,7 @@ export function tracedFiles(trace: FlowTrace): string[] {
   return named
 }
 
-/**
- * The line a pane shows when a conversation or a run was narrowed to a trace's files — the same
- * sentence for the chat and for the agents, since the reader chose it the same way in both.
- *
- * Worth saying at all because the narrowing happened a tab away: by the time an answer lands, the
- * trace that explains why the model saw two files out of twelve is out of sight, and an answer
- * over part of the code otherwise reads exactly like one over all of it.
+/*
+ * What a narrowed conversation says about itself is no longer here: a trace narrows one the same
+ * way a typed `@` does, so the sentence belongs with the tags — `describeScope` in `mentions.ts`.
  */
-export function describeTraceScope(names: readonly string[]): string {
-  const what = names.length === 1 ? 'file' : `${names.length} files`
-  return `only the ${what} this trace touches (${names.join(', ')})`
-}

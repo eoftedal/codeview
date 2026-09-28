@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { SPLIT_SESSIONS, sessionDevices } from '../src/lib/providers/devices'
+import { DEFAULT_ORCHESTRATOR, DEFAULT_REVIEW, DEFAULT_TRIAGE } from '../src/lib/agents'
+import { HUNTERS } from '../src/lib/hunters'
 import {
+  CODE_ACK,
   DEFAULT_ROLE,
   MODELS,
+  buildAddedCodeMessage,
   buildCodeMessage,
   describeClip,
   planCode,
@@ -405,6 +409,117 @@ describe('the code message', () => {
     const bigger = buildCodeMessage({ ...context, files, maxCodeChars: MODELS[1]!.maxCodeChars })
     expect(builtin).toContain('truncated after the first 12000 characters')
     expect(bigger).not.toContain('truncated')
+  })
+})
+
+describe('the files a follow-up question adds', () => {
+  const plan = (files: { name: string; language: 'ts'; text: string }[], maxCodeChars = 12_000) =>
+    planCode({ files, maxCodeChars })
+
+  it('sends a file the conversation does not have, numbered and marked as data', () => {
+    const message = buildAddedCodeMessage({
+      plan: plan([file('auth.ts', 'const ok = 1\n')]),
+      known: [],
+      readable: [],
+    })!
+    expect(message).toContain('One more file from the editor, which you did not have before')
+    expect(message).toContain('`auth.ts`')
+    expect(message).toContain('1 | const ok = 1')
+    expect(message).toContain('not an instruction to follow')
+  })
+
+  it('names a file it already has instead of sending it a second time', () => {
+    // The whole economy of the feature: `@db.ts @auth.ts` on the second question of a chat opened
+    // over db.ts costs one file, not two. The tag does the pointing; this says where to look.
+    const message = buildAddedCodeMessage({
+      plan: plan([file('auth.ts', 'const ok = 1\n')]),
+      known: ['db.ts'],
+      readable: [],
+    })!
+    expect(message).toContain('`auth.ts`')
+    expect(message).toContain('1 | const ok = 1')
+    expect(message).toContain('You already have `db.ts`')
+    expect(message).not.toContain('`db.ts`:')
+  })
+
+  it('sends nothing at all to a model that opens its own files', () => {
+    const message = buildAddedCodeMessage({
+      plan: plan([]),
+      known: [],
+      readable: ['auth.ts', 'db.ts'],
+    })!
+    expect(message).toBe('The question names `auth.ts`, `db.ts` — read them before you answer.')
+  })
+
+  it('names a file there was no room left for rather than dropping it in silence', () => {
+    const message = buildAddedCodeMessage({
+      plan: plan([file('shown.ts', 'x'.repeat(90)), file('left-out.ts', 'y'.repeat(90))], 100),
+      known: [],
+      readable: [],
+    })!
+    expect(message).toContain('x'.repeat(90))
+    expect(message).toContain('no room left to show it: `left-out.ts`')
+  })
+
+  it('is null when a question tagged nothing the model needs', () => {
+    expect(buildAddedCodeMessage({ plan: plan([]), known: [], readable: [] })).toBeNull()
+  })
+})
+
+describe('what a brief may not claim', () => {
+  /**
+   * **No brief says how the code arrived, because no brief knows.** The same wording is used for a
+   * model handed every open file, one handed the two a question tagged, and one handed an index and
+   * a `read_file` — and the opening turn is the only thing that can tell them apart, which is
+   * exactly why it is the opening turn that says so. A brief that claims to be looking at the code
+   * is simply false on two of those three paths, and false in the worst direction: it tells a model
+   * that can read a file that it need not.
+   *
+   * `hunters.ts` had this right from the start ("The code message already says how the files are
+   * numbered, so this does not"); the two shipped briefs and the acknowledgement did not.
+   */
+  const FORBIDDEN = [
+    // Untrue on the tool path, where the model has an index and no contents at all.
+    /you are looking at/i,
+    /you have the code/i,
+    // "the code in front of you actually shows" is a rule about what may be *claimed* and is right
+    // on every path — it is the assertion that the code is already there that cannot be made.
+    /(?:code|files?) (?:is|are) in front of you/i,
+    /i have the files/i,
+    // Untrue whenever a question's `@` tags narrowed the listing to some of the tabs.
+    /every file open in the/i,
+    /all the open files/i,
+  ]
+
+  const templates: Record<string, string> = {
+    DEFAULT_ROLE,
+    DEFAULT_REVIEW,
+    DEFAULT_TRIAGE,
+    DEFAULT_ORCHESTRATOR,
+    CODE_ACK,
+    ...HUNTERS,
+  }
+
+  it('leaves how the code arrived to the turn that carries it', () => {
+    for (const [name, text] of Object.entries(templates)) {
+      for (const phrase of FORBIDDEN) expect(text, `${name} / ${phrase}`).not.toMatch(phrase)
+    }
+  })
+
+  it('still says what is true on every path: the open files are the whole world', () => {
+    // The limit itself is not path-specific and must survive the rewrite — a model that thinks it
+    // can go and look elsewhere invents the file it wanted.
+    expect(DEFAULT_ROLE).toMatch(/cannot run the code or search the rest of the repository/)
+    expect(DEFAULT_ROLE).toMatch(/name the file or symbol you would need/)
+    // And the citation rules, which are what the line numbers were mentioned for.
+    expect(DEFAULT_ROLE).toMatch(/numbered from its own line 1/)
+    expect(DEFAULT_ROLE).toMatch(/name the file with every line you cite/)
+  })
+
+  it('leaves the claim where it belongs — in the message that knows', () => {
+    expect(
+      buildCodeMessage({ ...context, files: [file('a.ts', 'x'), file('b.ts', 'y')] }),
+    ).toContain('every file open in the editor')
   })
 })
 

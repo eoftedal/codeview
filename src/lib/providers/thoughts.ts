@@ -59,6 +59,95 @@ export function foldChannels(): (chunk: string) => string {
 }
 
 /**
+ * Gemma 4's protocol tokens, for the case where a server hands them over as **content**.
+ *
+ * `foldChannels` above is the worker's, and it can compare whole chunks because `TextStreamer`
+ * flushes a special token on its own. An OpenAI-compatible server gives no such guarantee: it has
+ * already detokenized, and what arrives in `delta.content` is whatever text it decided to send. A
+ * server that routes the thought into `reasoning_content` but leaves the closing `<channel|>` in
+ * the content — which is what an MLX build of Gemma 4 does — puts a protocol token in front of the
+ * reader in the middle of a sentence.
+ *
+ * So these are dropped rather than translated. Turning `<channel|>` into `</think>` would be right
+ * only where the *opening* marker leaked too, and a stray closer with no block open renders as
+ * literal `</think>`: worse than the thing being fixed. A server that leaks the whole channel shows
+ * its thought as text, which is honest and is not what was seen.
+ */
+const GEMMA_PROTOCOL = ['<|channel>', '<channel|>', '<turn|>', '<eos>', '<bos>', '<pad>']
+
+/**
+ * Which tokens are protocol for this model, which is the whole of what keeps this from being a
+ * find-and-replace over everybody's answers. These strings are Gemma's, and an answer from any
+ * other model that happens to contain one is an answer containing one — this file's own source is
+ * full of them, and a chat about this repository must not have its text eaten.
+ *
+ * It is still a rule with a hole in it: ask a Gemma about `thoughts.ts` and it loses the tokens it
+ * quotes. Worth it, because the alternative is protocol in the middle of every thinking answer on
+ * that server, and the narrower rule is the one that can be stated.
+ */
+export function protocolTokensFor(model: string | undefined): readonly string[] {
+  return model && /gemma[-_ ]?4/i.test(model) ? GEMMA_PROTOCOL : []
+}
+
+/** The longest tail of `text` that is a prefix of `token` — what has to be held back in case the
+ *  rest of it is in the next chunk. */
+function partialTail(text: string, token: string): number {
+  const most = Math.min(text.length, token.length - 1)
+  for (let length = most; length > 0; length -= 1) {
+    if (token.startsWith(text.slice(text.length - length))) return length
+  }
+  return 0
+}
+
+/**
+ * A filter over one response's content: the named tokens removed, split across chunks or not.
+ *
+ * Streamed text has no reason to break where a token does, so a search per chunk would miss a
+ * marker arriving in two pieces — and a missed one is exactly what the reader sees. Hence the hold:
+ * a tail that could still become a token waits for the next chunk, and `end()` releases whatever
+ * turned out to be ordinary text after all.
+ */
+export function dropTokens(tokens: readonly string[]): {
+  chunk(text: string): string
+  end(): string
+} {
+  if (tokens.length === 0) return { chunk: (text) => text, end: () => '' }
+  let held = ''
+  return {
+    chunk(text) {
+      held += text
+      let out = ''
+      for (;;) {
+        // The earliest token in hand, so two overlapping ones cannot be taken out of order.
+        let at = -1
+        let found = ''
+        for (const token of tokens) {
+          const index = held.indexOf(token)
+          if (index >= 0 && (at === -1 || index < at)) {
+            at = index
+            found = token
+          }
+        }
+        if (at >= 0) {
+          out += held.slice(0, at)
+          held = held.slice(at + found.length)
+          continue
+        }
+        const keep = Math.max(...tokens.map((token) => partialTail(held, token)))
+        out += held.slice(0, held.length - keep)
+        held = held.slice(held.length - keep)
+        return out
+      }
+    },
+    end() {
+      const rest = held
+      held = ''
+      return rest
+    },
+  }
+}
+
+/**
  * The same translation for an OpenAI-compatible stream, where a reasoning model's thinking does not
  * arrive in the text at all: OpenRouter hands it back as a separate `delta.reasoning` beside
  * `delta.content`. Read only the content and the thought is simply gone — the pane shows nothing

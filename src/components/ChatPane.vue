@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
-import { DEFAULT_ROLE, describeStatus, type ModelChoice, type ModelStatus } from '../lib/chat'
+import MentionBox from './MentionBox.vue'
+import {
+  DEFAULT_ROLE,
+  describeStatus,
+  usesTools,
+  type ModelChoice,
+  type ModelStatus,
+} from '../lib/chat'
+import { describeAddedFiles, describeDraftScope, mentionedFiles } from '../lib/mentions'
 import { HUNTERS, HUNTER_NAMES } from '../lib/hunters'
 import type { ChatMessage } from '../composables/useChat'
 
@@ -18,12 +26,20 @@ const props = defineProps<{
   status: ModelStatus
   progress: number
   messages: ChatMessage[]
+  /** The open files by name, the one on screen first — what `@` completes against. */
+  files: string[]
   /** The answer streaming in right now, if any. */
   pending: string
   busy: boolean
   stale: boolean
   /** What of the code the model was not shown, or null when it saw all of it. */
   clipped: string | null
+  /** Whether a session exists — whether a tag in the box would scope this conversation or add to
+   *  it. Not `messages.length`: a first question whose model would not load leaves a row behind
+   *  and no session. */
+  opened: boolean
+  /** The files the conversation carries, or null while it carries every open tab. */
+  scopeFiles: readonly string[] | null
 }>()
 
 const emit = defineEmits<{
@@ -94,13 +110,33 @@ function send(question: string = draft.value): void {
   emit('ask', question)
 }
 
-function onEnter(event: KeyboardEvent): void {
-  // Shift+Enter is a newline; plain Enter asks, the way every other chat box behaves. Enter while
-  // an IME is composing belongs to the IME.
-  if (event.shiftKey || event.isComposing) return
-  event.preventDefault()
-  send()
-}
+/** The files the draft tags, so the reader is told what the question is about to be asked over
+ *  before they ask it rather than after the answer has landed. */
+const tagged = computed(() => mentionedFiles(draft.value, props.files))
+
+/**
+ * What those tags will do, which is two different things and must not be said as one.
+ *
+ * On the question that **opens** a conversation they are its scope. On a later one they cannot be
+ * — a session carries the code it was built with — so they **add** instead: a file the conversation
+ * lacks is sent with the question, one it already has is pointed at rather than sent twice, and a
+ * model that reads its own files is simply told to read them. The reader is told which of the three
+ * is about to happen, since all three are typed the same way.
+ */
+const scopeNote = computed(() => {
+  if (tagged.value.length === 0) return null
+  const reads = usesTools(props.choice)
+  if (!props.opened) return describeDraftScope(tagged.value, reads)
+  const carried = props.scopeFiles
+  // A conversation over every open tab has nothing to add to, whatever the tag names.
+  const added =
+    reads || carried === null ? [] : tagged.value.filter((name) => !carried.includes(name))
+  return describeAddedFiles(
+    added,
+    tagged.value.filter((name) => !added.includes(name)),
+    reads,
+  )
+})
 
 async function scrollToEnd(): Promise<void> {
   await nextTick()
@@ -242,7 +278,8 @@ onMounted(scrollToEnd)
         <p v-if="messages.length === 0 && !pending" class="empty">
           Ask about the code in the editor. Every open file goes to the model with a system prompt
           that makes it a security engineer reasoning about <strong>sources</strong> and
-          <strong>sinks</strong>.
+          <strong>sinks</strong> — or type <strong>@</strong> to name the files this question is
+          about, and only those are sent.
           <br />
           <span v-if="choice">{{ choice.note }}</span>
           <span class="suggestions">
@@ -270,15 +307,21 @@ onMounted(scrollToEnd)
         <p v-else-if="busy" class="waiting">…</p>
       </div>
 
-      <form v-if="!editingPrompt" class="composer" @submit.prevent="send()">
-        <textarea
-          v-model="draft"
-          rows="2"
-          placeholder="Ask about this code…"
-          @keydown.enter="onEnter"
-        />
-        <button type="submit" class="send" :disabled="busy || !draft.trim()">Ask</button>
-      </form>
+      <div v-if="!editingPrompt" class="composer-area">
+        <!-- Under the box, where the draft that caused it is: an answer's own narrowing is said up
+             in the status line, but this is about a question not yet asked. -->
+        <p v-if="scopeNote" class="scope"><span aria-hidden="true">@</span> {{ scopeNote }}</p>
+        <form class="composer" @submit.prevent="send()">
+          <MentionBox
+            v-model="draft"
+            :files="files"
+            :rows="2"
+            placeholder="Ask about this code… @ names a file"
+            @submit="send()"
+          />
+          <button type="submit" class="send" :disabled="busy || !draft.trim()">Ask</button>
+        </form>
+      </div>
 
       <footer v-if="choice?.provider === 'openrouter'">
         Hosted by OpenRouter for this model — the code goes to their API, not only this machine.
@@ -643,12 +686,25 @@ button:disabled {
   color: var(--dim);
 }
 
+.composer-area {
+  border-top: 1px solid var(--border);
+}
+
 .composer {
   display: flex;
   gap: 6px;
   align-items: flex-end;
   padding: 8px 10px;
-  border-top: 1px solid var(--border);
+}
+
+/* What the tags in the draft are about to do. Quiet — it states the reader's own choice back to
+   them — until it is saying that the choice will not apply, which is the case worth a colour. */
+.scope {
+  margin: 0;
+  padding: 6px 10px 0;
+  font-size: 11px;
+  color: var(--dim);
+  overflow-wrap: anywhere;
 }
 
 textarea {

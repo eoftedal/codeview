@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
+import MentionBox from './MentionBox.vue'
 import {
   DEFAULT_REVIEW,
   DEFAULT_TRIAGE,
@@ -11,8 +12,9 @@ import {
   type AgentSpec,
   type AgentTeam,
 } from '../lib/agents'
-import { describeStatus, type ModelChoice, type ModelStatus } from '../lib/chat'
+import { describeStatus, usesTools, type ModelChoice, type ModelStatus } from '../lib/chat'
 import { HUNTERS, HUNTER_NAMES } from '../lib/hunters'
+import { describeDraftScope, mentionedFiles } from '../lib/mentions'
 import { findModel } from '../lib/providers'
 import type { AgentStep, PendingStep } from '../composables/useAgents'
 
@@ -28,8 +30,11 @@ const props = defineProps<{
   team: AgentTeam
   /** Whether that is still the shipped team, which is all a rewritten one is marked by. */
   teamIsDefault: boolean
-  /** What the orchestrator is asked to open the run with. */
+  /** What the orchestrator is asked to open the run with. Its `@` tags are what the run is
+   *  narrowed to, so this box is where a reader chooses the files as well as the question. */
   task: string
+  /** The open files by name, the one on screen first — what `@` completes against. */
+  files: string[]
   steps: AgentStep[]
   /** The step streaming in right now, if any. */
   pending: string
@@ -186,11 +191,31 @@ function start(): void {
   emit('run')
 }
 
-function onEnter(event: KeyboardEvent): void {
-  // Shift+Enter is a newline; plain Enter starts the run, the way Enter asks in the chat pane.
-  if (event.shiftKey || event.isComposing) return
-  event.preventDefault()
-  start()
+/** The files the task tags. Unlike the chat's, these cannot go stale: the box *is* the run's
+ *  scope, and it is read at the moment Run is pressed. */
+const tagged = computed(() => mentionedFiles(props.task, props.files))
+
+/**
+ * Whether any agent in the run reads files for itself, which is what decides what the tags promise.
+ * `some`, not `every`: a mixed team is ordinary — a tool-calling reviewer and a small local triage
+ * — and in one the tags both narrow what is handed over and point at where to start. The wording
+ * has to hold for both, so it says the weaker thing whenever any agent could read further.
+ */
+const anyReads = computed(() =>
+  props.team.agents.some((agent) => usesTools(findModel(agent.model ?? props.model))),
+)
+
+const scopeNote = computed(() =>
+  tagged.value.length > 0 ? describeDraftScope(tagged.value, anyReads.value) : null,
+)
+
+/** What the roster says each agent will see. Three answers, not two: a tagged task narrows an
+ *  agent that is handed the code and only points one that reads its own files. */
+function seenBy(agent: AgentSpec): string {
+  if (tagged.value.length === 0) return 'sees every open file'
+  return usesTools(findModel(agent.model ?? props.model))
+    ? 'reads every open file, starting with the ones named'
+    : `sees the ${tagged.value.length === 1 ? 'file' : `${tagged.value.length} files`} the task names`
 }
 
 async function scrollToEnd(): Promise<void> {
@@ -271,9 +296,10 @@ onMounted(scrollToEnd)
       <section v-if="editing" class="team-editor">
         <p class="hint">
           The orchestrator is briefed on the roster, never on the code — it only ever sees what the
-          agents report. Every agent below is given all the open files, line-numbered, under its own
-          brief, and runs on the orchestrator's model unless given one of its own — which is a
-          second model held on the GPU.
+          agents report. Every agent below is given the files the task names with
+          <strong>@</strong>, or all of them when it names none, line-numbered under its own brief,
+          and runs on the orchestrator's model unless given one of its own — which is a second model
+          held on the GPU.
         </p>
 
         <div class="scroll">
@@ -385,7 +411,10 @@ onMounted(scrollToEnd)
             </li>
             <li v-for="agent in team.agents" :key="agent.id">
               <span class="who">{{ agent.name }}</span>
-              <span class="role-note">sees every open file</span>
+              <!-- What this agent will actually be shown, which the task's own tags decide. An
+                   agent on a model that reads its own files is never narrowed: it keeps the index
+                   of every tab and is only pointed at the tagged ones. -->
+              <span class="role-note">{{ seenBy(agent) }}</span>
               <span v-if="agent.model" class="role-note" :class="{ missing: !usable(agent.model) }">
                 · on {{ labelFor(agent.model)
                 }}{{ usable(agent.model) ? '' : ', which this browser cannot run' }}
@@ -454,16 +483,20 @@ onMounted(scrollToEnd)
         <p v-else-if="running" class="waiting">…</p>
       </div>
 
-      <form v-if="!editing && canStart" class="composer" @submit.prevent="start()">
-        <textarea
-          :value="task"
-          rows="2"
-          placeholder="What should the run look for?"
-          @input="emit('update:task', ($event.target as HTMLTextAreaElement).value)"
-          @keydown.enter="onEnter"
-        />
-        <button type="submit" class="send" :disabled="!task.trim()">Run</button>
-      </form>
+      <div v-if="!editing && canStart" class="composer-area">
+        <p v-if="scopeNote" class="scope"><span aria-hidden="true">@</span> {{ scopeNote }}</p>
+        <form class="composer" @submit.prevent="start()">
+          <MentionBox
+            :model-value="task"
+            :files="files"
+            :rows="2"
+            placeholder="What should the run look for? @ names a file"
+            @update:model-value="emit('update:task', $event)"
+            @submit="start()"
+          />
+          <button type="submit" class="send" :disabled="!task.trim()">Run</button>
+        </form>
+      </div>
 
       <footer>Runs on this machine — weights come down, the code never goes up.</footer>
     </template>
@@ -978,12 +1011,25 @@ button:disabled {
   color: var(--dim);
 }
 
+.composer-area {
+  border-top: 1px solid var(--border);
+}
+
 .composer {
   display: flex;
   gap: 6px;
   align-items: flex-end;
   padding: 8px 10px;
-  border-top: 1px solid var(--border);
+}
+
+/* The same line the chat shows under its own box, for the same reason: what the tags are about to
+   do, said before the run rather than explained after it. */
+.scope {
+  margin: 0;
+  padding: 6px 10px 0;
+  font-size: 11px;
+  color: var(--dim);
+  overflow-wrap: anywhere;
 }
 
 textarea {

@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { foldChannels, foldReasoning, withoutThoughts } from '../src/lib/providers/thoughts'
+import {
+  dropTokens,
+  foldChannels,
+  foldReasoning,
+  protocolTokensFor,
+  withoutThoughts,
+} from '../src/lib/providers/thoughts'
 
 /** The chunks a `TextStreamer` hands over for a thinking answer: every special token alone, the
  *  ordinary text split wherever it likes. */
@@ -133,5 +139,53 @@ describe('withoutThoughts over a tool row', () => {
 
   it('leaves an answer that merely talks about one alone', () => {
     expect(withoutThoughts('Call `read_file` to see it.')).toBe('Call `read_file` to see it.')
+  })
+})
+
+describe('a server that leaks the model’s protocol into the content', () => {
+  const gemma = () => dropTokens(protocolTokensFor('gemma4:e4b-mlx'))
+
+  it('drops a channel marker left in the middle of an answer', () => {
+    // An MLX build of Gemma 4 routes the thought into `reasoning_content` and leaves the closing
+    // `<channel|>` in the content, which lands in front of the reader mid-sentence.
+    const strip = gemma()
+    expect(strip.chunk('I will read ProductController.java.<channel|>')).toBe(
+      'I will read ProductController.java.',
+    )
+    expect(strip.end()).toBe('')
+  })
+
+  it('catches one split across two chunks, since nothing lines a chunk up with a token', () => {
+    const strip = gemma()
+    expect(strip.chunk('done.<chan')).toBe('done.')
+    expect(strip.chunk('nel|> and then')).toBe(' and then')
+    expect(strip.end()).toBe('')
+  })
+
+  it('gives back a held tail that turned out to be ordinary text', () => {
+    const strip = gemma()
+    // `<cha` could still become `<channel|>`, so it waits — and is text after all.
+    expect(strip.chunk('a <cha')).toBe('a ')
+    expect(strip.end()).toBe('<cha')
+  })
+
+  it('leaves every other model’s answers exactly as they arrived', () => {
+    // These strings are Gemma's. This repository's own source is full of them, and a chat about
+    // it must not have its text eaten by a rule meant for one server.
+    expect(protocolTokensFor('anthropic/claude-haiku-4.5')).toEqual([])
+    expect(protocolTokensFor(undefined)).toEqual([])
+    const strip = dropTokens(protocolTokensFor('qwen2.5-coder:7b'))
+    expect(strip.chunk('the token is <channel|> in that file')).toBe(
+      'the token is <channel|> in that file',
+    )
+    expect(strip.end()).toBe('')
+  })
+
+  it('knows a Gemma 4 however the server spells it', () => {
+    for (const id of ['gemma4:e4b-mlx', 'google/gemma-4-e2b', 'Gemma_4_E4B']) {
+      expect(protocolTokensFor(id).length).toBeGreaterThan(0)
+    }
+    // Not Gemma 2 or 3: channels are Gemma 4's.
+    expect(protocolTokensFor('gemma-2-9b')).toEqual([])
   })
 })

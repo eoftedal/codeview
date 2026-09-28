@@ -76,7 +76,7 @@ export const DEFAULT_REVIEW = `${REVIEWER_BRIEF} Report every flow you find, eac
  */
 export const DEFAULT_TRIAGE = `You are an adversarial security reviewer, and your job is triage: deciding which of the findings another reviewer has just reported are real. You are not here to agree, and you are not here to run a review of your own. A reviewer who confirms everything is worth nothing, and so is one who dismisses everything. Read the code as closely as each finding demands — but along the paths you were handed: you rule on those findings, and open none of your own.
 
-You have the code in front of you. Take the findings one at a time:
+The code is there to check them against. Take the findings one at a time:
 
 1. **Check the citation.** Go to the file and line the finding names and confirm that the code there actually contains what is claimed — the same names, the same call, the same assignment. A finding whose cited line does not say what it claims is wrong, and you say so plainly.
 2. **Walk the flow yourself**, hop by hop, from the named source to the named sink, and look for what the first reviewer missed: a validation, an encoding, a parameterised query, an escape, a cast to a type that cannot carry an injection, a branch that cannot be reached, a sink that is not really a sink.
@@ -238,7 +238,7 @@ export function relayLimit(maxCodeChars: number): number {
 function clip(text: string, limit: number): string {
   const trimmed = text.trim()
   if (trimmed.length <= limit) return trimmed
-  return `${trimmed.slice(0, limit)}\n\n[…truncated: this report was longer than fits here]`
+  return `${trimmed.slice(0, limit)}\n\n[…truncated: this was longer than fits here]`
 }
 
 /** The orchestrator's system prompt: its own brief, plus who it has to work with. It cannot be
@@ -332,22 +332,41 @@ export function summaryMessage(
 }
 
 /**
- * What an agent is actually asked: the orchestrator's brief, and — for every agent after the first
- * — the previous agent's report verbatim. The report is passed on rather than left to the
- * orchestrator's paraphrase because the details are the part that matters: a file, a line and a
- * name survive a relay only if they are copied.
+ * What an agent is actually asked: the orchestrator's brief, plus one verbatim copy of whatever
+ * that brief is a paraphrase *of* — the reader's task for the first agent, the previous agent's
+ * report for every one after it.
  *
- * The last line is the one that has to be here. The orchestrator is told not to rewrite a verdict,
- * and mostly does not, but "mostly" is not a guarantee you can build on — so when its brief and the
- * report below it disagree, the agent is told outright which of the two to believe. The copy that
- * was not written by a model in the middle.
+ * **Exactly one verbatim copy per hop, and which one it is follows the chain.** The orchestrator
+ * never sees the code, so its brief is written by the one participant that can check nothing, and a
+ * paraphrase is where a file, a line and a name go. The report was always copied for that reason.
+ * The task was not, and the gap only became visible when the task grew large: **Analyze with
+ * agents** hands over a whole trace, the orchestrator dutifully boils it down to a sentence, and
+ * the first agent is briefed on a flow it has never seen. The first agent is also the only one with
+ * nothing else to go on — every later hop already receives a copy no model in the middle wrote, so
+ * duplicating the task into all of them would spend a second window on a trace for a hop whose job
+ * is the report in front of it.
+ *
+ * Two authority lines, one per copy, and both have to be here. The orchestrator is told not to
+ * rewrite what it relays and mostly does not, but "mostly" is not something to build on — so where
+ * its brief and the copy beside it disagree, the agent is told outright which to believe.
  */
 export function handoffMessage(
+  task: string,
   brief: string,
   previous: { from: AgentSpec; output: string } | null,
   limit: number = MAX_RELAY_CHARS,
 ): string {
-  if (!previous) return brief.trim()
+  if (!previous) {
+    return [
+      'This is what the reader asked for, word for word:',
+      '',
+      clip(task, limit),
+      '',
+      'Answer that. Where the brief below reads it differently, the words above are the reader’s own and are what count.',
+      '',
+      brief.trim(),
+    ].join('\n')
+  }
   return [
     brief.trim(),
     '',

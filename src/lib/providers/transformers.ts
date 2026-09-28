@@ -12,7 +12,7 @@ import {
   type Provider,
   type ToolBox,
 } from '../chat'
-import { MAX_TOOL_ROUNDS } from '../tools'
+import { MAX_TOOL_ROUNDS, NO_READS_NOTE } from '../tools'
 import { dialectFor, type ParsedCall } from './onnxTools'
 import { withoutThoughts } from './thoughts'
 import type { FromWorker, ToWorker, WorkerMessage } from './transformersWorker'
@@ -146,6 +146,9 @@ export const transformers: Provider = {
         // A toolbox is only worth declaring to a model whose template can render it and whose
         // syntax we can read back — otherwise the call arrives as prose in the middle of an answer.
         const box: ToolBox | undefined = dialect ? tools : undefined
+        /** Whether this conversation has ever opened a file — see `NO_READS_NOTE`. Per session,
+         *  since a later answer resting on a file already read is ordinary. */
+        let everRead = false
         return {
           promptStreaming(input, options) {
             messages.push({ role: 'user', content: input })
@@ -209,6 +212,13 @@ export const transformers: Provider = {
                       // answer ends here, with the note that says why.
                       if (truncated || !box || calls.length === 0) {
                         finish()
+                        // A conversation with a toolbox that never opened a file answered from the
+                        // index alone, and nothing else about the answer would say so — a model
+                        // that narrates "I will read the files" and then ends its turn otherwise
+                        // leaves a well-formed answer with no sign that it never looked.
+                        if (box && !everRead) {
+                          controller.enqueue(`\n\n<tool>${NO_READS_NOTE}</tool>\n\n`)
+                        }
                         // Said before the close, so the reader of the stream learns it before the
                         // stream tells them there is nothing more.
                         if (truncated) options?.onTruncated?.()
@@ -231,6 +241,7 @@ export const transformers: Provider = {
                         })),
                       })
                       said = ''
+                      everRead = true
 
                       const trace: string[] = []
                       for (const call of calls) {

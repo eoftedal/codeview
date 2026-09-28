@@ -3,7 +3,7 @@ import type { PromptFile } from '../src/lib/chat'
 import { openAiEngine, type OpenAiConfig } from '../src/lib/providers/openaiCompatible'
 import { withoutThoughts } from '../src/lib/providers/thoughts'
 import { streamAnswer } from '../src/lib/stream'
-import { MAX_TOOL_ROUNDS, fileTools } from '../src/lib/tools'
+import { MAX_TOOL_ROUNDS, NO_READS_NOTE, fileTools } from '../src/lib/tools'
 
 /** A chat-completions SSE body: one `data:` event per entry, closed by `[DONE]` unless the server
  *  never got that far. */
@@ -116,6 +116,27 @@ function server(rounds: (body: Record<string, unknown>) => string[]) {
   return bodies
 }
 
+describe('a server that leaks protocol into the content', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('keeps it out of the answer and out of the history', async () => {
+    // Observed on an MLX build of Gemma 4: the thought goes to `reasoning_content` and the closing
+    // `<channel|>` is left in the content, arriving mid-sentence in front of the reader.
+    vi.stubGlobal('fetch', async () => sse([chunk('I will read it.<chan'), chunk('nel|>', 'stop')]))
+    const session = await openAiEngine(config, { model: 'gemma4:e4b-mlx' }).chat('brief', 'code')
+    const answer = await streamAnswer(session, 'q', {}, () => {})
+    expect(answer.text).toBe('I will read it.')
+  })
+
+  it('leaves another model’s answer alone, token-shaped or not', async () => {
+    vi.stubGlobal('fetch', async () => sse([chunk('the token is <channel|> there', 'stop')]))
+    const session = await openAiEngine(config, { model: 'qwen2.5-coder:7b' }).chat('brief', 'code')
+    expect((await streamAnswer(session, 'q', {}, () => {})).text).toBe(
+      'the token is <channel|> there',
+    )
+  })
+})
+
 describe('a question answered through tools', () => {
   afterEach(() => vi.unstubAllGlobals())
 
@@ -196,11 +217,50 @@ describe('a question answered through tools', () => {
     expect(withoutThoughts(answer)).toBe('Answering with what I read.')
   })
 
+  it('says so when it answered without ever opening a file', async () => {
+    // The failure that looks exactly like an answer: a model narrates "I will read the files" and
+    // then ends its turn. Every other outcome leaves a row saying what was read; this one would
+    // leave none at all, and a review resting on a list of file names would read as one resting on
+    // the code.
+    const { answer } = await askWithTools(() => [
+      chunk('I must first read the files before I can review them.', 'stop'),
+    ])
+    expect(answer).toContain(`<tool>${NO_READS_NOTE}</tool>`)
+    // Still the model's own words that are relayed and remembered: this is what it did, not what
+    // it said, exactly as a `read_file` row is.
+    expect(withoutThoughts(answer)).toBe('I must first read the files before I can review them.')
+  })
+
+  it('says it only once a session, and never after a real read', async () => {
+    const bodies = server((body) =>
+      (body.messages as { role: string }[]).some((message) => message.role === 'tool')
+        ? [chunk('It reaches run().', 'stop')]
+        : toolCall('read_file', '{"file":"routes.ts"}'),
+    )
+    const session = await openAiEngine(config, { model: 'm' }).chat(
+      'brief',
+      'index',
+      fileTools(files, 10_000),
+    )
+    const first = await streamAnswer(session, 'q', {}, () => {})
+    expect(first.text).not.toContain(NO_READS_NOTE)
+
+    // A follow-up answered from what is already in the history has read nothing of its own, and
+    // that is ordinary — the file is in the conversation.
+    bodies.length = 0
+    vi.stubGlobal('fetch', async () => sse([chunk('As I said.', 'stop')]))
+    const second = await streamAnswer(session, 'and?', {}, () => {})
+    expect(second.text).not.toContain(NO_READS_NOTE)
+  })
+
   it('sends no tools at all for a session opened without them', async () => {
     const bodies = server(() => [chunk('Hello', 'stop')])
     const session = await openAiEngine(config, { model: 'm' }).chat('brief', 'code')
-    await streamAnswer(session, 'q', {}, () => {})
+    const answer = await streamAnswer(session, 'q', {}, () => {})
     expect(bodies[0]!.tools).toBeUndefined()
     expect(bodies[0]!.tool_choice).toBeUndefined()
+    // And no row about reading: a session holding the listing read nothing because there was
+    // nothing to read.
+    expect(answer.text).not.toContain(NO_READS_NOTE)
   })
 })

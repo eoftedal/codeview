@@ -850,7 +850,7 @@ describe('flow trace', () => {
       // Said on the pane too, since by the time an answer lands the trace that explains the
       // narrowing is a tab away.
       expect(await fresh.$eval('.chat-pane .clipped', (el) => el.textContent ?? '')).toContain(
-        'only the 2 files this trace touches (app.ts, db.ts)',
+        'only the 2 files the question names (app.ts, db.ts)',
       )
     } finally {
       await fresh.close()
@@ -2053,6 +2053,285 @@ describe('the chat pane picks a model honestly', () => {
   })
 })
 
+describe('a question that names its files with @', () => {
+  // Each file says something no other one does, so what reached the model can be told apart from
+  // what did not.
+  const BUNDLE = [
+    '--8<-- app.ts',
+    "import { read } from './db'",
+    'const raw = read()',
+    'const out = raw',
+    '--8<-- db.ts',
+    'export function read() {',
+    '  return process.env.SEED',
+    '}',
+    '--8<-- auth.ts',
+    'export const allow = true',
+    '--8<-- unrelated.ts',
+    "export const nothing = 'to do with this question'",
+  ].join('\n')
+
+  /** A page whose browser model records the turns each session was opened with. */
+  async function taggingPage(seed: () => void = () => {}): Promise<Page> {
+    const fresh = await browser.newPage()
+    await fresh.setViewport({ width: 1400, height: 1000 })
+    // Pages share an origin, so a model another case picked is still remembered here — and a
+    // question answered by something other than the stub below leaves nothing to read back.
+    // Registered before the seed, which sets storage of its own.
+    await fresh.evaluateOnNewDocument(() => localStorage.clear())
+    await fresh.evaluateOnNewDocument(seed)
+    await fresh.evaluateOnNewDocument(() => {
+      ;(window as unknown as { __prompts: unknown[] }).__prompts = []
+      ;(window as unknown as { __asked: string[] }).__asked = []
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async (options: { initialPrompts?: unknown }) => {
+          ;(window as unknown as { __prompts: unknown[] }).__prompts.push(
+            options?.initialPrompts ?? [],
+          )
+          return {
+            // What actually reached the model, which is not always what the transcript shows.
+            promptStreaming: (input: string) => {
+              ;(window as unknown as { __asked: string[] }).__asked.push(input)
+              return new ReadableStream({
+                start(controller) {
+                  controller.enqueue('Read.')
+                  controller.close()
+                },
+              })
+            },
+            destroy: () => {},
+          }
+        },
+      }
+    })
+    await fresh.goto(`${URL}#files=${encodeURIComponent(BUNDLE)}&active=app.ts`, {
+      waitUntil: 'networkidle0',
+    })
+    await fresh.waitForSelector('.row')
+    await openChat(fresh)
+    return fresh
+  }
+
+  /** The opening turn of the first session this page built — the listing, or the index. */
+  const openingTurn = (target: Page) =>
+    target.evaluate(() => {
+      const prompts = (window as unknown as { __prompts: { role: string; content: string }[][] })
+        .__prompts[0]
+      return prompts?.find((turn, index) => index > 0 && turn.role === 'user')?.content ?? ''
+    })
+
+  it('completes a half-typed tag from the open tabs, the way Cmd+P does', async () => {
+    const fresh = await taggingPage()
+    try {
+      await fresh.type('.composer textarea', 'where does this go? @db')
+      await fresh.waitForSelector('.composer .mentions')
+      // The same subsequence matcher the palette uses, over the same names — a reader has one
+      // gesture for naming a file here, not two.
+      expect(
+        await fresh.$$eval('.composer .mention', (nodes) =>
+          nodes.map((node) => node.textContent?.trim()),
+        ),
+      ).toEqual(['db.ts'])
+
+      await fresh.keyboard.press('Enter')
+      expect(
+        await fresh.$eval('.composer textarea', (el) => (el as HTMLTextAreaElement).value),
+      ).toBe('where does this go? @db.ts ')
+      // Picking closes the list and leaves the caret in the sentence rather than in a dialog.
+      expect(await fresh.$('.composer .mentions')).toBeNull()
+
+      // And the reader is told what the tag will do *before* the question is asked, since after it
+      // an answer over one file reads exactly like one over three.
+      expect(await fresh.$eval('.composer-area .scope', (el) => el.textContent ?? '')).toContain(
+        'db.ts — only these go to the model',
+      )
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('opens the conversation over the tagged file alone', async () => {
+    const fresh = await taggingPage()
+    try {
+      await fresh.type('.composer textarea', 'is @db.ts trusted?')
+      await fresh.click('.composer .send')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      const code = await openingTurn(fresh)
+      expect(code).toContain('`db.ts`')
+      expect(code).not.toContain('`app.ts`')
+      expect(code).not.toContain('unrelated.ts')
+      // Told it is a selection, too: the brief asks it to say when an answer needs code it cannot
+      // see, which it cannot judge if the listing claims to be the whole editor.
+      expect(code).toContain('not all of it')
+
+      expect(await fresh.$eval('.chat-pane .clipped', (el) => el.textContent ?? '')).toContain(
+        'only the file the question names (db.ts)',
+      )
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('leaves an untagged question over every open tab', async () => {
+    const fresh = await taggingPage()
+    try {
+      await fresh.type('.composer textarea', 'what does this do?')
+      await fresh.click('.composer .send')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      const code = await openingTurn(fresh)
+      for (const name of ['app.ts', 'db.ts', 'auth.ts', 'unrelated.ts'])
+        expect(code).toContain(`\`${name}\``)
+      expect(await fresh.$('.chat-pane .clipped')).toBeNull()
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('adds a tagged file to a running conversation, and sends no file twice', async () => {
+    // A session carries the code it was built with, so a later tag cannot re-scope it — what it
+    // can do is add. The reader sees the question they typed; the model gets that question with
+    // the file it did not have in front of it, and a pointer for the one it did.
+    const fresh = await taggingPage()
+    try {
+      await fresh.type('.composer textarea', 'is @db.ts trusted?')
+      await fresh.click('.composer .send')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      expect(await openingTurn(fresh)).not.toContain('allow')
+
+      await fresh.type('.composer textarea', 'what about @auth.ts and @db.ts?')
+      expect(await fresh.$eval('.composer-area .scope', (el) => el.textContent ?? '')).toContain(
+        'auth.ts will be added to this chat; db.ts is already in it',
+      )
+      await fresh.click('.composer .send')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      const asked = await fresh.evaluate(() => (window as unknown as { __asked: string[] }).__asked)
+      // The first question went as typed; the second carries the one file it needed.
+      expect(asked[0]).toBe('is @db.ts trusted?')
+      expect(asked[1]).toContain('One more file from the editor, which you did not have before')
+      expect(asked[1]).toContain('1 | export const allow = true')
+      expect(asked[1]).toContain('You already have `db.ts`')
+      // Not a second copy of what it already holds.
+      expect(asked[1]).not.toContain('process.env.SEED')
+      // And the question itself is still at the end of it, tags and all.
+      expect(asked[1]!.endsWith('what about @auth.ts and @db.ts?')).toBe(true)
+
+      // What the reader sees is what the reader wrote — none of the above.
+      expect(
+        await fresh.$$eval('.chat-pane .message.user .text', (nodes) =>
+          nodes.map((node) => node.textContent ?? ''),
+        ),
+      ).toEqual(['is @db.ts trusted?', 'what about @auth.ts and @db.ts?'])
+
+      // And the conversation now carries both, which the status line has to say.
+      expect(await fresh.$eval('.chat-pane .clipped', (el) => el.textContent ?? '')).toContain(
+        'only the 2 files the question names (db.ts, auth.ts)',
+      )
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('points a model that reads its own files at the tags, and hands it none of them', async () => {
+    // The other half of the feature. There is nothing to save by choosing for a model that can
+    // open a file itself, and narrowing what it may open would take away the one thing the tool
+    // path has — so it keeps the index of every tab and is told where to start.
+    const fresh = await taggingPage(function () {
+      localStorage.setItem('codeview:local-server-url', 'http://localhost:11434/v1')
+      localStorage.setItem(
+        'codeview:local-server-models',
+        JSON.stringify([{ model: 'tooled', label: 'Tooled', thinking: false, tools: true }]),
+      )
+      const originalFetch = window.fetch.bind(window)
+      ;(window as unknown as { __inputs: unknown[] }).__inputs = []
+      window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === 'string' ? input : input.toString()
+        if (!url.includes('11434')) return originalFetch(input, init)
+        if (url.endsWith('/models')) {
+          return new Response(JSON.stringify({ data: [{ id: 'tooled' }] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        }
+        ;(window as unknown as { __inputs: unknown[] }).__inputs.push(
+          JSON.parse(String(init?.body)),
+        )
+        const encoder = new TextEncoder()
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                encoder.encode(
+                  'data: {"choices":[{"delta":{"content":"Read it."},"finish_reason":"stop"}]}\n\n',
+                ),
+              )
+              controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+              controller.close()
+            },
+          }),
+          { status: 200 },
+        )
+      }) as typeof window.fetch
+    })
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      await fresh.select('.model', 'local:tooled')
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      await fresh.type('.composer textarea', 'is @db.ts trusted?')
+      expect(await fresh.$eval('.composer-area .scope', (el) => el.textContent ?? '')).toContain(
+        'the rest can still be read',
+      )
+      await fresh.click('.composer .send')
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      const sent = await fresh.evaluate(
+        () =>
+          (
+            window as unknown as {
+              __inputs: { messages: { role: string; content: string }[]; tools?: unknown[] }[]
+            }
+          ).__inputs[0]!,
+      )
+      const opening = sent.messages.find(
+        (message, index) => index > 0 && message.role === 'user',
+      )!.content
+      // Every tab is still listed and still readable — and the tagged one is where to start.
+      expect(opening).toContain('`unrelated.ts`')
+      expect(opening).toContain('The question names `db.ts` — read them with read_file')
+      // The index, not the code: nothing was handed over.
+      expect(opening).not.toContain('process.env.SEED')
+      expect(sent.tools).toHaveLength(2)
+      // Nothing was withheld, so there is nothing to warn about — which is exactly what makes the
+      // tool path worth taking.
+      expect(await fresh.$('.chat-pane .clipped')).toBeNull()
+
+      // And a tag on a *follow-up* needs no file either: this conversation withheld nothing, so
+      // the tag is a pointer at something the model can already open for itself.
+      await fresh.type('.composer textarea', 'and @auth.ts?')
+      expect(await fresh.$eval('.composer-area .scope', (el) => el.textContent ?? '')).toContain(
+        'auth.ts — the model is told to read it',
+      )
+      await fresh.click('.composer .send')
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      const second = await fresh.evaluate(() =>
+        (
+          window as unknown as { __inputs: { messages: { role: string; content: string }[] }[] }
+        ).__inputs.at(-1)!,
+      )
+      const question = second.messages.at(-1)!.content
+      expect(question).toContain('The question names `auth.ts` — read it before you answer.')
+      expect(question).not.toContain('export const allow')
+    } finally {
+      await fresh.close()
+    }
+  })
+})
+
 describe('file tabs', () => {
   /** A page with an empty localStorage, so the strip starts at exactly one tab. */
   async function tabsPage(): Promise<Page> {
@@ -2430,7 +2709,7 @@ describe('the agents pane runs a line of agents', () => {
 
       // The reader is told the same thing on every agent's row.
       expect((await stepText(fresh, '.clipped')).join(' ')).toContain(
-        'only the 2 files this trace touches (app.ts, db.ts)',
+        'only the 2 files the question names (app.ts, db.ts)',
       )
 
       // And the transcript is at its end rather than at the top of the task, which is a whole
@@ -2463,6 +2742,57 @@ describe('the agents pane runs a line of agents', () => {
         'Review sees every open file',
         'Adversarial Triage sees every open file',
       ])
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('narrows a run to the files the task names, and says so on the roster', async () => {
+    // The agents' box has no equivalent of the chat's catch: the task *is* the run's scope, read
+    // when Run is pressed, so rewriting the box rewrites the selection.
+    const bundle = [
+      '--8<-- app.ts',
+      "const raw = 'seed'",
+      '--8<-- db.ts',
+      'export const query = 1',
+      '--8<-- unrelated.ts',
+      "export const nothing = 'to do with this run'",
+    ].join('\n')
+    const fresh = await agentsPage(`#files=${encodeURIComponent(bundle)}&active=app.ts`)
+    try {
+      await fresh.$eval('.composer textarea', (el) => {
+        const box = el as HTMLTextAreaElement
+        box.value = 'Check @db.ts only.'
+        box.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      // The roster says what each agent will actually be shown, before the run rather than after.
+      expect(await pipelineRows(fresh)).toEqual([
+        'Orchestrator briefs each agent · never sees the code',
+        'Review sees the file the task names',
+        'Adversarial Triage sees the file the task names',
+      ])
+      expect(await fresh.$eval('.composer-area .scope', (el) => el.textContent ?? '')).toContain(
+        'db.ts — only these go to the model',
+      )
+
+      await fresh.click('.composer .send')
+      await fresh.waitForSelector('.step.summary', { timeout: 15_000 })
+
+      const listings = await fresh.evaluate(() =>
+        (window as unknown as { __sessions: { role: string; content: string }[][] }).__sessions
+          .flat()
+          .filter((message) => message.role === 'user' && message.content.includes('```'))
+          .map((message) => message.content),
+      )
+      expect(listings.length).toBeGreaterThan(0)
+      for (const listing of listings) {
+        expect(listing).toContain('`db.ts`')
+        expect(listing).not.toContain('`app.ts`')
+        expect(listing).not.toContain('unrelated.ts')
+      }
+      expect((await stepText(fresh, '.clipped')).join(' ')).toContain(
+        'only the file the question names (db.ts)',
+      )
     } finally {
       await fresh.close()
     }

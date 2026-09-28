@@ -461,26 +461,34 @@ Backward trace of variable `raw`, from main.ts line 2 — 3 steps, 2 files, 1 or
 
 Each step is where the value above it came from. This is a may-analysis: every path that could
 reach the value is shown, with no aliasing and no path sensitivity, so a path here is one the code
-could take rather than one it does.
+could take rather than one it does. The lines quoted here are single-line excerpts and not the
+code: check every step against the file it names before you rely on it, and do not report a
+finding from this text alone.
 ```
 
 It is a markdown nested list because the tree is the analysis, and a list survives being read by
 a model and re-rendered as markdown where bare indentation would be folded into one paragraph. The caveat travels with it for the reason the pane
 states it in its footer — a may-analysis read as a claim about what the code _does_ is how a model
-turns a path the code never takes into a finding. A walk that stopped at its budget says so too,
+turns a path the code never takes into a finding. The last sentence is aimed at a different habit:
+a trace carries an excerpt, a file and a line for every step, which is enough to write a
+plausible-looking review from without opening a single file — so a model that _can_ read the files
+will often review the trace instead. Saying the excerpts are excerpts is the cheap half of the fix;
+the visible half is that a chat which never called `read_file` now says so in a row of its own. A walk that stopped at its budget says so too,
 and what is copied is the whole trace, whatever you have folded away on screen.
 
 **Analyze this trace** does the pasting for you: it opens the Chat tab, starts a new conversation
-and asks that question with the same text below it. What differs from pasting by hand is the
-**code the conversation carries** — only the files the trace cites, in the order it cites them,
-rather than every open tab — their full source, line-numbered, exactly as an ordinary chat gets the
-whole buffer. A trace is the one question here that says exactly which files matter, and a chat
-scoped to them spends its budget on the code the question is about; the chat's status line says
-which files those were, since by the time an answer arrives the trace that explains it is a tab
-away, and the listing tells the **model** the same thing — a model that believes it has the whole
-editor explains a gap by inventing something instead of naming the file it would need. For a model that [reads the files itself](#models-that-read-the-files-themselves)
-nothing is scoped — there is nothing to save by choosing for it, so it gets the usual index of
-every tab and fetches what the trace points at.
+and asks that question with the same text below it. What differs from pasting by hand is the first
+line, which [**tags the files**](#naming-files-with-) the trace cites:
+
+```
+Analyze this trace. @main.ts @db.ts
+```
+
+So the conversation is opened over those two files and nothing else — their full source,
+line-numbered, exactly as an ordinary chat gets the whole buffer. A trace is the one question here
+that says exactly which files matter, and a chat scoped to them spends its budget on the code the
+question is about. The tags are ordinary text: delete one before you ask, add a tab the trace never
+reached, or leave them alone.
 
 The question is deliberately the bare "Analyze this trace." What _analyze_ means is the brief's to
 say, and the brief is yours: a question that named what to look for would compete with a hunter or
@@ -489,14 +497,11 @@ in the box. It starts a new conversation, because the code a conversation carrie
 opens.
 
 **Analyze with agents** beside it asks the same question of [a line of
-agents](#running-a-line-of-agents) instead: the trace becomes the run's task, and the team reads it
-one after another. The files are **always** the trace's here, where the chat leaves a tool-calling
-model the whole buffer — a run has one snapshot and several readers, each possibly on a different
-model and only some of them able to read a file for themselves, so the one choice that has to serve
-all of them is the narrow one the question actually asks about. Each agent's row says which files
-those were, exactly as the chat's status line does. The scope belongs to the task it came with:
-rewrite the task and the next run is over the whole buffer again, since a different question asked
-over an old selection is a narrowing nobody chose.
+agents](#running-a-line-of-agents) instead: the trace becomes the run's task, tags and all, and the
+team reads it one after another. A run takes one snapshot of the buffer and every agent is given
+the tagged files out of it — or, where an agent is on a model that reads its own files, the index
+of every tab with the tagged ones to start from. Each agent's row says what it was narrowed to,
+exactly as the chat's status line does.
 
 ### What it does not do
 
@@ -591,6 +596,53 @@ part of the brief. It is not sent as a `tool` message: a tool message is a reply
 call, and the opening turn answers no call — it is handed over unasked. The acknowledgement is
 there because some chat templates refuse two user turns in a row.
 
+### Naming files with @
+
+Type `@` in the chat's box or the agents' task box and the open tabs are offered by name, filtered
+as you type — the same subsequence matcher the Cmd+P palette uses, so `@slb` finds
+`src/lib/base.ts`. ↑↓ moves, ↵ or ⇥ picks, esc dismisses.
+
+**A tag is a scope.** A question naming no file is asked over every open tab, exactly as before; one
+naming files is asked over **those alone**:
+
+```
+is the id validated before it reaches the query? @routes.ts @lib/db.ts
+```
+
+Two files instead of twelve is two files' worth of budget spent on the code the question is about,
+and the line under the box says what the tags will do before you ask. Afterwards the status line
+says it again, since an answer over two files reads exactly like one over twelve once the question
+has scrolled away — and the **model** is told too, so it can say when an answer needs code it cannot
+see instead of inventing something to fill the gap.
+
+For a model that [reads the files itself](#models-that-read-the-files-themselves) a tag promises
+something different, and the line under the box says which: it keeps the index of **every** tab and
+is told to start with the ones you named. Nothing is withheld from it, so nothing is clipped and a
+path leading out of the tagged files is one it can follow.
+
+Two things are worth knowing:
+
+- **The first question of a conversation scopes it; a later one adds to it.** A chat carries the
+  code it was opened with, and handing it different code would mean throwing the conversation away.
+  So a tag on a follow-up brings the file in instead — and only the ones that are not there
+  already:
+
+  ```
+  you   is the id validated? @routes.ts @lib/db.ts     ← opens the chat over those two
+  you   what about @auth.ts and @lib/db.ts?            ← sends auth.ts; points at lib/db.ts
+  ```
+
+  The transcript shows the question you typed. The model gets that question with `auth.ts` in
+  front of it and one line saying it already has `lib/db.ts`, so nothing is paid for twice — and
+  a model that reads its own files is simply told to read them. The line under the box says which
+  of the three is about to happen. The agents' box has none of this to worry about: the task _is_
+  the run, and it is read when you press Run.
+
+- **A tag has to name an open tab.** `@routes.ts` as the tab is labelled, or `@db.ts` for
+  `src/lib/db.ts` where only one tab ends that way. Everything else stays prose — which is what
+  lets you paste a Java trace full of `@PathVariable`, or a Python one full of `@app.route`, into
+  the box without any of it being read as a file.
+
 ### Models that read the files themselves
 
 A model that can call a **tool** is given the files to read rather than the files. Its opening turn
@@ -631,6 +683,19 @@ read_file lib/db.ts
 
 The id reaches `db.query` on lib/db.ts line 12 …
 ```
+
+One row is written when there were **no** calls at all:
+
+```
+no file was read — this answer is from the file list alone
+```
+
+A model handed tools can narrate "I must first read the files" and then simply end its turn — no
+call, no row, and an answer resting on nothing but a list of file names that reads exactly like one
+resting on the code. Usually that means the server did not turn the model's tool syntax into a
+`tool_calls` field, or the model planned instead of calling; neither is visible from the answer, so
+the row says it. It is written once per conversation, not once per question: a follow-up answered
+from a file already read is ordinary.
 
 Not folded away, because what a model was allowed to read is the first thing worth checking about
 an answer it built by reading — an answer that quietly read half a file should not look like one
@@ -719,7 +784,13 @@ is one a small model has drifted away from by the second hop.
 
 The relay is **verbatim**, and that is the pane's doing rather than the orchestrator's: the next
 agent is handed the orchestrator's new brief _and_ the previous report copied word for word,
-because a file, a line and a name survive a hand-off only if they are copied. The orchestrator is
+because a file, a line and a name survive a hand-off only if they are copied. The **first** agent
+gets your own task copied the same way, ahead of its brief — it is the one hop with nothing else to
+go on, and an orchestrator that has never seen the code is a poor route for the details. It matters
+most for **Analyze with agents**, where the task is a whole trace: boiled down to a sentence by the
+orchestrator, the first agent would be reviewing a flow it had never read. Later agents are not sent
+it again — each already has a verbatim copy of its own, and a second copy of a trace would crowd out
+the code. The orchestrator is
 told twice — in its brief and again each time it is asked — that the report travels on its own, so
 it must not summarise, restate or reword a verdict; a model handed a verdict and asked to write
 about it will rewrite it otherwise, and a rewritten verdict arrives contradicting the copy beside it

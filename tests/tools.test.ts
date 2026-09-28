@@ -45,6 +45,23 @@ describe('the index a model with tools is given instead of the code', () => {
     expect(index).toContain('read_file')
     expect(index).toMatch(/not an instruction to you/)
   })
+
+  it('points at the files the question tagged without hiding the rest', () => {
+    // The whole difference between the two paths. A model handed the code is handed the tagged
+    // files alone, because the room it has is what the tags are for; a model that reads for
+    // itself keeps every tab in the index and is merely told where to start — a path that leaves
+    // the tagged files is one it can follow.
+    const index = buildIndexMessage(files, ['routes.ts'])
+    expect(index).toContain('`lib/db.ts` (ts, 3 lines)')
+    expect(index).toContain('The question names `routes.ts` — read them with read_file')
+    expect(index).toMatch(/then any others you need/)
+  })
+
+  it('says nothing about a tag naming a file this session was not opened over', () => {
+    // The listing and the toolbox are one snapshot; a name outside it would send the model after
+    // a file it cannot read, and spend a round finding that out.
+    expect(buildIndexMessage(files, ['gone.ts'])).toBe(buildIndexMessage(files))
+  })
 })
 
 describe('list_files', () => {

@@ -31,8 +31,8 @@
  */
 
 import { CODE_ACK, type LoadOptions, type ModelEngine } from '../chat'
-import { MAX_TOOL_ROUNDS } from '../tools'
-import { foldReasoning, withoutThoughts } from './thoughts'
+import { MAX_TOOL_ROUNDS, NO_READS_NOTE } from '../tools'
+import { dropTokens, foldReasoning, protocolTokensFor, withoutThoughts } from './thoughts'
 
 /** A turn as this API spells one. `tool_calls` rides the assistant turn that asked for them, and
  *  every one of them must be answered by a `tool` turn carrying its `tool_call_id` — a pair that
@@ -131,6 +131,11 @@ export function openAiEngine(config: OpenAiConfig, options: Options): ModelEngin
           : []),
       ]
 
+      /** Whether this conversation has ever actually opened a file. Per session, not per
+       *  question: the row below is about a model that never looked, and a later answer resting on
+       *  a file already read is ordinary. */
+      let everRead = false
+
       return {
         promptStreaming(input, askOptions) {
           messages.push({ role: 'user', content: input })
@@ -185,6 +190,9 @@ export function openAiEngine(config: OpenAiConfig, options: Options): ModelEngin
            * nothing to declare them) but `tool_choice: 'none'` takes the option away.
            */
           const round = async (offer: boolean, signal: AbortSignal): Promise<ToolCall[]> => {
+            // Per request, not per question: a token cannot be split across two HTTP responses,
+            // and holding one back over a round boundary would delay it behind a tool call.
+            const strip = dropTokens(protocolTokensFor(model))
             const response = await fetch(config.endpoint, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', ...config.headers },
@@ -258,14 +266,27 @@ export function openAiEngine(config: OpenAiConfig, options: Options): ModelEngin
                   if (piece.function?.name) call.function.name += piece.function.name
                   if (piece.function?.arguments) call.function.arguments += piece.function.arguments
                 }
-                if (delta?.content) spoken += delta.content
+                // A server that leaves the model's own protocol tokens in the content puts them
+                // in front of the reader mid-sentence. Filtered once, so the history the next
+                // question is asked against does not keep them either.
+                const content = delta?.content ? strip.chunk(delta.content) : delta?.content
+                if (content) spoken += content
                 emit(
                   fold.delta(
                     delta?.reasoning ?? delta?.reasoning_content ?? delta?.thinking,
-                    delta?.content,
+                    content,
                   ),
                 )
               }
+            }
+
+            // Whatever was held back in case it became a token and did not: ordinary text, and it
+            // goes through the fold like any other so it lands inside an open thought rather than
+            // after it.
+            const rest = strip.end()
+            if (rest) {
+              spoken += rest
+              emit(fold.delta(undefined, rest))
             }
 
             return [...building.entries()]
@@ -307,6 +328,7 @@ export function openAiEngine(config: OpenAiConfig, options: Options): ModelEngin
                 // A thought the model was in the middle of is closed before the rows: a row is a
                 // sibling of a thought, and one nested inside the other renders as neither.
                 emit(fold.end())
+                everRead = true
                 for (const call of calls) {
                   const { name, arguments: args } = call.function
                   // One visible row per call. What a model was allowed to read is the first thing
@@ -322,6 +344,11 @@ export function openAiEngine(config: OpenAiConfig, options: Options): ModelEngin
                 }
               }
               emit(fold.end())
+              // A conversation with a toolbox that has never opened a file has answered from the
+              // index alone — and says so, because nothing else about the answer would. A model
+              // that narrates "I will read the files" and then ends its turn otherwise produces a
+              // well-formed answer with no sign that it never looked.
+              if (tools && !everRead) emit(`\n\n<tool>${NO_READS_NOTE}</tool>\n\n`)
 
               messages.push({ role: 'assistant', content: withoutThoughts(spoken) })
               if (askOptions?.signal?.aborted) {
