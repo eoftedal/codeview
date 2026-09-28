@@ -671,3 +671,202 @@ app.get('/p/:id', (req) => {
     expect(trace?.nodes.map((node) => node.file)).toEqual(['main.ts', 'main.ts', 'io.ts'])
   })
 })
+
+describe('wrapper objects', () => {
+  // A value carried inside a DTO is the shape most taint takes, and a trace that stops at the
+  // wrapper loses it exactly where it is carried. Python and Java already follow one through;
+  // these are the TypeScript shapes, and each was a dead end before it was a fixture.
+
+  it('follows a field the constructor fills in', () => {
+    // The field's declaration says only what it is. What carries the value is `this.value = v` —
+    // found through references, so a field written from a method, or another tab, is found the
+    // same way one written two lines down is.
+    expect(
+      render(
+        `class Dto {\n  value: string\n  constructor(v: string) {\n    this.value = v\n  }\n}\nconst w = new Dto(req.params.id)\nconst out = w.value\nou|t\n`,
+      ),
+    ).toEqual([
+      'variable `out`: const out = w.value',
+      '  initialised from: w.value',
+      '    assigned: v',
+      '      passed to `Dto`: req.params.id [external]',
+    ])
+  })
+
+  it('reads a parameter property as the field it declares', () => {
+    expect(
+      render(
+        `class Dto {\n  constructor(public value: string) {}\n}\nconst w = new Dto(req.params.id)\nconst out = w.val|ue\n`,
+      ),
+    ).toEqual([
+      'parameter `value`: public value: string',
+      '  passed to `Dto`: req.params.id [external]',
+    ])
+  })
+
+  it('goes through a getter to what it returns', () => {
+    // Java gives a hand-written accessor the same treatment. Without it the branch ends at the
+    // word `value` and calls it defined there.
+    expect(
+      render(
+        `class Dto {\n  private v: string\n  constructor(v: string) {\n    this.v = v\n  }\n  get value() {\n    return this.v\n  }\n}\nconst w = new Dto(req.params.id)\nconst out = w.val|ue\n`,
+      ),
+    ).toEqual([
+      'function `value`: get value()',
+      '  returned by `value`: this.v',
+      '    assigned: v',
+      '      passed to `Dto`: req.params.id [external]',
+    ])
+  })
+
+  it('follows the receiver when the member is declared by an interface', () => {
+    // An interface holds a shape and never a value, so its member says nothing about where the
+    // value came from — and every object of that shape is not this one. The receiver knows.
+    expect(
+      render(
+        `interface Dto {\n  value: string\n}\nconst w: Dto = { value: req.params.id }\nconst out = w.val|ue\n`,
+      ),
+    ).toEqual([
+      'property `value`: w.value',
+      '  `.value` read from: w',
+      '    initialised from: { value: req.params.id }',
+      '      property `value`: req.params.id [external]',
+    ])
+  })
+
+  it('narrows an object literal to the member being sought, not every field of it', () => {
+    // The whole point of carrying the name: `p.b` must not report what went into `p.a`.
+    expect(
+      render(
+        `interface Pair {\n  a: string\n  b: string\n}\nconst p: Pair = { a: 'safe', b: req.params.id }\nconst out = p.|b\n`,
+      ),
+    ).toEqual([
+      'property `b`: p.b',
+      '  `.b` read from: p',
+      "    initialised from: { a: 'safe', b: req.params.id }",
+      '      property `b`: req.params.id [external]',
+    ])
+  })
+
+  it('carries the member’s name through a call, a return and an argument', () => {
+    // It rides the hops unchanged and is consumed by the first thing that can answer it — here a
+    // literal built inside the factory, two hops from where it was read.
+    expect(
+      render(
+        `interface Dto {\n  value: string\n}\nfunction make(v: string): Dto {\n  return { value: v }\n}\nconst w = make(req.params.id)\nconst out = w.val|ue\n`,
+      ),
+    ).toEqual([
+      'property `value`: w.value',
+      '  `.value` read from: w',
+      '    initialised from: make(req.params.id)',
+      '      returned by `make`: { value: v }',
+      '        property `value`: v',
+      '          passed to `make`: req.params.id [external]',
+    ])
+  })
+
+  it('reads a typed field through its own writes, wherever they are', () => {
+    // The receiver is not followed while the member can be named: a field is written by the
+    // constructor *and* by any setter, and those writes are the paths. Dropping them for the
+    // construction that made this one object would be the one failure this tool refuses — a
+    // path silently missed. The cost is a may-analysis's usual one: every construction of the
+    // class is reported, which the pane says outright.
+    expect(
+      render(
+        `class Dto {\n  value: string\n  constructor(v: string) {\n    this.value = v\n  }\n  set(next: string) {\n    this.value = next\n  }\n}\nfunction take(d: Dto) {\n  return d.val|ue\n}\n`,
+      ),
+    ).toEqual([
+      'property `value`: value: string',
+      '  assigned: v',
+      '    parameter `v`: v: string [entry]',
+      '  assigned: next',
+      '    parameter `next`: next: string [entry]',
+    ])
+  })
+
+  it('shows the constructor and what went into it, with nothing being sought', () => {
+    // Tracing the wrapper itself, which is what a reader does first. The object is made here, but
+    // what is *in* it came from the argument — so the construction is not a terminal, and the
+    // constructor it runs is a row of its own: that is where a DTO validates, normalises or
+    // rejects what it was handed, and stepping over it reads as though the value arrived
+    // untouched.
+    expect(
+      render(
+        `class Dto {\n  constructor(public value: string) {}\n}\nconst w = new Dto(req.params.id)\n|w\n`,
+      ),
+    ).toEqual([
+      'variable `w`: const w = new Dto(req.params.id)',
+      '  initialised from: new Dto(req.params.id)',
+      '    constructed by `Dto`: constructor(public value: string)',
+      '      passed to `Dto`: req.params.id [external]',
+    ])
+  })
+
+  it('leaves a construction with nothing fed into it a literal', () => {
+    // Nothing went in, so the object really is made right here.
+    expect(render(`class Dto {\n  value = 'safe'\n}\nconst w = new Dto()\n|w\n`)).toEqual([
+      'variable `w`: const w = new Dto()',
+      '  initialised from: new Dto() [literal]',
+    ])
+  })
+
+  it('follows a member written after the object was built', () => {
+    // A wrapper filled in later is still a wrapper. Missing this would be a path silently
+    // dropped, which is the one failure this tool refuses — so a member's writes are followed
+    // beside whatever it was built with.
+    expect(
+      render(
+        `interface Dto {\n  value: string\n}\nconst o: Dto = { value: 'safe' }\no.value = req.params.id\nconst out = o.val|ue\n`,
+      ),
+    ).toEqual([
+      'property `value`: o.value',
+      '  `.value` read from: o',
+      "    initialised from: { value: 'safe' }",
+      "      property `value`: 'safe' [literal]",
+      '      assigned: req.params.id [external]',
+    ])
+  })
+
+  it('follows a field written after the object was built', () => {
+    expect(
+      render(
+        `class Dto {\n  value = 'safe'\n}\nconst d = new Dto()\nd.value = req.params.id\nconst out = d.val|ue\n`,
+      ),
+    ).toEqual([
+      "property `value`: value = 'safe'",
+      "  property `value`: 'safe' [literal]",
+      '  assigned: req.params.id [external]',
+    ])
+  })
+
+  it('follows a wrapper through an alias', () => {
+    expect(
+      render(
+        `interface Dto {\n  value: string\n}\nconst o: Dto = { value: req.params.id }\nconst p = o\nconst out = p.val|ue\n`,
+      ),
+    ).toEqual([
+      'property `value`: p.value',
+      '  `.value` read from: p',
+      '    initialised from: o',
+      '      initialised from: { value: req.params.id }',
+      '        property `value`: req.params.id [external]',
+    ])
+  })
+
+  it('traces a member of a DTO declared in another tab', () => {
+    // `resolveDefinition` has nothing on screen to point at — an import brings in `Dto`, not
+    // `Dto.value` — and the trace used to be refused outright. The read itself is right here.
+    expect(
+      renderAcross(
+        `import { Dto } from './dto'\nconst w = new Dto(req.params.id)\nconst out = w.val|ue\n`,
+        {
+          'dto.ts': `export class Dto {\n  value: string\n  constructor(v: string) {\n    this.value = v\n  }\n}\n`,
+        },
+      ),
+    ).toEqual([
+      'main.ts property `value`: w.value',
+      '  dto.ts assigned: v',
+      '    main.ts passed to `Dto`: req.params.id [external]',
+    ])
+  })
+})

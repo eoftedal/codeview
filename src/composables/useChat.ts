@@ -5,9 +5,12 @@ import {
   buildSystemPrompt,
   describeClip,
   promptFiles,
+  usesTools,
   type ChatSession,
   type CodeContext,
 } from '../lib/chat'
+import { buildIndexMessage, fileTools } from '../lib/tools'
+import { describeTraceScope } from '../lib/traceText'
 import type { CodeFile } from '../lib/files'
 import { decodeShare, parseParams } from '../lib/share'
 import { isAbort, messageOf, streamAnswer, withTruncatedNote } from '../lib/stream'
@@ -42,6 +45,16 @@ export interface Chat {
    *  all of it. Set when the session is built, since that is when the budget is spent. */
   clipped: Ref<string | null>
   ask: (question: string) => Promise<void>
+  /**
+   * Start a fresh conversation over *some* of the open files and ask one question of it — what
+   * the trace pane's **Analyze this trace** does.
+   *
+   * A scope is a property of the session rather than of the question, so this drops whatever
+   * conversation was in progress: the code a conversation carries is fixed when it opens. An
+   * empty scope means every open file, which is what a model that reads the files itself gets —
+   * there is nothing to save it by choosing for it.
+   */
+  askAbout: (question: string, scope: readonly string[]) => Promise<void>
   stop: () => void
   newChat: () => void
   /** Rewrite the brief. Blank means the shipped one. Remembered, and starts a new chat, since a
@@ -51,7 +64,7 @@ export interface Chat {
 
 /** What a session was built from, in tab order — switching tabs reorders the prompt but changes
  *  nothing about the code in it, and should not cost a conversation. */
-function signatureOf(files: readonly CodeFile[]): string {
+function signatureOf(files: readonly { name: string; text: string }[]): string {
   return files.map((file) => `${file.name}\n${file.text}`).join('\u0000')
 }
 
@@ -108,6 +121,25 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
   const sessionFiles = ref<string | null>(null)
   const clipped = ref<string | null>(null)
 
+  /**
+   * The files this conversation was opened over, by name, when it is not simply every open tab —
+   * which today means a trace analysis, scoped to the files the trace cites. Null is the ordinary
+   * chat, and what `newChat` restores.
+   *
+   * Names rather than ids: a trace cites files by name, which is also what a tab is called.
+   */
+  let scope: string[] | null = null
+
+  function inScope(name: string): boolean {
+    return scope === null || scope.includes(name)
+  }
+
+  /** The open files this conversation is about, in tab order — what staleness is measured over,
+   *  so editing a file the model was never shown does not cost the conversation. */
+  function filesInScope(): CodeFile[] {
+    return scope === null ? files.value : files.value.filter((file) => inScope(file.name))
+  }
+
   // The session is only a system prompt and its turns; the engine that runs it belongs to
   // `useModel` and outlives every conversation held with it.
   let session: ChatSession | null = null
@@ -118,7 +150,7 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
     () =>
       messages.value.length > 0 &&
       sessionFiles.value !== null &&
-      sessionFiles.value !== signatureOf(files.value),
+      sessionFiles.value !== signatureOf(filesInScope()),
   )
 
   async function ensureSession(): Promise<ChatSession> {
@@ -128,13 +160,40 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
     // Read after the load, not before: a first download can take minutes, and the code the reader
     // asks about is what is open when they ask. The brief is the system prompt; the code is seeded
     // as an opening turn behind it, so instructions and data stay separable.
+    //
+    // A scoped conversation takes the files in the order the scope named them — a trace's own
+    // order, root first — since the budget is spent in that order. Where nothing it named is open
+    // any more, the scope is dropped rather than leaving a model with no code at all.
+    const all = promptFiles(files.value, activeId.value)
+    const picked = scope ? scope.flatMap((name) => all.filter((file) => file.name === name)) : all
+    if (picked.length === 0) scope = null
     const context: CodeContext = {
-      files: promptFiles(files.value, activeId.value),
+      files: picked.length > 0 ? picked : all,
       maxCodeChars: model.choice.value?.maxCodeChars ?? 12_000,
+      // Said to the model as well as to the reader: a listing claiming to be the whole editor is
+      // one the model cannot reason about the edges of.
+      partial: scope !== null && scope.length < files.value.length,
     }
-    session = await loaded.chat(buildSystemPrompt(role.value), buildCodeMessage(context))
-    sessionFiles.value = signatureOf(files.value)
-    clipped.value = describeClip(context)
+    // A model that can call a tool is given the files to *read* rather than the files: an index in
+    // the opening turn, and the toolbox that opens any of them. Everything else is the same
+    // conversation — same brief, same snapshot, same staleness rule — which is why the choice is
+    // made here, at the one place the opening turn is built, rather than inside a provider.
+    const tooled = usesTools(model.choice.value)
+    session = await loaded.chat(
+      buildSystemPrompt(role.value),
+      tooled ? buildIndexMessage(context.files) : buildCodeMessage(context),
+      tooled ? fileTools(context.files, context.maxCodeChars) : undefined,
+    )
+    sessionFiles.value = signatureOf(filesInScope())
+    // Nothing is clipped on the tool path: the budget is spent per read instead of once over
+    // everything, so no file is out of reach and there is no clip to warn about.
+    //
+    // A scope *is* worth saying, clip or no clip, and it goes on the same line for the same
+    // reason: it is what of the code this conversation cannot see. The reader chose it a tab away,
+    // and by the time an answer arrives the trace that explains it may be long gone.
+    const narrowed = scope && scope.length < files.value.length ? describeTraceScope(scope) : null
+    clipped.value =
+      [narrowed, tooled ? null : describeClip(context)].filter(Boolean).join('; ') || null
     model.markAvailable()
     return session
   }
@@ -195,6 +254,12 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
     }
   }
 
+  async function askAbout(question: string, names: readonly string[]): Promise<void> {
+    newChat()
+    scope = names.length > 0 ? [...names] : null
+    await ask(question)
+  }
+
   function stop(): void {
     controller?.abort()
   }
@@ -205,6 +270,8 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
     stop()
     session?.destroy()
     session = null
+    // A new chat is the whole buffer again: a scope belongs to the conversation that asked for it.
+    scope = null
     sessionFiles.value = null
     clipped.value = null
     messages.value = []
@@ -229,6 +296,7 @@ export function useChat(model: ModelHost, files: Ref<CodeFile[]>, activeId: Ref<
     stale,
     clipped,
     ask,
+    askAbout,
     stop,
     newChat,
     setRole,

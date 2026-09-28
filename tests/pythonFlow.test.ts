@@ -285,11 +285,15 @@ describe('a value carried inside a wrapper', () => {
     ).toEqual([
       'main.py parameter `w`: w',
       '  controller.py passed to `run`: Wrapper(request.args["id"])',
-      '    wrapper.py initialised from: value',
-      '      controller.py passed to `Wrapper`: request.args["id"]',
-      '        controller.py element of: request.args',
-      '          controller.py `.args` read from: request',
-      '            controller.py parameter `request`: request [entry]',
+      // The constructor the value passes through, in the tab that defines it: `__init__` is where
+      // a value is validated, normalised or rejected, and a trace that steps over it reads as
+      // though the value arrived untouched.
+      '    wrapper.py constructed by `Wrapper`: def __init__(self, value):',
+      '      wrapper.py initialised from: value',
+      '        controller.py passed to `Wrapper`: request.args["id"]',
+      '          controller.py element of: request.args',
+      '            controller.py `.args` read from: request',
+      '              controller.py parameter `request`: request [entry]',
     ])
   })
 
@@ -308,10 +312,30 @@ describe('a value carried inside a wrapper', () => {
     expect(out).not.toContain('never-flows-here')
   })
 
-  it('still calls a construction a literal when no attribute is being sought', () => {
+  it('still calls a construction a literal when nothing was fed into it', () => {
+    // A constant went in, so there is nothing to follow: the object really is made right here.
     expect(render(`from wrapper import Wrapper\n\nw = Wrapper("x")\nuse(w|)\n`, WRAPPER)).toEqual([
       'variable `w`: w = Wrapper("x")',
       '  initialised from: Wrapper("x") [literal]',
+    ])
+  })
+
+  it('shows the constructor and what went into it, with nothing being sought', () => {
+    // Tracing the wrapper itself, which is what a reader does first. The object is made here, but
+    // what is *in* it came from the argument, so the construction is not a terminal.
+    expect(
+      renderAcross(
+        `from wrapper import Wrapper\n\ndef handle(request):\n    w = Wrapper(request.args["id"])\n    return use(|w)\n`,
+        WRAPPER,
+      ),
+    ).toEqual([
+      'main.py variable `w`: w = Wrapper(request.args["id"])',
+      '  main.py initialised from: Wrapper(request.args["id"])',
+      '    wrapper.py constructed by `Wrapper`: def __init__(self, value):',
+      '      main.py passed to `Wrapper`: request.args["id"]',
+      '        main.py element of: request.args',
+      '          main.py `.args` read from: request',
+      '            main.py parameter `request`: request [entry]',
     ])
   })
 

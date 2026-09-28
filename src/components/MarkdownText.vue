@@ -22,6 +22,10 @@ const blocks = computed(() => parseMarkdown(props.text))
         <MarkdownText :text="block.text" />
       </details>
 
+      <!-- Shown rather than folded: what the model read is the first thing a reader checks about
+           an answer it built by reading. -->
+      <p v-else-if="block.kind === 'tool'" class="tool">{{ block.text }}</p>
+
       <component :is="`h${block.level}`" v-else-if="block.kind === 'heading'">
         <MarkdownSpans :spans="block.spans" />
       </component>
@@ -190,6 +194,20 @@ td {
 th {
   font-weight: 600;
   background: var(--panel);
+}
+
+/* A file the model read for itself. Quiet, but on screen — and monospace, since it names a file
+   and a line range. */
+.tool {
+  display: block;
+  margin: 4px 0;
+  padding-left: 8px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--dim);
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Reasoning is folded away: it is how the answer was reached, not the answer. */

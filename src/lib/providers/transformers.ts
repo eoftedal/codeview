@@ -10,12 +10,15 @@ import {
   type LoadOptions,
   type ModelEngine,
   type Provider,
+  type ToolBox,
 } from '../chat'
+import { MAX_TOOL_ROUNDS } from '../tools'
+import { dialectFor, type ParsedCall } from './onnxTools'
 import { withoutThoughts } from './thoughts'
-import type { FromWorker, ToWorker } from './transformersWorker'
+import type { FromWorker, ToWorker, WorkerMessage } from './transformersWorker'
 import { hasGpuAdapter } from './webgpu'
 
-type Message = { role: 'system' | 'user' | 'assistant'; content: string }
+type Message = WorkerMessage
 
 /* `AskOptions.thinking` rides each question over to the worker, which spends it on the chat
  * template — there is no session-level switch here, and none is wanted: the flag belongs to the
@@ -25,8 +28,9 @@ type Message = { role: 'system' | 'user' | 'assistant'; content: string }
 /** One request in flight at a time, which is all the pane ever asks for. */
 interface Pending {
   onToken: (text: string) => void
-  /** `truncated`: the worker's ceiling ended the answer, not the model. */
-  resolve: (truncated: boolean) => void
+  /** `truncated`: the worker's ceiling ended the answer, not the model. `calls`: what it asked to
+   *  read, if anything — the loop below runs them and asks again. */
+  resolve: (truncated: boolean, calls: ParsedCall[]) => void
   reject: (error: Error) => void
 }
 
@@ -87,14 +91,14 @@ export const transformers: Provider = {
           onProgress?.(message.loaded)
           break
         case 'ready':
-          ready?.resolve(false)
+          ready?.resolve(false, [])
           ready = null
           break
         case 'token':
           pending?.onToken(message.text)
           break
         case 'done':
-          pending?.resolve(message.truncated)
+          pending?.resolve(message.truncated, message.calls)
           pending = null
           break
         case 'error':
@@ -104,6 +108,11 @@ export const transformers: Provider = {
           break
       }
     }
+
+    /** How this model writes a call, or null for one whose template has no tools in it. Settled
+     *  once, at load: the catalogue only flags an entry that has one, and a toolbox handed to a
+     *  model without is simply not declared. */
+    const dialect = dialectFor(model)
 
     await new Promise<void>((resolve, reject) => {
       ready = { onToken: () => {}, resolve: () => resolve(), reject }
@@ -120,11 +129,11 @@ export const transformers: Provider = {
     return {
       // The worker holds the loaded pipeline; a conversation is only its list of turns, so a new
       // chat costs an array rather than a reload.
-      async chat(system, code) {
+      async chat(system, code, tools) {
         // Its own turn, ahead of the question. Not a `tool` message: `apply_chat_template` runs the
-        // model's own Jinja template, and Gemma's has no tool role to render one into — while the
-        // acknowledgement below is what keeps that same template happy, since it raises on two
-        // user turns in a row.
+        // model's own Jinja template, and a tool turn there answers a call that was never made —
+        // while the acknowledgement below is what keeps that same template happy, since it raises
+        // on two user turns in a row.
         const messages: Message[] = [
           { role: 'system', content: system },
           ...(code
@@ -134,10 +143,16 @@ export const transformers: Provider = {
               ] as Message[])
             : []),
         ]
+        // A toolbox is only worth declaring to a model whose template can render it and whose
+        // syntax we can read back — otherwise the call arrives as prose in the middle of an answer.
+        const box: ToolBox | undefined = dialect ? tools : undefined
         return {
           promptStreaming(input, options) {
             messages.push({ role: 'user', content: input })
-            let answer = ''
+            /** What the model has said in the round under way. The history takes one assistant turn
+             *  per round — the turn that asked for the files, then the turn that answered — so it
+             *  is reset at every boundary; the pane's copy of the whole answer is the pane's own. */
+            let said = ''
 
             return new ReadableStream<string>({
               start(controller) {
@@ -155,35 +170,92 @@ export const transformers: Provider = {
                   // Interrupted or not, what was said stays in the history so a follow-up has
                   // context — the answer, that is, not the thinking that came before it, which is
                   // what the model's own template drops from a past turn too.
-                  messages.push({ role: 'assistant', content: withoutThoughts(answer) })
+                  messages.push({ role: 'assistant', content: withoutThoughts(said) })
                 }
 
-                pending = {
-                  onToken: (text) => {
-                    answer += text
-                    controller.enqueue(text)
-                  },
-                  resolve: (truncated) => {
-                    finish()
-                    if (options?.signal?.aborted) {
-                      controller.error(new DOMException('Aborted', 'AbortError'))
-                    } else {
-                      // Said before the close, so the reader of the stream learns it before the
-                      // stream tells them there is nothing more.
-                      if (truncated) options?.onTruncated?.()
-                      controller.close()
+                /** One question to the worker, resolved when it has finished generating. */
+                const askWorker = (offer: boolean) =>
+                  new Promise<{ truncated: boolean; calls: ParsedCall[] }>((resolve, reject) => {
+                    pending = {
+                      onToken: (text) => {
+                        said += text
+                        controller.enqueue(text)
+                      },
+                      resolve: (truncated, calls) => resolve({ truncated, calls }),
+                      reject,
                     }
-                  },
-                  reject: (error) => {
-                    finish()
-                    controller.error(error)
-                  },
-                }
+                    // The whole conversation goes over each turn: re-prefilling is slower than
+                    // carrying a KV cache across turns, but it is obviously correct, and these are
+                    // short chats.
+                    send({
+                      type: 'ask',
+                      messages,
+                      thinking: options?.thinking === true,
+                      ...(offer && box ? { tools: box.schemas, dialect: dialect! } : {}),
+                    })
+                  })
 
-                // The whole conversation goes over each turn: re-prefilling is slower than
-                // carrying a KV cache across turns, but it is obviously correct, and these are
-                // short chats.
-                send({ type: 'ask', messages, thinking: options?.thinking === true })
+                void (async () => {
+                  try {
+                    for (let asked = 0; ; asked += 1) {
+                      const { truncated, calls } = await askWorker(asked < MAX_TOOL_ROUNDS)
+                      if (options?.signal?.aborted) {
+                        finish()
+                        controller.error(new DOMException('Aborted', 'AbortError'))
+                        return
+                      }
+                      // A run that stopped at the ceiling may have stopped in the middle of the
+                      // call it was writing, so what it asked for is not something to run: the
+                      // answer ends here, with the note that says why.
+                      if (truncated || !box || calls.length === 0) {
+                        finish()
+                        // Said before the close, so the reader of the stream learns it before the
+                        // stream tells them there is nothing more.
+                        if (truncated) options?.onTruncated?.()
+                        controller.close()
+                        return
+                      }
+
+                      // The ask and its answers go into the history together, in the shape both
+                      // templates render: an assistant turn carrying the calls, then one `tool`
+                      // turn per call naming which it answers.
+                      messages.push({
+                        role: 'assistant',
+                        content: withoutThoughts(said),
+                        tool_calls: calls.map((call) => ({
+                          id: call.id,
+                          type: 'function' as const,
+                          // An object, not a string: Qwen's template runs `tojson` over this and
+                          // Gemma's walks its keys, so a string would be rendered as one.
+                          function: { name: call.name, arguments: call.args },
+                        })),
+                      })
+                      said = ''
+
+                      const trace: string[] = []
+                      for (const call of calls) {
+                        const args = JSON.stringify(call.args)
+                        trace.push(box.describe(call.name, args))
+                        messages.push({
+                          role: 'tool',
+                          tool_call_id: call.id,
+                          name: call.name,
+                          content: box.call(call.name, args),
+                        })
+                      }
+                      // One visible row per call, in place of the raw call syntax the worker hid.
+                      // Shown rather than folded — what the model read is the first thing a reader
+                      // checks — and still stripped from the history and from an agent's relay by
+                      // `withoutThoughts`, since it is what the model did rather than what it said.
+                      controller.enqueue(
+                        `\n\n${trace.map((line) => `<tool>${line}</tool>`).join('\n\n')}\n\n`,
+                      )
+                    }
+                  } catch (caught) {
+                    finish()
+                    controller.error(caught instanceof Error ? caught : new Error(String(caught)))
+                  }
+                })()
               },
             })
           },

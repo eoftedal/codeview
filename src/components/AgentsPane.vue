@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
 import {
   DEFAULT_REVIEW,
@@ -193,15 +193,19 @@ function onEnter(event: KeyboardEvent): void {
   start()
 }
 
+async function scrollToEnd(): Promise<void> {
+  await nextTick()
+  const el = body.value
+  if (el) el.scrollTop = el.scrollHeight
+}
+
 // Follow the run as it grows, including each streamed chunk.
-watch(
-  () => [props.steps.length, props.pending] as const,
-  async () => {
-    await nextTick()
-    const el = body.value
-    if (el) el.scrollTop = el.scrollHeight
-  },
-)
+watch(() => [props.steps.length, props.pending] as const, scrollToEnd)
+
+/** And land at the end when the pane opens — the same reason the chat pane does: this tab
+ *  unmounts on every switch, and the trace pane's **Analyze with agents** files the task before
+ *  this pane exists, so the watcher above never sees it arrive. */
+onMounted(scrollToEnd)
 </script>
 
 <template>

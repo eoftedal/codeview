@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
 import { DEFAULT_ROLE, describeStatus, type ModelChoice, type ModelStatus } from '../lib/chat'
 import { HUNTERS, HUNTER_NAMES } from '../lib/hunters'
@@ -102,15 +102,25 @@ function onEnter(event: KeyboardEvent): void {
   send()
 }
 
+async function scrollToEnd(): Promise<void> {
+  await nextTick()
+  const el = body.value
+  if (el) el.scrollTop = el.scrollHeight
+}
+
 // Follow the conversation as it grows, including each streamed chunk.
-watch(
-  () => [props.messages.length, props.pending] as const,
-  async () => {
-    await nextTick()
-    const el = body.value
-    if (el) el.scrollTop = el.scrollHeight
-  },
-)
+watch(() => [props.messages.length, props.pending] as const, scrollToEnd)
+
+/**
+ * And land at the end when the pane opens, not at the top.
+ *
+ * This tab unmounts on every switch — the conversation outlives it, in `useChat` — so a pane
+ * coming back has no scroll position to restore and would start at the first message. The case
+ * that made it obvious is the trace pane's **Analyze this trace**: the question is a whole trace,
+ * pushed before this pane ever mounts, so the watcher above never sees it arrive and the reader
+ * lands on the top of it with the answer forming out of sight.
+ */
+onMounted(scrollToEnd)
 </script>
 
 <template>

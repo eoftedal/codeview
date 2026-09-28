@@ -368,18 +368,153 @@ passed through, which is what you want in the middle of a chain; but the last ro
 at where the value enters the program rather than at the last place it happened to be read — line 14
 above, not the `req` on line 15.
 
+### Wrapper objects and DTOs
+
+A value carried inside an object is the shape most flows take, and a trace that stops at the
+wrapper loses the value exactly where it is being carried. So the walk goes through one:
+
+```ts
+interface Dto {
+  value: string
+}
+const w: Dto = { value: req.params.id }
+const out = w.value // ← trace this
+```
+
+```
+property `value`: w.value
+  `.value` read from: w
+    initialised from: { value: req.params.id }
+      property `value`: req.params.id        ← outside
+```
+
+The wrapper itself is a step, which is the point: you see the object the value was put into, not
+only where it ended up. Six shapes are followed, and each was a dead end before it was a rule — a
+**field the constructor fills in** (`this.value = v`, reached through the constructor's argument at
+each call site), a **parameter property** (`constructor(public value: string)`), a **getter**, an
+**interface or type member**, a **member written after the object was built** (`d.value = raw`),
+and a DTO declared in **another tab**.
+
+The mechanism the interface case turns on is worth knowing about, because it decides what the
+trace will _not_ claim. A member declared by an interface holds a shape and never a value, so the declaration
+says nothing about where the value came from; the walk falls back to the **receiver** — the object
+the member was read from — and carries the member's name down with it. That name rides through
+assignments, arguments and returns unchanged, and is answered by the first thing that can: an
+object literal with such a property, or a construction of a class with such a member, which
+expands to the argument that set it. Reading `w.value` therefore follows the object `w` actually
+came from, rather than reaching every object of that shape in the buffer — a path that cannot
+happen costs a reviewer more than a missing one. Where nothing can answer the name, nothing
+changes: the arguments are kept instead, which is the same over-approximation an unresolvable call
+makes, and only a construction with nothing fed into it is a value made right there.
+
+**The constructor is a step of its own**, where the class declares one, and that is the row a
+security review is usually looking for:
+
+```java
+var productId = new ProductId(id);   // ← trace this
+```
+
+```
+variable `productId`: var productId = new ProductId(id);
+  initialised from: new ProductId(id)
+    constructed by `ProductId`: public ProductId          ← ProductId.java
+      passed to `ProductId`: id
+        parameter `id`: @PathVariable String id           ← never called here
+```
+
+A record's compact canonical constructor is where the value is validated, normalised or rejected —
+`UUID.fromString(value)` before the component is ever stored — and a trace that steps over it reads
+as though the value arrived untouched, which is the difference between a finding and a sanitiser.
+Clicking that row opens the tab it is in. A class that declares no constructor has nothing to show
+and gets no row; Java's compact and ordinary constructors, Python's `__init__` and TypeScript's
+`constructor` all count.
+
+The step records the wrapper's tab either way, which is what
+[**Analyze this trace**](#taking-a-trace-to-a-model) spends: a record with no constructor of its own
+leaves no row in the file that declares it, and a model asked to judge the path — is this validated?
+what does `value()` return? — cannot answer without that source. So the file the type is declared in
+is part of the chat's scope whether or not a row lands there.
+
+TypeScript, Python and Java all do this. It is the same rule in each, and the traces read the
+same.
+
+### Taking a trace to a model
+
+Two buttons under the trace — **Copy**, and **Analyze this trace**.
+
+**Copy** puts the whole trace on the clipboard as text, for pasting into the chat or an agent's
+task — a path you have already followed is a far better question than "is this vulnerable?", and
+it saves the model the walk.
+
+Every step names its **file and its line**, even the steps in the tab on screen, which the pane
+itself leaves off because the editor beside it already says which file that is. Pasted anywhere
+else there is no editor, and a bare line number points into whichever file the conversation
+happens to be about. The citation shape is the one the shipped brief asks a model to answer in —
+`name (file line N)` — so a pasted trace reads like the answer it is asking for:
+
+```
+Backward trace of variable `raw`, from main.ts line 2 — 3 steps, 2 files, 1 origin outside the open files.
+
+- variable `raw`: const raw = read() (main.ts line 2)
+  - initialised from: read() (main.ts line 2)
+    - returned by `read`: process.env.SEED (db.ts line 2) — from outside the open files
+
+Each step is where the value above it came from. This is a may-analysis: every path that could
+reach the value is shown, with no aliasing and no path sensitivity, so a path here is one the code
+could take rather than one it does.
+```
+
+It is a markdown nested list because the tree is the analysis, and a list survives being read by
+a model and re-rendered as markdown where bare indentation would be folded into one paragraph. The caveat travels with it for the reason the pane
+states it in its footer — a may-analysis read as a claim about what the code _does_ is how a model
+turns a path the code never takes into a finding. A walk that stopped at its budget says so too,
+and what is copied is the whole trace, whatever you have folded away on screen.
+
+**Analyze this trace** does the pasting for you: it opens the Chat tab, starts a new conversation
+and asks that question with the same text below it. What differs from pasting by hand is the
+**code the conversation carries** — only the files the trace cites, in the order it cites them,
+rather than every open tab — their full source, line-numbered, exactly as an ordinary chat gets the
+whole buffer. A trace is the one question here that says exactly which files matter, and a chat
+scoped to them spends its budget on the code the question is about; the chat's status line says
+which files those were, since by the time an answer arrives the trace that explains it is a tab
+away, and the listing tells the **model** the same thing — a model that believes it has the whole
+editor explains a gap by inventing something instead of naming the file it would need. For a model that [reads the files itself](#models-that-read-the-files-themselves)
+nothing is scoped — there is nothing to save by choosing for it, so it gets the usual index of
+every tab and fetches what the trace points at.
+
+The question is deliberately the bare "Analyze this trace." What _analyze_ means is the brief's to
+say, and the brief is yours: a question that named what to look for would compete with a hunter or
+a rewritten role, the same way an orchestrator brief naming its own review used to beat the task
+in the box. It starts a new conversation, because the code a conversation carries is fixed when it
+opens.
+
+**Analyze with agents** beside it asks the same question of [a line of
+agents](#running-a-line-of-agents) instead: the trace becomes the run's task, and the team reads it
+one after another. The files are **always** the trace's here, where the chat leaves a tool-calling
+model the whole buffer — a run has one snapshot and several readers, each possibly on a different
+model and only some of them able to read a file for themselves, so the one choice that has to serve
+all of them is the narrow one the question actually asks about. Each agent's row says which files
+those were, exactly as the chat's status line does. The scope belongs to the task it came with:
+rewrite the task and the next run is over the whole buffer again, since a different question asked
+over an old selection is a narrowing nobody chose.
+
 ### What it does not do
 
 It is a _may_-analysis: it shows every path that **could** reach the value, with no path sensitivity
 and no alias analysis. Concretely, it will miss things.
 
-- **Aliasing.** `const p = o; p.x` loses the connection — property provenance only works when the
-  object's creation site is statically reachable.
+- **Aliasing.** Following a wrapper through an alias, an argument or a return works, because the
+  member's name travels with it; what is not tracked is a value reaching an object by some route
+  the walk cannot name — through an array, a `Map`, a spread, or a property whose key is computed.
 - **Callbacks.** In `[1, 2].map((n) => …)` the arrow's parent _is_ the call, so there is no named
   callee whose references could be searched. `n` is reported as external, which is the true answer:
   its value comes from `map`'s implementation.
-- **Mutation.** `arr.push(tainted)` followed by `arr[0]` is not tracked.
-- **`this` and class fields** assigned in a constructor are only partly followed.
+- **Mutation of a container.** `arr.push(tainted)` followed by `arr[0]` is not tracked. A named
+  member written after its object was built (`d.value = raw`) _is_.
+- **Every construction, when a member can be named.** A field's writes are found through its
+  references, so tracing `d.value` on a typed field reports every place that field is written —
+  including constructions of the class that never reach this read. The over-approximation is
+  deliberate: the alternative drops the setter that did.
 - **Standard library calls** report as external, since `noLib` means `Math.max` is as unknown as
   anything else, `` String.raw`…` `` included. Honest, but noisy.
 
@@ -452,11 +587,58 @@ alone; the open files arrive as a **hidden opening turn** of the conversation �
 the line-numbered listing, answered with a one-line acknowledgement — before your first question.
 Instructions are instructions and code is data, and the code message says as much in its first
 sentence, so a line written inside a comment reads as part of the file under review rather than as
-part of the brief. It is not sent as a `tool` message: a tool message is a reply to a tool call and
-there is no call to reply to, and of the three model back-ends here one has no tool role at all,
-one cannot render the call the message would answer, and one runs chat templates that reject the
-role outright. The acknowledgement is there because some chat templates refuse two user turns in a
-row.
+part of the brief. It is not sent as a `tool` message: a tool message is a reply to a tool
+call, and the opening turn answers no call — it is handed over unasked. The acknowledgement is
+there because some chat templates refuse two user turns in a row.
+
+### Models that read the files themselves
+
+A model that can call a **tool** is given the files to read rather than the files. Its opening turn
+is an **index** — every open file with its language and line count, and nothing of its contents —
+and two tools:
+
+| Tool         | Arguments                                                   | Answers with                                     |
+| ------------ | ----------------------------------------------------------- | ------------------------------------------------ |
+| `list_files` | none                                                        | the open files and their line counts             |
+| `read_file`  | `file`, and optionally `start` / `end` (1-based, inclusive) | those lines, numbered from the file's own line 1 |
+
+The gain is the one the budget paragraph below describes: the character budget stops being a clip
+over the whole listing and becomes a ceiling on **one read**, so a project too large to fit is no
+longer a project the model sees half of — it reads what it needs, a file or a range at a time, and
+a read the ceiling cut names the line to continue from. Nothing else about the conversation
+changes: the same brief, the same snapshot of the buffer, the same staleness rule.
+
+Which models: the four shipped **OpenRouter** entries (each checked against `tools` in the
+`supported_parameters` its own model page lists), any OpenRouter slug or local-server model you
+tick **tools** on in the ⚙ tab, and the **ONNX** entries whose chat template has tools in it —
+Qwen2.5-Coder and both Gemma 4s. **WebLLM cannot**, and that is its own limitation rather than an
+omission: it refuses `tools` for every model outside a fixed list of five Hermes builds, none of
+which is in this catalogue. Chrome's built-in model has no tool role at all. Everything not on the
+list is handed the whole line-numbered listing exactly as before.
+
+The ONNX side is a different mechanism wearing the same name. There is no API there — there is a
+chat template, and the model writes its call into the _text_ — so each family's own syntax has to
+be read back out of the stream: Qwen's `<tool_call>` with a JSON object inside, which its template
+prints the instructions for, and Gemma 4's `<|tool_call>call:name{…}`, whose tokenizer config
+names the regexes for reading one. A model whose template has no tools in it (GLM-Edge) has no
+dialect, is never offered any, and is never flagged.
+
+**Every call is printed in the log**, one row per call, in the answer where it happened:
+
+```
+read_file routes.ts lines 1-40
+read_file lib/db.ts
+
+The id reaches `db.query` on lib/db.ts line 12 …
+```
+
+Not folded away, because what a model was allowed to read is the first thing worth checking about
+an answer it built by reading — an answer that quietly read half a file should not look like one
+that read the file it cites. It is still kept out of the conversation's history and out of an
+agent's relay: it is what the model _did_, not what it said, the model already holds the contents
+in its own history, and the next agent cannot check `read_file routes.ts` against anything. A
+question is allowed twelve rounds of reading; at the twelfth the tools are taken away and the model
+answers with what it has, printed as a row of its own.
 
 The **⚙ Prompt** button opens that brief for editing — for another kind of review, another output
 shape, another language. What you write replaces the role and the two definitions; the open files
@@ -485,7 +667,8 @@ that brief — edit a word and it says _your own wording_, because by then it is
 The 12 000-character budget covers them together, spent in order with the file on screen first,
 so what gets clipped is code you are not looking at. A clip is stated in the prompt — a model
 shown half a file should know it — and a file the budget could not reach is named rather than
-quietly dropped.
+quietly dropped. For a model that reads the files itself the same figure is spent per `read_file`
+instead of once over everything, so nothing is out of reach and there is no clip to warn about.
 
 Answers come back as Markdown, so they are rendered rather than shown with their asterisks on.
 `src/lib/markdown.ts` parses the handful of constructs an answer actually uses — fenced code,

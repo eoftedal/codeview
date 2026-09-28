@@ -3,7 +3,7 @@ import { parseInline, parseMarkdown, type Block } from '../src/lib/markdown'
 
 /** The rendered text of a block, with the markers the parser consumed put back. */
 function text(block: Block): string {
-  if (block.kind === 'code' || block.kind === 'think') return block.text
+  if (block.kind === 'code' || block.kind === 'think' || block.kind === 'tool') return block.text
   if (block.kind === 'rule') return '---'
   if (block.kind === 'table') {
     return [block.header, ...block.rows]
@@ -258,5 +258,33 @@ describe('blocks', () => {
   it('produces nothing for empty text', () => {
     expect(parseMarkdown('')).toEqual([])
     expect(parseMarkdown('\n\n')).toEqual([])
+  })
+})
+
+describe('a file the model read for itself', () => {
+  it('is its own block, shown rather than folded', () => {
+    const blocks = parseMarkdown('<tool>read_file routes.ts lines 1-40</tool>\n\nIt reaches run().')
+    expect(blocks.map((block) => block.kind)).toEqual(['tool', 'paragraph'])
+    expect(text(blocks[0]!)).toBe('read_file routes.ts lines 1-40')
+  })
+
+  it('keeps one row per call, in the order they were made', () => {
+    const blocks = parseMarkdown('<tool>list_files</tool>\n\n<tool>read_file db.ts</tool>')
+    expect(blocks.map((block) => text(block))).toEqual(['list_files', 'read_file db.ts'])
+  })
+
+  it('is read before a thought, so a row between two thoughts is not swallowed', () => {
+    // The order the parser tries them in is load-bearing: a row is emitted between thoughts, and
+    // `<think>` taken first would run from the first open marker past the row to the next close.
+    const blocks = parseMarkdown(
+      '<think>which file?</think>\n\n<tool>read_file a.ts</tool>\n\n<think>now I see</think>\n\nDone.',
+    )
+    expect(blocks.map((block) => block.kind)).toEqual(['think', 'tool', 'think', 'paragraph'])
+  })
+
+  it('treats an unterminated row as a whole one, since a row is written in one piece', () => {
+    expect(parseMarkdown('<tool>read_file a.ts')).toEqual([
+      { kind: 'tool', text: 'read_file a.ts' },
+    ])
   })
 })

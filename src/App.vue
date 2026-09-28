@@ -17,6 +17,8 @@ import { useModel } from './composables/useModel'
 import { findNodeAtOffset } from './lib/astTree'
 import type { DefinitionResult, Span } from './lib/definitions'
 import { isExternalOrigin, type FlowSpan, type FlowTarget, type FlowTrace } from './lib/flow'
+import { traceQuestion, tracedFiles } from './lib/traceText'
+import { usesTools } from './lib/chat'
 import { dropFragment } from './lib/share'
 import { filesFromInput } from './lib/upload'
 import { useOpenRouterKey } from './lib/providers/openrouterKey'
@@ -200,6 +202,42 @@ function runTrace(offset: number = cursorOffset.value): void {
   // buffer with no trace opens the pane and lets it say why, rather than doing nothing at all.
   trace.value = analysis.traceSupported.value ? analysis.trace(offset) : null
   activeTab.value = 'trace'
+}
+
+/**
+ * Hand the trace on screen to the chat: a new conversation, the question, and the files.
+ *
+ * **Which files is the whole of the decision.** A trace names the few that the path runs through,
+ * and a conversation opened over only those spends its budget on code the question is actually
+ * about — the point of the button over copying the text into an ordinary chat. Unless the model
+ * reads the files itself, where there is nothing to save by choosing for it: it is given the usual
+ * index of every tab and fetches what the trace points at, so the scope is left empty.
+ */
+async function analyzeTrace(): Promise<void> {
+  const current = trace.value
+  if (!current) return
+  activeTab.value = 'chat'
+  await chat.askAbout(
+    traceQuestion(current),
+    usesTools(model.choice.value) ? [] : tracedFiles(current),
+  )
+}
+
+/**
+ * The same trace, handed to a line of agents instead of to one conversation. Same question, same
+ * files; what differs is who reads them.
+ *
+ * The files are **always** the trace's here, where the chat leaves a tool-calling model the whole
+ * buffer to read from. A run has one snapshot and several readers — each agent may be on a model
+ * of its own, and only some of them may be able to read a file for themselves — so the one choice
+ * that has to serve all of them is the narrow one the question actually asks about. An agent that
+ * can call a tool is given those files to read.
+ */
+async function analyzeTraceWithAgents(): Promise<void> {
+  const current = trace.value
+  if (!current) return
+  activeTab.value = 'agents'
+  await agents.runAbout(traceQuestion(current), tracedFiles(current))
 }
 
 function onSelectTraceStep(target: FlowTarget): void {
@@ -462,6 +500,8 @@ function onFilePicked(event: Event): void {
               @run="runTrace()"
               @select="onSelectTraceStep"
               @hover="tracedHover = $event"
+              @analyze="analyzeTrace"
+              @analyze-with-agents="analyzeTraceWithAgents"
             />
             <ChatPane
               v-else-if="activeTab === 'chat'"

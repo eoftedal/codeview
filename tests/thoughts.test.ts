@@ -113,3 +113,25 @@ describe('foldReasoning', () => {
     expect(fold.end()).toBe('')
   })
 })
+
+describe('withoutThoughts over a tool row', () => {
+  it('drops the row: it is what the model did, not what it said', () => {
+    // Shown to the reader, never relayed — the next agent cannot check `read_file a.ts`, and the
+    // model itself already has the file in its own history.
+    expect(withoutThoughts('<tool>read_file a.ts</tool>\n\nIt reaches run().')).toBe(
+      'It reaches run().',
+    )
+  })
+
+  it('drops every row, and thoughts beside them', () => {
+    expect(
+      withoutThoughts(
+        '<think>which file?</think><tool>list_files</tool><tool>read_file a.ts</tool>Answer.',
+      ),
+    ).toBe('Answer.')
+  })
+
+  it('leaves an answer that merely talks about one alone', () => {
+    expect(withoutThoughts('Call `read_file` to see it.')).toBe('Call `read_file` to see it.')
+  })
+})

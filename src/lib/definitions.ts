@@ -106,6 +106,9 @@ function declarationFor(node: ts.Node): ts.Node {
         ts.isPropertyDeclaration(parent) ||
         ts.isMethodDeclaration(parent) ||
         ts.isMethodSignature(parent) ||
+        // A getter is a member with a body, and the body is the answer: without this the
+        // declaration stays the bare name token, which the trace then calls a literal.
+        ts.isAccessor(parent) ||
         ts.isImportSpecifier(parent) ||
         ts.isImportClause(parent) ||
         ts.isNamespaceImport(parent) ||
@@ -224,7 +227,7 @@ function asIdentifier(node: ts.Node): ts.Node | null {
  * word usually leaves it — is one past the identifier it visually belongs to. Look left before
  * falling back to the enclosing declaration's name.
  */
-function identifierAt(sf: ts.SourceFile, offset: number): ts.Node | null {
+export function identifierAt(sf: ts.SourceFile, offset: number): ts.Node | null {
   const node = findTsNodeAtOffset(sf, offset)
   const here = asIdentifier(node)
   if (here) return here

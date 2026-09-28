@@ -7,6 +7,8 @@ type OtherFiles = Record<string, string>
 
 let render: (source: string, others?: OtherFiles) => string[]
 let renderAcross: (source: string, others: OtherFiles) => string[]
+/** The trace itself, for the few assertions that are about a node rather than about the shape. */
+let traceOf: (source: string, others: OtherFiles) => FlowTrace | null
 
 function lines(trace: FlowTrace, withFiles = false): string[] {
   const out: string[] = []
@@ -46,6 +48,7 @@ beforeAll(async () => {
     const trace = traceAt(source, others)
     return trace ? lines(trace, true) : ['<no trace>']
   }
+  traceOf = (source, others) => traceAt(source, others)
 })
 
 describe('intraprocedural flow', () => {
@@ -211,9 +214,12 @@ describe('a value carried inside a wrapper', () => {
       '  Main.java initialised from: w.getValue()',
       '    Main.java `.value` read from: w',
       '      Controller.java passed to `run`: new Wrapper(request.getParameter("id"))',
-      '        Controller.java passed to `Wrapper`: request.getParameter("id") [external]',
-      '          Controller.java flows into the call: request',
-      '            Controller.java parameter `request`: Request request [entry]',
+      // The constructor the value passes through is a row of its own, in the tab that declares
+      // it: what a wrapper does to what it is handed is the reviewer's question, not a detail.
+      '        Wrapper.java constructed by `Wrapper`: Wrapper(String value)',
+      '          Controller.java passed to `Wrapper`: request.getParameter("id") [external]',
+      '            Controller.java flows into the call: request',
+      '              Controller.java parameter `request`: Request request [entry]',
     ])
   })
 
@@ -230,7 +236,8 @@ describe('a value carried inside a wrapper', () => {
       '  Main.java initialised from: w.getValue()',
       '    Main.java `.value` read from: w',
       '      Main.java initialised from: new Wrapper("x")',
-      '        Main.java passed to `Wrapper`: "x" [literal]',
+      '        Wrapper.java constructed by `Wrapper`: Wrapper(String value)',
+      '          Main.java passed to `Wrapper`: "x" [literal]',
     ])
   })
 })
@@ -262,9 +269,52 @@ describe('a record used as a value wrapper', () => {
       '    Main.java `.value` read from: id',
       '      Controller.java passed to `getPizza`: productId',
       '        Controller.java initialised from: new ProductId(id)',
-      '          Controller.java passed to `ProductId`: id',
-      '            Controller.java parameter `id`: @PathVariable String id [entry]',
+      // The record's compact canonical constructor — where `UUID.fromString(value)` either
+      // validates this value or throws. A trace that stepped over it would read as though the
+      // path variable arrived untouched, which is the difference between a finding and a
+      // sanitiser.
+      '          ProductId.java constructed by `ProductId`: public ProductId',
+      '            Controller.java passed to `ProductId`: id',
+      '              Controller.java parameter `id`: @PathVariable String id [entry]',
     ])
+  })
+
+  it('reaches the path variable from the wrapper itself, through the constructor', () => {
+    // What the reader traces first: the variable holding the wrapper, not a component read out of
+    // it somewhere else. This used to stop dead at `new ProductId(id)` and call it a value made
+    // right here — the `@PathVariable` two characters away was never reached, and the validating
+    // constructor never named.
+    expect(
+      renderAcross(
+        `class Controller {\n    public ProductDto productById(@PathVariable String id) {\n        var productId = new ProductId(id);\n        return repo.getPizza(produc|tId);\n    }\n}\n`,
+        PRODUCT_ID,
+      ),
+    ).toEqual([
+      'Main.java variable `productId`: var productId = new ProductId(id);',
+      '  Main.java initialised from: new ProductId(id)',
+      '    ProductId.java constructed by `ProductId`: public ProductId',
+      '      Main.java passed to `ProductId`: id',
+      '        Main.java parameter `id`: @PathVariable String id [entry]',
+    ])
+  })
+
+  it('names the wrapper’s tab even when nothing lands a row in it', () => {
+    // A record that declares no constructor of its own runs no code worth a row — but the value
+    // still went straight through the type declared over there, and `Analyze this trace` builds
+    // its chat out of the files the trace names. Without this the model would be asked to judge
+    // a path through a `ProductId` it was never shown.
+    const trace = traceOf(
+      `class Controller {\n    public ProductDto productById(@PathVariable String id) {\n        var productId = new ProductId(id);\n        return repo.getPizza(produc|tId);\n    }\n}\n`,
+      { 'ProductId.java': 'public record ProductId(\n    String value\n) {}\n' },
+    )!
+    // The construction's own row, not the declaration whose text happens to contain it.
+    const construction = trace.nodes.find((node) => node.label === 'initialised from')!
+    expect(construction.file).toBe('Main.java')
+    expect(construction.definedIn).toBe('ProductId.java')
+    // No row of its own, since there is no constructor to show.
+    expect(trace.nodes.some((node) => node.label.startsWith('constructed by'))).toBe(false)
+    // ...and the argument is still followed to the path variable.
+    expect(trace.nodes.map((node) => node.label)).toContain('passed to `ProductId`')
   })
 
   it('ignores a construction the value never came through', () => {

@@ -27,6 +27,7 @@ import {
   describePythonBinding,
   identifierAt,
   moduleOf,
+  signatureSpan,
   type PythonFile,
 } from './definitions'
 import { importedName } from './modules'
@@ -568,19 +569,49 @@ function expandCall(
     return
   }
 
-  // Constructing a class makes a fresh value right here — unless this branch is still looking for
-  // one of its attributes, in which case the object is a wrapper and the taint is inside it.
+  // Constructing a class makes a fresh object right here — but what is *in* it came from the
+  // arguments, and a wrapper is its contents. Seeking one attribute answers precisely; with
+  // nothing sought, or nothing that answers it, everything fed in is kept, which is the same
+  // over-approximation `expandOpaqueCall` makes.
   if (target.binding.reason === 'class') {
+    // The tab the class is defined in, whether or not anything below lands a row there — see
+    // `FlowNode.definedIn`.
+    if (target.file.name !== node.file) node.definedIn = target.file.name
+    const initializer = initOf(walk, target)
     if (seeking) {
       const owner = scopeForNode(walk.scopes(target.file), target.binding.declNode)
       // The wrapper's own attributes only; one declared on a base class is not followed here.
       const attribute = owner && ownAttributeOf(owner, seeking, call.startIndex)
       if (attribute) {
-        expandBinding(walk, node, { binding: attribute, file: target.file }, depth)
+        // Through the constructor's own row where the class defines one: `__init__` is where a
+        // value is validated, normalised or rejected, and a trace that steps over it reads as
+        // though the value arrived untouched.
+        const host = constructorRow(walk, node, initializer, target, call)
+        expandBinding(walk, host, { binding: attribute, file: target.file }, depth)
         return
       }
     }
-    node.origin = 'literal'
+
+    const args: Node[] = []
+    for (const argument of call.childForFieldName('arguments')?.namedChildren ?? []) {
+      if (!argument) continue
+      const value =
+        argument.type === 'keyword_argument' ? argument.childForFieldName('value') : argument
+      if (value && !isConstant(unwrap(value))) args.push(value)
+    }
+    // Nothing went in that is worth following: the object really is made right here.
+    if (args.length === 0) {
+      node.origin = 'literal'
+      return
+    }
+
+    const host = constructorRow(walk, node, initializer, target, call)
+    const name = calleeIdentifier(call)?.text ?? target.binding.name
+    for (const argument of args) {
+      host.children.push(
+        traceValue(walk, file, argument, 'argument', `passed to \`${name}\``, depth + 1, seeking),
+      )
+    }
     return
   }
 
@@ -646,6 +677,37 @@ function returnsOf(declaration: Node): Node[] {
  * name we can resolve. The result came from outside, but what was *fed into* it is still worth
  * showing: that is how `open(path)` and `subprocess.run(cmd)` stay legible.
  */
+/**
+ * The `__init__` a construction runs, where the class defines one of its own — the row the value
+ * passes through on its way in. A class without one has nothing to show and gets no row.
+ */
+function initOf(walk: Walk, target: Located): Node | null {
+  const owner = scopeForNode(walk.scopes(target.file), target.binding.declNode)
+  const declaration = owner?.bindings.get('__init__')?.[0]?.declNode
+  return declaration && declaration.type === 'function_definition' ? declaration : null
+}
+
+/** The row for that constructor, or the node itself where there is none to show. */
+function constructorRow(
+  walk: Walk,
+  node: FlowNode,
+  initializer: Node | null,
+  target: Located,
+  call: Node,
+): FlowNode {
+  if (!initializer) return node
+  const name = calleeIdentifier(call)?.text ?? target.binding.name
+  const row = addNode(
+    walk,
+    target.file,
+    signatureSpan(initializer, target.file.text),
+    'declaration',
+    `constructed by \`${name}\``,
+  )
+  node.children.push(row.id)
+  return row
+}
+
 function expandOpaqueCall(
   walk: Walk,
   node: FlowNode,

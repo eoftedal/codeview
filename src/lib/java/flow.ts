@@ -20,7 +20,7 @@ import type { Node } from '@vscode/tree-sitter-wasm'
 import type { Span } from '../definitions'
 import type { FlowNode, FlowOrigin, FlowStep, FlowTrace } from '../flow'
 import { isExternalOrigin } from '../flow'
-import { bindingAt, identifierAt, typeScopeFor, type JavaFile } from './definitions'
+import { bindingAt, identifierAt, signatureSpan, typeScopeFor, type JavaFile } from './definitions'
 import { importedName, moduleFor } from './modules'
 import { buildScopes, scopeAt, type Binding, type Scope, type ScopeTree } from './scopes'
 
@@ -312,6 +312,41 @@ function constructorIndexFor(walk: Walk, call: Node, file: JavaFile, name: strin
   return null
 }
 
+/**
+ * The constructor a construction actually runs, where the class declares one.
+ *
+ * It earns a row of its own because of what lives in it. A record's compact canonical constructor
+ * is where the value is validated, normalised or rejected — `UUID.fromString(value)` before the
+ * component is ever stored — and a trace that steps over it reads as though the value arrived
+ * untouched, which is the difference between a finding and a sanitiser. A class that declares no
+ * constructor has nothing to show, and gets no row.
+ *
+ * Which one, when there are several, is the same syntactic guess `lookupCall` makes for an
+ * overload: arity, then the first declared. A compact constructor takes the record's components,
+ * so its arity is the component count.
+ */
+function constructorSite(target: Located, call: Node): Node | null {
+  const declaration = target.binding.declNode
+  const body = declaration.childForFieldName('body') ?? declaration
+  // Only this type's own constructors: a nested class declares its own, and they are not these.
+  const declared = (body.namedChildren ?? []).filter(
+    (child): child is Node =>
+      child !== null &&
+      (child.type === 'constructor_declaration' ||
+        child.type === 'compact_constructor_declaration'),
+  )
+  if (declared.length === 0) return null
+
+  const arity = argumentsIn(call)
+  const components = parametersOf(declaration).length
+  const fits = declared.find((constructor) =>
+    constructor.type === 'compact_constructor_declaration'
+      ? components === arity
+      : parametersOf(constructor).length === arity,
+  )
+  return fits ?? declared[0]!
+}
+
 function argumentsIn(call: Node): number {
   const args = call.childForFieldName('arguments')
   return args ? args.namedChildren.filter((child) => child !== null).length : 0
@@ -517,25 +552,68 @@ function expandCall(
   // `new Db(...)` builds the object right here — unless this branch is still looking for one of
   // its members, in which case the object is a wrapper and the value went in through this call.
   if (call.type === 'object_creation_expression') {
+    const name = calleeName(call)?.text ?? 'it'
+    // The tab the type is declared in, whether or not anything below lands a row there — see
+    // `FlowNode.definedIn`.
+    if (target.file.name !== node.file) node.definedIn = target.file.name
+
+    // Which arguments the object was made of. Seeking one member answers precisely — that member
+    // is filled by one argument, and the others are somebody else's value. With nothing sought,
+    // or nothing that answers it, everything fed in is kept: a wrapper is its contents, and the
+    // object being *made* here says nothing about where what is inside it came from. That is the
+    // same over-approximation `expandOpaqueCall` makes, and it is why a construction is no longer
+    // a terminal.
+    let precise = false
+    const args: Node[] = []
     if (seeking) {
       const index = constructorIndexFor(walk, call, file, seeking)
       const argument =
         index === null ? null : argumentFor({ call, file, callee: '', shift: 0 }, index)
       if (argument) {
-        node.children.push(
-          traceValue(
-            walk,
-            file,
-            argument,
-            'argument',
-            `passed to \`${calleeName(call)?.text ?? 'it'}\``,
-            depth + 1,
-          ),
-        )
-        return
+        args.push(argument)
+        precise = true
       }
     }
-    node.origin = 'literal'
+    if (!precise) {
+      for (const argument of call.childForFieldName('arguments')?.namedChildren ?? []) {
+        if (argument && !isConstant(unwrap(argument))) args.push(argument)
+      }
+    }
+
+    // Nothing went in that is worth following: the object really is made right here.
+    if (args.length === 0) {
+      node.origin = 'literal'
+      return
+    }
+
+    // The constructor the value passes through, where the class declares one — see
+    // `constructorSite`. The arguments hang under it, so the path reads the way it runs: the
+    // object came out of this constructor, and this is what went into it.
+    const constructor = constructorSite(target, call)
+    const host = constructor
+      ? addNode(
+          walk,
+          target.file,
+          signatureSpan(constructor, target.file.text),
+          'declaration',
+          `constructed by \`${name}\``,
+        )
+      : node
+    if (constructor) node.children.push(host.id)
+
+    for (const argument of args) {
+      host.children.push(
+        traceValue(
+          walk,
+          file,
+          argument,
+          'argument',
+          `passed to \`${name}\``,
+          depth + 1,
+          precise ? undefined : seeking,
+        ),
+      )
+    }
     return
   }
 

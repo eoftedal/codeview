@@ -50,6 +50,11 @@ export interface LocalServerModel {
   /** A reasoning model: offers the thinking checkbox and asks the server for a thought. Not
    *  discoverable from `/models`, so it is only ever set by hand. */
   thinking: boolean
+  /** The model can call a tool, so it is given an index of the open files and reads them itself.
+   *  Not discoverable either — `/models` says nothing about tools, and a runtime will happily
+   *  accept the field for a model whose template has nowhere to put it — so it too is only ever
+   *  set by hand. */
+  tools: boolean
   /** Overrides `DEFAULT_LOCAL_CODE_CHARS` for a model whose context is smaller than that assumes. */
   maxCodeChars?: number
 }
@@ -71,6 +76,7 @@ function parse(raw: string | null): LocalServerModel[] {
         model,
         label: label || model,
         thinking: item?.thinking === true,
+        tools: item?.tools === true,
         ...(budget && budget > 0 ? { maxCodeChars: Math.floor(budget) } : {}),
       })
     }
@@ -125,7 +131,7 @@ export async function refreshLocalServerModels(signal?: AbortSignal): Promise<bo
       const model = typeof item?.id === 'string' ? item.id.trim() : ''
       if (!model || seen.has(model)) continue
       seen.add(model)
-      discovered.push({ model, label: model, thinking: false })
+      discovered.push({ model, label: model, thinking: false, tools: false })
     }
     setSeenModels(discovered)
     return true
@@ -166,6 +172,7 @@ export function toModelChoice(entry: LocalServerModel): ModelChoice {
     maxCodeChars: entry.maxCodeChars ?? DEFAULT_LOCAL_CODE_CHARS,
     model: entry.model,
     thinking: entry.thinking || undefined,
+    supportsTools: entry.tools || undefined,
     note: 'Served by your own model server — the code stays on this machine.',
   }
 }

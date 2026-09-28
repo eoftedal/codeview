@@ -18,12 +18,45 @@
  *
  * What differs between the two providers is entirely `OpenAiConfig`: where to post, what headers to
  * send, how many tokens to allow, which body field asks for reasoning, and how a failure is worded.
+ *
+ * **This is also the one provider that can carry a tool call**, which is what turns a question from
+ * one request into a loop of them: the model asks for a file, the answer is appended to the history
+ * as a `tool` turn, and the same question is asked again with it. The loop is bounded
+ * (`MAX_TOOL_ROUNDS`), and what it does when it reaches the bound is ask one more time with
+ * `tool_choice: 'none'` rather than stopping — a question that ends in an answer, however partial,
+ * beats one that ends in silence. Each call is written into the stream as *thinking*
+ * (`<think>`), which is the honest place for it: it is the model working towards its answer, the
+ * pane already folds it away, and `withoutThoughts` already keeps it out of both the history and
+ * an agent's relay.
  */
 
 import { CODE_ACK, type LoadOptions, type ModelEngine } from '../chat'
+import { MAX_TOOL_ROUNDS } from '../tools'
 import { foldReasoning, withoutThoughts } from './thoughts'
 
-type Message = { role: 'system' | 'user' | 'assistant'; content: string }
+/** A turn as this API spells one. `tool_calls` rides the assistant turn that asked for them, and
+ *  every one of them must be answered by a `tool` turn carrying its `tool_call_id` — a pair that
+ *  has to be pushed together, since a history holding the ask without the answer is rejected by
+ *  the next request. */
+type Message =
+  | { role: 'system' | 'user' | 'assistant'; content: string }
+  | { role: 'assistant'; content: string; tool_calls: ToolCall[] }
+  | { role: 'tool'; content: string; tool_call_id: string }
+
+interface ToolCall {
+  id: string
+  type: 'function'
+  function: { name: string; arguments: string }
+}
+
+/** A tool call as it arrives: in pieces, across frames, with `index` saying which call each piece
+ *  belongs to. The name comes whole on the first frame; the arguments arrive as JSON text a few
+ *  characters at a time. */
+interface ToolCallDelta {
+  index?: number
+  id?: string
+  function?: { name?: string; arguments?: string }
+}
 
 /**
  * One SSE frame's payload. Four names for the same thing, because the servers disagree: OpenRouter
@@ -45,6 +78,7 @@ interface Delta {
       reasoning?: string
       reasoning_content?: string
       thinking?: string
+      tool_calls?: ToolCallDelta[]
     }
     finish_reason?: string | null
   }[]
@@ -86,7 +120,7 @@ export function openAiEngine(config: OpenAiConfig, options: Options): ModelEngin
 
   return {
     // Completions are stateless on this API: a conversation is nothing but its own turns.
-    async chat(system, code) {
+    async chat(system, code, tools) {
       const messages: Message[] = [
         { role: 'system', content: system },
         ...(code
@@ -132,80 +166,164 @@ export function openAiEngine(config: OpenAiConfig, options: Options): ModelEngin
             notify()
           }
 
+          // One fold for the whole question rather than one per request: a tool loop is several
+          // requests answering a single question, and a `<think>` opened while the model was
+          // deciding what to read has to be closed by whichever round finally speaks.
+          const fold = foldReasoning()
+          /** What the model has said *as content* in the round under way — the answer itself, with
+           *  neither its reasoning nor the tool trace in it. This is what the history gets for that
+           *  round, and it is reset at each boundary so nothing is filed twice. */
+          let spoken = ''
+          let truncated = false
+
+          /**
+           * One request, streamed. Returns the tool calls it asked for, in the order it asked —
+           * empty when it simply answered, which is what ends the loop.
+           *
+           * `offer` is whether this round may ask for another: false on the last one, where the
+           * tools are still declared (the history holds calls, and this API rejects those with
+           * nothing to declare them) but `tool_choice: 'none'` takes the option away.
+           */
+          const round = async (offer: boolean, signal: AbortSignal): Promise<ToolCall[]> => {
+            const response = await fetch(config.endpoint, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...config.headers },
+              body: JSON.stringify({
+                model,
+                messages,
+                stream: true,
+                max_tokens: config.maxTokens,
+                // Left out rather than sent as null, so the weights' own config still decides
+                // whatever the catalogue does not.
+                ...(row.temperature !== undefined ? { temperature: row.temperature } : {}),
+                ...(row.topP !== undefined ? { top_p: row.topP } : {}),
+                ...(row.presencePenalty !== undefined
+                  ? { presence_penalty: row.presencePenalty }
+                  : {}),
+                ...(config.repetitionPenalty && row.repetitionPenalty !== undefined
+                  ? { repetition_penalty: row.repetitionPenalty }
+                  : {}),
+                ...(tools ? { tools: tools.schemas } : {}),
+                ...(tools && !offer ? { tool_choice: 'none' } : {}),
+                ...config.reasoningFields(reasons === true, askOptions?.thinking === true),
+              }),
+              signal,
+            })
+
+            if (!response.ok || !response.body) {
+              throw new Error(await config.errorMessage(response))
+            }
+
+            const reader = response.body.getReader()
+            const decoder = new TextDecoder()
+            let buffer = ''
+            // A call arrives in pieces across frames, `index` saying which is which — so it is
+            // assembled by index and read back in that order, not in the order the pieces landed.
+            const building = new Map<number, ToolCall>()
+
+            for (;;) {
+              const { done, value } = await reader.read()
+              if (done) break
+              buffer += decoder.decode(value, { stream: true })
+              const events = buffer.split('\n\n')
+              buffer = events.pop() ?? ''
+              for (const event of events) {
+                const line = event.trim()
+                // Skips both `[DONE]` and a server's comment keep-alives — OpenRouter's
+                // `: OPENROUTER PROCESSING`, llama.cpp's own.
+                if (!line.startsWith('data:')) continue
+                const data = line.slice('data:'.length).trim()
+                if (data === '[DONE]') continue
+                const parsed = JSON.parse(data) as Delta
+                const choice = parsed.choices?.[0]
+                // Rule 4. Thrown from inside the loop, since the status was 200 and nothing
+                // after the loop would notice: the catch below keeps what streamed first.
+                if (parsed.error || choice?.finish_reason === 'error') {
+                  throw new Error(config.streamError(parsed.error))
+                }
+                if (choice?.finish_reason === 'length') truncated = true
+                const delta = choice?.delta
+                for (const piece of delta?.tool_calls ?? []) {
+                  const key = piece.index ?? 0
+                  let call = building.get(key)
+                  if (!call) {
+                    call = {
+                      id: piece.id ?? `call_${key}`,
+                      type: 'function',
+                      function: { name: '', arguments: '' },
+                    }
+                    building.set(key, call)
+                  }
+                  if (piece.id) call.id = piece.id
+                  if (piece.function?.name) call.function.name += piece.function.name
+                  if (piece.function?.arguments) call.function.arguments += piece.function.arguments
+                }
+                if (delta?.content) spoken += delta.content
+                emit(
+                  fold.delta(
+                    delta?.reasoning ?? delta?.reasoning_content ?? delta?.thinking,
+                    delta?.content,
+                  ),
+                )
+              }
+            }
+
+            return [...building.entries()]
+              .sort(([a], [b]) => a - b)
+              .map(([, call]) => call)
+              .filter((call) => call.function.name)
+          }
+
           const produce = async () => {
             const controllerAbort = new AbortController()
             const onAbort = () => controllerAbort.abort()
             askOptions?.signal?.addEventListener('abort', onAbort, { once: true })
 
             try {
-              const response = await fetch(config.endpoint, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...config.headers },
-                body: JSON.stringify({
-                  model,
-                  messages,
-                  stream: true,
-                  max_tokens: config.maxTokens,
-                  // Left out rather than sent as null, so the weights' own config still decides
-                  // whatever the catalogue does not.
-                  ...(row.temperature !== undefined ? { temperature: row.temperature } : {}),
-                  ...(row.topP !== undefined ? { top_p: row.topP } : {}),
-                  ...(row.presencePenalty !== undefined
-                    ? { presence_penalty: row.presencePenalty }
-                    : {}),
-                  ...(config.repetitionPenalty && row.repetitionPenalty !== undefined
-                    ? { repetition_penalty: row.repetitionPenalty }
-                    : {}),
-                  ...config.reasoningFields(reasons === true, askOptions?.thinking === true),
-                }),
-                signal: controllerAbort.signal,
-              })
-
-              if (!response.ok || !response.body) {
-                throw new Error(await config.errorMessage(response))
-              }
-
-              const reader = response.body.getReader()
-              const decoder = new TextDecoder()
-              let buffer = ''
-              let truncated = false
-              // Folded whether or not the model was asked to think: a model that reasons by
-              // default still streams its thought here, and it must not vanish.
-              const fold = foldReasoning()
-
-              for (;;) {
-                const { done, value } = await reader.read()
-                if (done) break
-                buffer += decoder.decode(value, { stream: true })
-                const events = buffer.split('\n\n')
-                buffer = events.pop() ?? ''
-                for (const event of events) {
-                  const line = event.trim()
-                  // Skips both `[DONE]` and a server's comment keep-alives — OpenRouter's
-                  // `: OPENROUTER PROCESSING`, llama.cpp's own.
-                  if (!line.startsWith('data:')) continue
-                  const data = line.slice('data:'.length).trim()
-                  if (data === '[DONE]') continue
-                  const parsed = JSON.parse(data) as Delta
-                  const choice = parsed.choices?.[0]
-                  // Rule 4. Thrown from inside the loop, since the status was 200 and nothing
-                  // after the loop would notice: the catch below keeps what streamed first.
-                  if (parsed.error || choice?.finish_reason === 'error') {
-                    throw new Error(config.streamError(parsed.error))
-                  }
-                  if (choice?.finish_reason === 'length') truncated = true
-                  const delta = choice?.delta
+              for (let asked = 0; ; asked += 1) {
+                const offer = tools !== undefined && asked < MAX_TOOL_ROUNDS
+                if (tools && !offer) {
+                  // Closed first: a row is a sibling of a thought, never inside one.
+                  emit(fold.end())
                   emit(
-                    fold.delta(
-                      delta?.reasoning ?? delta?.reasoning_content ?? delta?.thinking,
-                      delta?.content,
-                    ),
+                    `\n\n<tool>read enough — answering from what has been read (${MAX_TOOL_ROUNDS} calls)</tool>\n\n`,
                   )
+                }
+                const calls = await round(offer, controllerAbort.signal)
+                // A round that stopped at the token ceiling may have stopped in the middle of the
+                // arguments it was writing, so the calls it asked for are not ones to run: the
+                // answer ends here, with its note saying why.
+                if (truncated || !tools || calls.length === 0) break
+                // The ask and its answers go in together. Nothing awaits between them — the
+                // toolbox is synchronous on purpose — because a history holding an ask with no
+                // answer is one the next request refuses, and an abort landing in that gap would
+                // leave the conversation unusable rather than merely stopped.
+                messages.push({
+                  role: 'assistant',
+                  content: withoutThoughts(spoken),
+                  tool_calls: calls,
+                })
+                spoken = ''
+                // A thought the model was in the middle of is closed before the rows: a row is a
+                // sibling of a thought, and one nested inside the other renders as neither.
+                emit(fold.end())
+                for (const call of calls) {
+                  const { name, arguments: args } = call.function
+                  // One visible row per call. What a model was allowed to read is the first thing
+                  // a reader checks about an answer built by reading — and it is still stripped
+                  // from the history and from an agent's relay, since it is what the model did
+                  // rather than what it said.
+                  emit(`\n\n<tool>${tools.describe(name, args)}</tool>\n\n`)
+                  messages.push({
+                    role: 'tool',
+                    tool_call_id: call.id,
+                    content: tools.call(name, args),
+                  })
                 }
               }
               emit(fold.end())
 
-              messages.push({ role: 'assistant', content: withoutThoughts(answer) })
+              messages.push({ role: 'assistant', content: withoutThoughts(spoken) })
               if (askOptions?.signal?.aborted) {
                 end(new DOMException('Aborted', 'AbortError'))
               } else {
@@ -215,7 +333,7 @@ export function openAiEngine(config: OpenAiConfig, options: Options): ModelEngin
                 end()
               }
             } catch (caught) {
-              messages.push({ role: 'assistant', content: withoutThoughts(answer) })
+              messages.push({ role: 'assistant', content: withoutThoughts(spoken) })
               if (askOptions?.signal?.aborted) {
                 end(new DOMException('Aborted', 'AbortError'))
               } else {

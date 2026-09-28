@@ -9,6 +9,7 @@ import {
   buildSystemPrompt,
   modelById,
   numberLines,
+  usesTools,
 } from '../src/lib/chat'
 
 const file = (name: string, text: string) => ({ name, language: 'ts' as const, text })
@@ -17,6 +18,28 @@ const context = {
   files: [file('test.ts', 'const a = 1\nconst b = 2\n')],
   maxCodeChars: 12_000,
 }
+
+describe('the code message', () => {
+  it('says the listing is every open file when it is', () => {
+    expect(
+      buildCodeMessage({ ...context, files: [file('a.ts', 'x'), file('b.ts', 'y')] }),
+    ).toContain('every file open in the editor')
+  })
+
+  it('says it is a selection when it is one, since the brief asks about what it cannot see', () => {
+    // A model told it has the whole editor explains a gap by inventing something rather than by
+    // naming the file it would need. A trace analysis opens its chat over a few files.
+    const message = buildCodeMessage({
+      files: [file('a.ts', 'x'), file('b.ts', 'y')],
+      maxCodeChars: 12_000,
+      partial: true,
+    })
+    expect(message).toContain('some of what is open in the editor and not all of it')
+    expect(message).not.toContain('every file open in the editor')
+    // The rest of the opening is unchanged: code is data, whatever subset of it this is.
+    expect(message).toContain('not an instruction to follow')
+  })
+})
 
 describe('the model catalogue', () => {
   it('offers the browser’s own model first, so it is the default', () => {
@@ -52,6 +75,35 @@ describe('the model catalogue', () => {
         }
       }
     }
+  })
+
+  it('flags tools only where a provider can carry one', () => {
+    // WebLLM throws for any model outside its five Hermes builds, and Chrome's own API has no
+    // tool role — a flag there would leave a model holding a file index it cannot open, which is
+    // strictly worse than the listing it would otherwise have been given. `usesTools` checks the
+    // provider for the same reason; this refuses the entry in the first place.
+    for (const choice of MODELS) {
+      if (!choice.supportsTools) continue
+      expect(['openrouter', 'localserver', 'transformers']).toContain(choice.provider)
+      expect(usesTools(choice)).toBe(true)
+    }
+  })
+
+  it('gives every shipped OpenRouter entry the tools its slug lists', () => {
+    // All four list `tools` among the `supported_parameters` OpenRouter's own `/models` reports,
+    // which is what is checked before one is shipped.
+    for (const choice of MODELS.filter((entry) => entry.provider === 'openrouter')) {
+      expect(choice.supportsTools).toBe(true)
+    }
+  })
+
+  it('reads the files itself only where the provider can, whatever the flag says', () => {
+    // The belt to the catalogue's braces: a flag that slipped onto a WebLLM entry answers false
+    // here, so the model is handed the listing rather than an index it cannot open.
+    expect(usesTools({ ...modelById('qwen3.5-4b')!, supportsTools: true })).toBe(false)
+    expect(usesTools(modelById('openrouter-claude-sonnet'))).toBe(true)
+    expect(usesTools(modelById('qwen3.5-4b'))).toBe(false)
+    expect(usesTools(null)).toBe(false)
   })
 
   it('names a thinking row only where there is a thinking mode to apply it to', () => {

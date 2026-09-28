@@ -49,7 +49,7 @@ function spanOf(node: Node): Span {
  * that line. The line clip keeps a multi-line parameter list or a long `implements` list from
  * dragging the whole signature into the highlight.
  */
-function signatureSpan(node: Node, text: string): Span {
+export function signatureSpan(node: Node, text: string): Span {
   const body = node.childForFieldName('body')
   const end = Math.min(body ? body.startIndex : node.endIndex, endOfLine(text, node.startIndex))
   return trimEnd(text, { start: node.startIndex, end })

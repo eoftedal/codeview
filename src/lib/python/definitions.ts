@@ -44,7 +44,7 @@ function endOfLine(text: string, pos: number): number {
  * that line. The line clip keeps a multi-line parameter list from dragging the whole signature in,
  * exactly as it does for TypeScript.
  */
-function signatureSpan(node: Node, text: string): Span {
+export function signatureSpan(node: Node, text: string): Span {
   const body = node.childForFieldName('body')
   const end = Math.min(body ? body.startIndex : node.endIndex, endOfLine(text, node.startIndex))
   return trimEnd(text, { start: node.startIndex, end })

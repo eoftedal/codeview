@@ -14,8 +14,10 @@ import {
   type DataType,
   type TextGenerationPipeline,
 } from '@huggingface/transformers'
+import type { ToolSchema } from '../chat'
 import { MAX_NEW_TOKENS } from './ceiling'
 import { sessionDevices } from './devices'
+import { keepsSpecialTokens, toolFilter, type ParsedCall, type ToolDialect } from './onnxTools'
 import { foldChannels } from './thoughts'
 
 export type ToWorker =
@@ -27,15 +29,40 @@ export type ToWorker =
       /** Put `embed_tokens` on the CPU, leaving the GPU to the decoder alone. */
       cpuEmbeddings?: boolean
     }
-  | { type: 'ask'; messages: { role: string; content: string }[]; thinking?: boolean }
+  | {
+      type: 'ask'
+      /** The whole conversation, in the shape `apply_chat_template` renders: a turn that asked for
+       *  tools carries `tool_calls`, and each answer to one is a `tool` turn naming the call it
+       *  answers. Both shipped templates render exactly this. */
+      messages: WorkerMessage[]
+      thinking?: boolean
+      /** Declared to the template for this question. Absent means none — which is also how the
+       *  last round of a tool loop asks for an answer rather than another call. */
+      tools?: readonly ToolSchema[]
+      /** How this model writes a call, for reading one back out of the text. */
+      dialect?: ToolDialect
+    }
   | { type: 'stop' }
+
+/** A turn as the chat templates take one. `content` is always present — an assistant turn that only
+ *  called a tool carries the empty string — because a template that reads `message.content` on one
+ *  without it renders `undefined` into the prompt. */
+export interface WorkerMessage {
+  role: string
+  content: string
+  tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: unknown } }[]
+  tool_call_id?: string
+  name?: string
+}
 
 export type FromWorker =
   | { type: 'progress'; loaded: number }
   | { type: 'ready' }
   | { type: 'token'; text: string }
-  /** `truncated`: the answer ended at `MAX_NEW_TOKENS`, not at the model's own end of turn. */
-  | { type: 'done'; truncated: boolean }
+  /** `truncated`: the answer ended at `MAX_NEW_TOKENS`, not at the model's own end of turn.
+   *  `calls`: what the model asked to read, already parsed out of the text it wrote — the
+   *  provider runs them, since the files are on its side of the worker boundary. */
+  | { type: 'done'; truncated: boolean; calls: ParsedCall[] }
   | { type: 'error'; message: string }
 
 /** Counts what the model generated. It stops nothing: a stopping criterion is simply the one hook
@@ -80,21 +107,28 @@ async function load(
 }
 
 async function ask(
-  messages: { role: string; content: string }[],
+  messages: WorkerMessage[],
   thinking: boolean,
+  tools?: readonly ToolSchema[],
+  dialect?: ToolDialect,
 ): Promise<void> {
   if (!generator) throw new Error('The model is not loaded.')
 
   stopper = new InterruptableStoppingCriteria()
-  // Thinking is delimited by channel markers, and those are special tokens: skipped, the reasoning
-  // arrives glued to the front of the answer with nothing to separate the two. Kept, the protocol
-  // tokens come through as well, which is what `foldChannels` is for.
-  const fold = thinking ? foldChannels() : null
+  // Two reasons to stop skipping special tokens, and they are the same reason twice. Thinking is
+  // delimited by channel markers, which are special: skipped, the reasoning arrives glued to the
+  // front of the answer with nothing to separate the two. Gemma's tool-call markers are special
+  // too, so a call would arrive as its bare arguments with nothing saying it was one. Either way
+  // the protocol tokens come through as well, which is what `foldChannels` is for.
+  const reading = tools && dialect ? toolFilter(dialect) : null
+  const specials = thinking || (reading !== null && keepsSpecialTokens(dialect!))
+  const fold = specials ? foldChannels() : null
   const streamer = new TextStreamer(generator.tokenizer, {
     skip_prompt: true,
-    skip_special_tokens: !thinking,
+    skip_special_tokens: !specials,
     callback_function: (chunk: string) => {
-      const text = fold ? fold(chunk) : chunk
+      const folded = fold ? fold(chunk) : chunk
+      const text = reading ? reading.chunk(folded) : folded
       if (text) post({ type: 'token', text })
     },
   })
@@ -110,11 +144,22 @@ async function ask(
     // The pipeline hands these to `apply_chat_template`, which is where a model's thinking mode is
     // turned on — a template without the variable simply ignores it.
     ...(thinking ? { tokenizer_encode_kwargs: { enable_thinking: true } } : {}),
+    // And the same road for the tools: the template renders each model's own declaration block
+    // from them, which is the only place a tool is ever described to one of these.
+    ...(tools ? { tools: tools as unknown as object[] } : {}),
   })
+  if (reading) {
+    const rest = reading.end()
+    if (rest) post({ type: 'token', text: rest })
+  }
   // Generation ends three ways — the model's end of turn, the reader's stop, or the ceiling — and
   // only the last is a cut-off. The reader's stop is an abort on the other side of the worker
   // boundary, whatever the count says.
-  post({ type: 'done', truncated: !stopper.interrupted && counter.generated >= MAX_NEW_TOKENS })
+  post({
+    type: 'done',
+    truncated: !stopper.interrupted && counter.generated >= MAX_NEW_TOKENS,
+    calls: reading ? reading.calls() : [],
+  })
 }
 
 /**
@@ -141,7 +186,7 @@ self.onmessage = async (event: MessageEvent<ToWorker>) => {
         message.cpuEmbeddings,
       )
     } else if (message.type === 'ask') {
-      await ask(message.messages, message.thinking === true)
+      await ask(message.messages, message.thinking === true, message.tools, message.dialect)
     } else if (message.type === 'stop') stopper?.interrupt()
   } catch (caught) {
     post({ type: 'error', message: caught instanceof Error ? caught.message : String(caught) })

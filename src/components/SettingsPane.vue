@@ -74,6 +74,7 @@ watch(
 const newModelSlug = ref('')
 const newModelLabel = ref('')
 const newModelThinking = ref(false)
+const newModelTools = ref(false)
 const newModelTaken = computed(() => {
   const slug = newModelSlug.value.trim()
   if (!slug) return false
@@ -89,15 +90,28 @@ function addModel(): void {
   const label = newModelLabel.value.trim()
   modelsDraft.value = [
     ...modelsDraft.value,
-    { model, label: label || model, thinking: newModelThinking.value },
+    { model, label: label || model, thinking: newModelThinking.value, tools: newModelTools.value },
   ]
   newModelSlug.value = ''
   newModelLabel.value = ''
   newModelThinking.value = false
+  newModelTools.value = false
 }
 
 function removeModel(model: string): void {
   modelsDraft.value = modelsDraft.value.filter((entry) => entry.model !== model)
+}
+
+/**
+ * Either flag on an entry already on the list, without touching the entry the props hold: a draft
+ * is only a draft while Save is what writes it, and `v-model` on a row would write straight
+ * through to the stored object — the flags are two now, and going back to the model page to check
+ * one of them is exactly the moment a reader wants to change their mind about the other.
+ */
+function setModelFlag(model: string, flag: 'thinking' | 'tools', on: boolean): void {
+  modelsDraft.value = modelsDraft.value.map((entry) =>
+    entry.model === model ? { ...entry, [flag]: on } : entry,
+  )
 }
 
 // The same guard for the local list, against the draft and the live picker both. A name already
@@ -107,6 +121,7 @@ function removeModel(model: string): void {
 const newLocalModel = ref('')
 const newLocalLabel = ref('')
 const newLocalThinking = ref(false)
+const newLocalTools = ref(false)
 const newLocalTaken = computed(() => {
   const name = newLocalModel.value.trim()
   if (!name) return false
@@ -119,15 +134,23 @@ function addLocalModel(): void {
   const label = newLocalLabel.value.trim()
   localModelsDraft.value = [
     ...localModelsDraft.value,
-    { model, label: label || model, thinking: newLocalThinking.value },
+    { model, label: label || model, thinking: newLocalThinking.value, tools: newLocalTools.value },
   ]
   newLocalModel.value = ''
   newLocalLabel.value = ''
   newLocalThinking.value = false
+  newLocalTools.value = false
 }
 
 function removeLocalModel(model: string): void {
   localModelsDraft.value = localModelsDraft.value.filter((entry) => entry.model !== model)
+}
+
+/** The same in-place edit for the local list — see `setModelFlag`. */
+function setLocalFlag(model: string, flag: 'thinking' | 'tools', on: boolean): void {
+  localModelsDraft.value = localModelsDraft.value.map((entry) =>
+    entry.model === model ? { ...entry, [flag]: on } : entry,
+  )
 }
 
 /** This page's own origin, so the CORS hint names the value the reader actually has to allow
@@ -154,9 +177,14 @@ const discovered = computed(() =>
     .map((entry) => entry.model ?? entry.id),
 )
 
-function flagDiscovered(model: string): void {
+function flagDiscovered(model: string, flag: 'thinking' | 'tools'): void {
   if (localModelsDraft.value.some((entry) => entry.model === model)) return
-  localModelsDraft.value = [...localModelsDraft.value, { model, label: model, thinking: true }]
+  // Naming it moves it into the list below, where either flag can still be changed — which is why
+  // ticking one of the two here is enough rather than a choice between them.
+  localModelsDraft.value = [
+    ...localModelsDraft.value,
+    { model, label: model, thinking: flag === 'thinking', tools: flag === 'tools' },
+  ]
 }
 
 const changed = computed(
@@ -175,9 +203,11 @@ function revert(): void {
   newModelSlug.value = ''
   newModelLabel.value = ''
   newModelThinking.value = false
+  newModelTools.value = false
   newLocalModel.value = ''
   newLocalLabel.value = ''
   newLocalThinking.value = false
+  newLocalTools.value = false
 }
 
 function save(): void {
@@ -218,16 +248,34 @@ function save(): void {
       <h3 class="group-title">OpenRouter models</h3>
       <p class="hint">
         Beyond the shipped ones — any model OpenRouter itself lists. Enter the slug from its model
-        page (for example <code>mistralai/mistral-large</code>), and tick <em>thinks</em> if that
-        page lists <code>reasoning</code> among its parameters: the think switch is only sent for a
-        model marked so.
+        page (for example <code>mistralai/mistral-large</code>), and tick what that page lists among
+        its parameters: <em>thinks</em> for <code>reasoning</code>, which is the only way the think
+        switch is sent, and <em>tools</em> for <code>tools</code> — a model with tools is given an
+        index of the open files and reads them itself instead of being handed the listing.
       </p>
       <ul v-if="modelsDraft.length > 0" class="models-list">
         <li v-for="entry in modelsDraft" :key="entry.model" class="models-row">
           <span class="models-label" :title="entry.model">{{ entry.label }}</span>
-          <span v-if="entry.thinking" class="models-thinking" title="Has a thinking mode">
+          <label class="models-think" title="Offers the thinking checkbox and asks it to reason">
+            <input
+              type="checkbox"
+              :checked="entry.thinking"
+              @change="
+                setModelFlag(entry.model, 'thinking', ($event.target as HTMLInputElement).checked)
+              "
+            />
             thinks
-          </span>
+          </label>
+          <label class="models-think" title="Reads the files itself, with list_files and read_file">
+            <input
+              type="checkbox"
+              :checked="entry.tools"
+              @change="
+                setModelFlag(entry.model, 'tools', ($event.target as HTMLInputElement).checked)
+              "
+            />
+            tools
+          </label>
           <button class="models-remove" @click="removeModel(entry.model)">Remove</button>
         </li>
       </ul>
@@ -253,6 +301,10 @@ function save(): void {
         <label class="models-think" title="Offers the thinking checkbox and asks it to reason">
           <input v-model="newModelThinking" type="checkbox" />
           thinks
+        </label>
+        <label class="models-think" title="Reads the files itself, with list_files and read_file">
+          <input v-model="newModelTools" type="checkbox" />
+          tools
         </label>
         <button :disabled="!newModelSlug.trim() || newModelTaken" @click="addModel">Add</button>
       </div>
@@ -281,15 +333,24 @@ function save(): void {
       </div>
       <template v-if="localServerUrl && discovered.length > 0">
         <p class="hint">
-          Found on the server. The listing cannot say which of them reason, so tick
-          <em>thinks</em> on one that does: the think switch is only sent for a model marked so.
+          Found on the server. The listing says neither which of them reason nor which can call a
+          tool, so tick <em>thinks</em> or <em>tools</em> on one that can: either switch is only
+          ever sent for a model marked so. Ticking one names it in the list below, where both can
+          still be changed.
         </p>
         <ul class="models-list local discovered">
           <li v-for="name in discovered" :key="name" class="models-row">
             <span class="models-label" :title="name">{{ name }}</span>
             <label class="models-think" title="Offers the thinking checkbox and asks it to reason">
-              <input type="checkbox" @change="flagDiscovered(name)" />
+              <input type="checkbox" @change="flagDiscovered(name, 'thinking')" />
               thinks
+            </label>
+            <label
+              class="models-think"
+              title="Reads the files itself, with list_files and read_file"
+            >
+              <input type="checkbox" @change="flagDiscovered(name, 'tools')" />
+              tools
             </label>
           </li>
         </ul>
@@ -302,9 +363,26 @@ function save(): void {
       <ul v-if="localModelsDraft.length > 0" class="models-list local">
         <li v-for="entry in localModelsDraft" :key="entry.model" class="models-row">
           <span class="models-label" :title="entry.model">{{ entry.label }}</span>
-          <span v-if="entry.thinking" class="models-thinking" title="Has a thinking mode">
+          <label class="models-think" title="Offers the thinking checkbox and asks it to reason">
+            <input
+              type="checkbox"
+              :checked="entry.thinking"
+              @change="
+                setLocalFlag(entry.model, 'thinking', ($event.target as HTMLInputElement).checked)
+              "
+            />
             thinks
-          </span>
+          </label>
+          <label class="models-think" title="Reads the files itself, with list_files and read_file">
+            <input
+              type="checkbox"
+              :checked="entry.tools"
+              @change="
+                setLocalFlag(entry.model, 'tools', ($event.target as HTMLInputElement).checked)
+              "
+            />
+            tools
+          </label>
           <button class="models-remove" @click="removeLocalModel(entry.model)">Remove</button>
         </li>
       </ul>
@@ -330,6 +408,10 @@ function save(): void {
         <label class="models-think" title="Offers the thinking checkbox and asks it to reason">
           <input v-model="newLocalThinking" type="checkbox" />
           thinks
+        </label>
+        <label class="models-think" title="Reads the files itself, with list_files and read_file">
+          <input v-model="newLocalTools" type="checkbox" />
+          tools
         </label>
         <button :disabled="!newLocalModel.trim() || newLocalTaken" @click="addLocalModel">
           Add

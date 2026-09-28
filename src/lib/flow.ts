@@ -3,6 +3,7 @@ import { fileLabel, findTsNodeAtOffset } from './analyzer'
 import {
   declarationAt,
   describeDeclaration,
+  identifierAt,
   isImportPart,
   resolveDefinition,
   type Span,
@@ -81,6 +82,20 @@ export interface FlowNode {
    * deliberately not a step, and the trace's length and shape are unchanged by it.
    */
   via?: FlowTarget
+  /**
+   * A tab this step goes *through* without landing a row in it: the type a construction builds.
+   *
+   * `new ProductId(id)` runs code in whichever tab declares `ProductId` — its constructor, its
+   * accessors, whatever it does to what it is handed — and where that class declares a
+   * constructor the walk gives it a row of its own, so the tab is named by the path. A record with
+   * no constructor of its own declares none, and then nothing in the trace mentions the file at
+   * all, though the value went straight through the type declared in it.
+   *
+   * That matters beyond tidiness: `tracedFiles` builds the **Analyze this trace** chat's scope out
+   * of the trace, and a model asked to judge this path cannot do it without the wrapper's source.
+   * So the step records where the type lives even when no row lands there.
+   */
+  definedIn?: string
 }
 
 export interface FlowTrace {
@@ -336,10 +351,17 @@ function returnsOf(fn: ts.SignatureDeclaration): ts.Expression[] {
 }
 
 /** Later assignments to a `let`/`var`. A `const` can only ever be its initializer. */
-function writesFor(walk: Walk, decl: ts.VariableDeclaration): ts.Expression[] {
-  const list = decl.parent
-  if (!ts.isVariableDeclarationList(list)) return []
-  if (list.flags & ts.NodeFlags.Const) return []
+function writesFor(
+  walk: Walk,
+  decl: ts.VariableDeclaration | ts.PropertyDeclaration | ts.PropertyAssignment,
+): ts.Expression[] {
+  if (ts.isVariableDeclaration(decl)) {
+    const list = decl.parent
+    if (!ts.isVariableDeclarationList(list)) return []
+    if (list.flags & ts.NodeFlags.Const) return []
+  }
+  // A `readonly` field is *not* skipped the way a `const` is: the constructor is exactly where one
+  // is written, which is the whole of how a DTO carries a value.
   if (!ts.isIdentifier(decl.name)) return []
 
   const sf = decl.getSourceFile()
@@ -354,7 +376,13 @@ function writesFor(walk: Walk, decl: ts.VariableDeclaration): ts.Expression[] {
     if (!refSf) continue
     if (refSf === sf && ref.textSpan.start === declared) continue // the declaration itself
 
-    const node = findTsNodeAtOffset(refSf, ref.textSpan.start)
+    const found = findTsNodeAtOffset(refSf, ref.textSpan.start)
+    // A field is written through a receiver — `this.value = v`, `other.value = v` — so the
+    // reference lands on the name inside a property access and the assignment is one level up.
+    const node =
+      found.parent && ts.isPropertyAccessExpression(found.parent) && found.parent.name === found
+        ? found.parent
+        : found
     const parent = node.parent
     if (
       parent &&
@@ -428,6 +456,116 @@ function argumentsFor(walk: Walk, param: ts.ParameterDeclaration): ArgumentSourc
   return sources
 }
 
+/** The member an object literal declares under a name — the property itself rather than its value,
+ *  so expanding it picks up anything later written to it as well as what it was built with. */
+function memberOf(
+  literal: ts.ObjectLiteralExpression,
+  name: string,
+): ts.ObjectLiteralElementLike | null {
+  for (const property of literal.properties) {
+    const key = property.name
+    if (!key || (!ts.isIdentifier(key) && !ts.isStringLiteral(key))) continue
+    if (key.text !== name) continue
+    if (ts.isPropertyAssignment(property) || ts.isShorthandPropertyAssignment(property)) {
+      return property
+    }
+  }
+  return null
+}
+
+/** A member declared by a type rather than by a value: an interface's or a type literal's. Such a
+ *  declaration says what the field is, never where it came from. */
+function isTypeOnlyMember(decl: ts.Node): boolean {
+  return ts.isPropertySignature(decl) || ts.isMethodSignature(decl)
+}
+
+/** The name of a class member or a parameter, where it is a plain one. */
+function memberName(node: ts.NamedDeclaration): string | null {
+  const name = node.name
+  if (!name) return null
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text
+  return null
+}
+
+/** `constructor(public value: string)` — TypeScript's own shorthand for a field a constructor
+ *  fills in, and the shape most DTOs here are written in. */
+function isParameterProperty(param: ts.ParameterDeclaration): boolean {
+  return (ts.getCombinedModifierFlags(param) & ts.ModifierFlags.ParameterPropertyModifier) !== 0
+}
+
+/**
+ * What a construction puts into one of its members — the wrapper rule's other half, and the same
+ * question `java/flow.ts` answers in `constructorIndexFor`.
+ *
+ * Three ways a class fills a field, in the order a reader would check them: a parameter property,
+ * an assignment in the constructor body naming a parameter, and the field's own initializer. The
+ * first two answer with the argument *at this call site*, which is the point — expanding the
+ * member itself would reach every construction of the type, including ones nothing passes to the
+ * read being traced.
+ */
+function constructionSource(
+  cls: ts.ClassLikeDeclaration,
+  call: CallLike,
+  name: string,
+): ts.Expression | null {
+  const args = argumentsOf(call)
+  const constructor = cls.members.find(ts.isConstructorDeclaration)
+
+  if (constructor) {
+    const argumentAt = (index: number): ts.Expression | null =>
+      index < 0 ? null : (args[index] ?? constructor.parameters[index]?.initializer ?? null)
+
+    const asParameter = constructor.parameters.findIndex(
+      (parameter) => isParameterProperty(parameter) && memberName(parameter) === name,
+    )
+    if (asParameter >= 0) return argumentAt(asParameter)
+
+    // `this.value = v` in the body. Where the right-hand side is a parameter the argument at this
+    // call site is the answer; where it is anything else — a constant, a call — that expression is
+    // the same for every instance, so it is the answer itself.
+    for (const written of thisWritesIn(constructor, name)) {
+      if (ts.isIdentifier(written)) {
+        const index = constructor.parameters.findIndex(
+          (parameter) => memberName(parameter) === written.text,
+        )
+        if (index >= 0) return argumentAt(index)
+      }
+      return written
+    }
+  }
+
+  const field = cls.members.find(
+    (member): member is ts.PropertyDeclaration =>
+      ts.isPropertyDeclaration(member) && memberName(member) === name,
+  )
+  return field?.initializer ?? null
+}
+
+/** Every `this.<name> = …` inside a function, the right-hand sides in source order. */
+function thisWritesIn(fn: ts.FunctionLikeDeclaration, name: string): ts.Expression[] {
+  const body = fn.body
+  if (!body) return []
+  const out: ts.Expression[] = []
+  const visit = (node: ts.Node): void => {
+    // A nested function's `this` is not this one's.
+    if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isClassLike(node)) {
+      return
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(node.left) &&
+      node.left.expression.kind === ts.SyntaxKind.ThisKeyword &&
+      node.left.name.text === name
+    ) {
+      out.push(node.right)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(body)
+  return out
+}
+
 /** Narrow a destructured source to the one property the binding element pulls out. */
 function narrowToProperty(expr: ts.Expression, element: ts.BindingElement): ts.Expression {
   const target = unwrap(expr)
@@ -449,19 +587,49 @@ function narrowToProperty(expr: ts.Expression, element: ts.BindingElement): ts.E
 
 /* ------------------------------------------------------------------ the walk */
 
+/**
+ * A member name this branch is still looking for — the wrapper rule, and the same mechanism
+ * `python/flow.ts` and `java/flow.ts` carry under this name.
+ *
+ * A value read out of a wrapper object — `dto.value`, `id.value()` — cannot always be named where
+ * it is read: the member may be declared by an interface, which holds a shape and never a value,
+ * or by a class whose field is only ever written in its constructor. The walk then falls back to
+ * tracing the *object*, and used to end at `new Dto(tainted)` calling it a literal — losing the
+ * value exactly where the wrapper carries it.
+ *
+ * So the member's name rides that fallback: it passes through assignment, argument and return hops
+ * unchanged, and is consumed by the first thing that can answer it — an object literal with such a
+ * property, or a construction of a class with such a member, which expands to the argument that
+ * set it. Where no branch can answer it nothing changes, and a construction with nothing being
+ * sought is still a literal.
+ *
+ * It is deliberately *not* used to scan every construction of a type. Reading `id.value` asks
+ * about one object; expanding the member on its own would reach every `new ProductId(…)` in the
+ * open files, including ones nothing ever passes to the read — a path that cannot happen, which
+ * costs a reviewer more than a missing one. Following the receiver loses no real flow.
+ */
+type Seeking = string | undefined
+
 function traceValue(
   walk: Walk,
   expr: ts.Expression,
   step: FlowStep,
   label: string,
   depth: number,
+  seeking?: Seeking,
 ): number {
   const node = addNode(walk, expr.getSourceFile(), spanOf(expr), step, label)
-  expand(walk, node, expr, depth)
+  expand(walk, node, expr, depth, seeking)
   return node.id
 }
 
-function expand(walk: Walk, node: FlowNode, expression: ts.Expression, depth: number): void {
+function expand(
+  walk: Walk,
+  node: FlowNode,
+  expression: ts.Expression,
+  depth: number,
+  seeking?: Seeking,
+): void {
   if (depth >= MAX_DEPTH || walk.nodes.length >= MAX_NODES) {
     node.origin = 'budget'
     walk.truncated = true
@@ -470,13 +638,25 @@ function expand(walk: Walk, node: FlowNode, expression: ts.Expression, depth: nu
 
   const expr = unwrap(expression)
 
+  // The wrapper, built here: narrow to the one property being sought rather than reporting every
+  // property of the object as a contributor.
+  if (seeking && ts.isObjectLiteralExpression(expr)) {
+    const member = memberOf(expr, seeking)
+    if (member) {
+      // Through `expandDeclaration`, so the member is read the same way it would be if it had
+      // been asked about directly: what it was built with, and anything written to it since.
+      expandDeclaration(walk, node, member, seeking, depth)
+      return
+    }
+  }
+
   if (isConstant(expr)) {
     node.origin = 'literal'
     return
   }
 
   if (isCallLike(expr)) {
-    expandCall(walk, node, expr, depth)
+    expandCall(walk, node, expr, depth, seeking)
     return
   }
 
@@ -494,10 +674,21 @@ function expand(walk: Walk, node: FlowNode, expression: ts.Expression, depth: nu
       return
     }
 
-    // The property had no declaration of its own, so what came back describes the object, not this
-    // expression — `req` rather than `req.params.id`. That is a real hop: give it its own node
-    // instead of collapsing, or the chain appears to dead-end at the property access.
-    if (hit.viaObject && ts.isPropertyAccessExpression(expr)) {
+    // Two ways a property read has to fall back to the object it was read from, and both carry
+    // the member's name down with them — see `Seeking`.
+    //
+    // `viaObject`: the property had no declaration at all, so what came back describes the object
+    // rather than this expression — `req` rather than `req.params.id`. That is a real hop: it
+    // gets its own node instead of being collapsed, or the chain appears to dead-end here.
+    //
+    // A **type-only member** is the wrapper case: `interface Dto { value: string }` declares a
+    // shape, never a value, so the declaration answers what the field *is* and says nothing about
+    // where it came from. Following the receiver does — and it is the receiver, not the type,
+    // because every object of that shape is not this one.
+    if (
+      ts.isPropertyAccessExpression(expr) &&
+      (hit.viaObject || isTypeOnlyMember(hit.declaration))
+    ) {
       node.children.push(
         traceValue(
           walk,
@@ -505,12 +696,13 @@ function expand(walk: Walk, node: FlowNode, expression: ts.Expression, depth: nu
           'property',
           `\`.${expr.name.text}\` read from`,
           depth + 1,
+          expr.name.text,
         ),
       )
       return
     }
 
-    expandDeclaration(walk, node, hit.declaration, hit.name, depth)
+    expandDeclaration(walk, node, hit.declaration, hit.name, depth, seeking)
     return
   }
 
@@ -531,7 +723,13 @@ function expand(walk: Walk, node: FlowNode, expression: ts.Expression, depth: nu
   node.origin = 'external'
 }
 
-function expandCall(walk: Walk, node: FlowNode, call: CallLike, depth: number): void {
+function expandCall(
+  walk: Walk,
+  node: FlowNode,
+  call: CallLike,
+  depth: number,
+  seeking?: Seeking,
+): void {
   const sf = call.getSourceFile()
   const callee = calleeOf(call)
   const target = ts.isPropertyAccessExpression(callee) ? callee.name : callee
@@ -556,9 +754,53 @@ function expandCall(walk: Walk, node: FlowNode, call: CallLike, depth: number): 
     return
   }
 
-  // `new Box(...)` builds the object right here; its fields are traced by asking about them.
+  // `new Box(...)` builds the object here — but what is *in* it came from the arguments, and a
+  // wrapper is its contents. Seeking one member answers precisely; with nothing sought, or
+  // nothing that answers it, everything fed in is kept, which is the same over-approximation an
+  // opaque call makes.
   if (ts.isClassLike(hit.declaration)) {
-    node.origin = 'literal'
+    // The tab the type is declared in, whether or not anything below lands a row there.
+    const declaredIn = fileLabel(hit.declaration.getSourceFile().fileName)
+    if (declaredIn !== node.file) node.definedIn = declaredIn
+
+    const precise = seeking ? constructionSource(hit.declaration, call, seeking) : null
+    const args = precise
+      ? [precise]
+      : argumentsOf(call).filter((argument) => !isConstant(unwrap(argument)))
+
+    // Nothing went in that is worth following: the object really is made right here.
+    if (args.length === 0) {
+      node.origin = 'literal'
+      return
+    }
+
+    // The constructor the value passes through, where the class declares one: what a wrapper does
+    // to what it is handed — validate it, normalise it, reject it — is the reviewer's question,
+    // and a trace that steps over it reads as though the value arrived untouched.
+    const constructor = hit.declaration.members.find(ts.isConstructorDeclaration)
+    const host = constructor
+      ? addNode(
+          walk,
+          constructor.getSourceFile(),
+          describeDeclaration(constructor, constructor.getSourceFile(), hit.name).span,
+          'declaration',
+          `constructed by \`${hit.name}\``,
+        )
+      : node
+    if (constructor) node.children.push(host.id)
+
+    for (const argument of args) {
+      host.children.push(
+        traceValue(
+          walk,
+          argument,
+          'argument',
+          `passed to \`${hit.name}\``,
+          depth + 1,
+          precise ? undefined : seeking,
+        ),
+      )
+    }
     return
   }
 
@@ -583,8 +825,12 @@ function expandCall(walk: Walk, node: FlowNode, call: CallLike, depth: number): 
     node.origin = 'external'
     return
   }
+  // The name rides through a return: a factory that builds the wrapper is one hop on the way to
+  // the argument that filled it.
   for (const value of returns) {
-    node.children.push(traceValue(walk, value, 'return', `returned by \`${hit.name}\``, depth + 1))
+    node.children.push(
+      traceValue(walk, value, 'return', `returned by \`${hit.name}\``, depth + 1, seeking),
+    )
   }
 }
 
@@ -645,6 +891,7 @@ function expandDeclaration(
   decl: ts.Node,
   name: string,
   depth: number,
+  seeking?: Seeking,
 ): void {
   const key = keyOf(decl)
   const seen = walk.expanded.get(key)
@@ -661,7 +908,7 @@ function expandDeclaration(
   }
 
   if (ts.isParameter(decl)) {
-    expandParameter(walk, node, decl, name, depth)
+    expandParameter(walk, node, decl, name, depth, seeking)
     return
   }
 
@@ -671,16 +918,32 @@ function expandDeclaration(
   }
 
   if (ts.isVariableDeclaration(decl)) {
+    // The name being sought rides both hops: the value is the same value, wherever it was put.
     if (decl.initializer) {
       node.children.push(
-        traceValue(walk, decl.initializer, 'initializer', 'initialised from', depth + 1),
+        traceValue(walk, decl.initializer, 'initializer', 'initialised from', depth + 1, seeking),
       )
     }
     for (const write of writesFor(walk, decl)) {
-      node.children.push(traceValue(walk, write, 'assignment', `reassigned`, depth + 1))
+      node.children.push(traceValue(walk, write, 'assignment', `reassigned`, depth + 1, seeking))
     }
     // Declared but never given a value anywhere open.
     if (node.children.length === 0) terminateAtDeclaration(walk, node, decl, name, 'external')
+    return
+  }
+
+  // A getter is a member with a body: what it returns is where the value comes from. Java gives a
+  // hand-written accessor the same treatment, and without it `dto.value` ends at the word `value`
+  // and calls it defined there.
+  if (ts.isGetAccessorDeclaration(decl)) {
+    const returns = returnsOf(decl)
+    if (returns.length === 0) {
+      terminateAtDeclaration(walk, node, decl, name, 'external')
+      return
+    }
+    for (const value of returns) {
+      node.children.push(traceValue(walk, value, 'return', `returned by \`${name}\``, depth + 1))
+    }
     return
   }
 
@@ -693,10 +956,26 @@ function expandDeclaration(
     const initializer = ts.isShorthandPropertyAssignment(decl) ? decl.name : decl.initializer
     if (initializer) {
       node.children.push(
-        traceValue(walk, initializer, 'property', `property \`${name}\``, depth + 1),
+        traceValue(walk, initializer, 'property', `property \`${name}\``, depth + 1, seeking),
       )
-      return
     }
+    // What a member holds is not only what it was declared with. A DTO's field is written in its
+    // constructor, and any object's member can be written after it is built — `d.value = raw` —
+    // so both are followed. Found through references, so a write from another method, or another
+    // tab, is found the same way one two lines down is.
+    if (ts.isPropertyDeclaration(decl) || ts.isPropertyAssignment(decl)) {
+      for (const write of writesFor(walk, decl)) {
+        node.children.push(traceValue(walk, write, 'assignment', `assigned`, depth + 1, seeking))
+      }
+    }
+    if (node.children.length === 0) terminateAtDeclaration(walk, node, decl, name, 'external')
+    return
+  }
+
+  // A member declared by an interface or a type literal holds a shape, never a value. Nothing is
+  // defined here, so this is external rather than a literal — the receiver is what knows, and
+  // `expand` follows it before ever arriving here.
+  if (isTypeOnlyMember(decl)) {
     terminateAtDeclaration(walk, node, decl, name, 'external')
     return
   }
@@ -711,6 +990,7 @@ function expandParameter(
   param: ts.ParameterDeclaration,
   name: string,
   depth: number,
+  seeking?: Seeking,
 ): void {
   const sources = argumentsFor(walk, param)
   if (sources.length === 0) {
@@ -728,9 +1008,18 @@ function expandParameter(
     node.via = { span: view.span, file: fileLabel(sf.fileName) }
   }
 
+  // The name rides out to the call sites with the value: a wrapper handed to a function is read
+  // inside it, and what filled it is at whichever call site built it.
   for (const source of sources) {
     node.children.push(
-      traceValue(walk, source.expr, 'argument', `passed to \`${source.callee}\``, depth + 1),
+      traceValue(
+        walk,
+        source.expr,
+        'argument',
+        `passed to \`${source.callee}\``,
+        depth + 1,
+        seeking,
+      ),
     )
   }
 }
@@ -816,7 +1105,30 @@ export function traceOrigins(
   const program = service.getProgram()
   const definition = resolveDefinition(service, sf, fileName, offset)
   const hit = declarationAt(service, sf, fileName, offset)
-  if (!program || !definition || !hit) return null
+  if (!program || !hit) return null
+
+  /**
+   * Tracing *at* a member read — `dto.value` with the caret on `value` — is the other place the
+   * wrapper rule has to be seeded, and missing it breaks the common case: the root expands the
+   * declaration directly and never passes through `expand`, where the seeding lives. Java has the
+   * same rule for the same reason.
+   *
+   * Rooting on the read rather than on the declaration also gives the trace a span in the file on
+   * screen. A member declared in another tab has no range here and nothing local stands for it —
+   * an import brings in `Dto`, not `Dto.value` — so `resolveDefinition` answers null and the
+   * trace used to be refused outright. The read is right here.
+   */
+  const identifier = identifierAt(sf, offset)
+  const read =
+    identifier &&
+    identifier.parent &&
+    ts.isPropertyAccessExpression(identifier.parent) &&
+    identifier.parent.name === identifier
+      ? identifier.parent
+      : null
+  const followReceiver = read !== null && (hit.viaObject || isTypeOnlyMember(hit.declaration))
+  const rootOnRead = read !== null && (followReceiver || !definition)
+  if (!definition && !rootOnRead) return null
 
   const walk: Walk = {
     service,
@@ -828,8 +1140,11 @@ export function traceOrigins(
 
   // The root is always in the file being looked at: `resolveDefinition` reports an imported name
   // through its import statement, and the expansion below crosses it.
-  const root = addNode(walk, sf, definition.primary, null, definition.label)
-  expandDeclaration(walk, root, hit.declaration, hit.name, 0)
+  const root = rootOnRead
+    ? addNode(walk, sf, spanOf(read), null, `property \`${hit.name}\``)
+    : addNode(walk, sf, definition!.primary, null, definition!.label)
+  if (followReceiver) expand(walk, root, read, 0)
+  else expandDeclaration(walk, root, hit.declaration, hit.name, 0)
 
   return {
     nodes: walk.nodes,

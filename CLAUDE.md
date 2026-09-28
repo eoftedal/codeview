@@ -132,7 +132,8 @@ to stop at `Wrapper(ident)` calling it a literal, losing the taint exactly where
 it. The attribute's _name_ now rides that fallback branch: it passes through argument, assignment
 and return hops unchanged, and is **consumed by the first construction of a class that has such an
 attribute**, which then expands to the constructor argument that set it. Where no branch can answer
-it, nothing changes — a construction with nothing being sought is still a literal. It is seeded in
+it, the construction keeps its arguments instead (below) — only one with nothing fed into it is a
+literal. It is seeded in
 two places, and missing either one breaks the common case: `expand`'s `viaObject` branch, and
 `tracePythonOrigins` itself, because tracing _at_ `obj.value` roots on `obj`'s declaration and never
 passes through `expand` at all. Java needs none of this — it writes the receiver's type down — but
@@ -232,12 +233,113 @@ and is cleared whenever a file's text changes. Do not wire it to cursor movement
 fallback; use it for any new offset→declaration lookup rather than calling
 `getDefinitionAtPosition` directly.
 
+**A wrapper object is followed through in TypeScript too, and `Seeking` is the same mechanism it is
+in Python and Java.** A value read out of a DTO cannot always be named where it is read: an
+interface member holds a shape and never a value, and a class field's value arrives through its
+constructor. The walk therefore falls back to the **receiver** and carries the member's name down
+with it — riding assignment, argument and return hops unchanged, consumed by the first thing that
+can answer it (an object literal with that property, or a construction of a class with that member,
+which expands to the argument that set it through `constructionSource`, TypeScript's
+`constructorIndexFor`: parameter property, then `this.x = p` in the constructor body, then the
+field's own initializer). Where no branch can answer it nothing changes, and **a construction with
+nothing fed into it is still a literal**. It is seeded in three places and missing any one breaks
+a common case: `expand`'s `viaObject` branch, its new type-only-member branch, and `traceOrigins`
+itself — tracing _at_ `w.value` expands the declaration directly and never passes through `expand`
+at all, which is the same trap `tracePythonOrigins` documents.
+
+**A construction is not a terminal, and its constructor gets a row — in all three languages.** A
+wrapper _is_ its contents, so `new ProductId(id)` says where the object was made and nothing about
+where what is inside it came from: with a member being sought the argument that fills it answers
+precisely, and otherwise every non-constant argument is kept, which is the same over-approximation
+`expandOpaqueCall` makes. Only a construction with nothing fed into it stays a literal. Above those
+arguments sits the **constructor the value passes through**, where the class declares one —
+`constructorSite` in Java (compact or ordinary, picked by arity then first, the same guess
+`lookupCall` makes for an overload), `initOf` in Python, `members.find(isConstructorDeclaration)`
+in TypeScript — because a record's compact canonical constructor is exactly where
+`UUID.fromString(value)` validates or throws, and a trace that steps over it reads as though the
+value arrived untouched. A class that declares none has nothing to show and gets no row, and the
+row is only ever created when something will hang under it: a node nothing references would still
+be counted in the pane's step count. **`FlowNode.definedIn` carries the tab the type is declared in
+regardless**, because `tracedFiles` builds the _Analyze this trace_ scope out of the trace and a
+wrapper with no constructor of its own leaves no row in its own file — a model asked whether that
+path is validated cannot answer without the source. It is set on the construction's own row in all
+three languages, and `tracedFiles` takes it beside `file`.
+
+**`Analyze with agents` is `askAbout` for a run, and the two differ in one decided place.**
+`useAgents.runAbout(task, names)` clears the transcript, sets the task and runs, narrowing the
+run's single snapshot to those files in the order the trace named them. Where the chat hands a
+tool-calling model the whole buffer, a run is **always** narrowed: it has one snapshot and several
+readers, each possibly on a model of its own and only some of them able to read a file for
+themselves, so the one choice serving all of them is the question's own files. The scope is stored
+**with the task it was given for** and dropped in `run` when the task no longer matches — a reader
+who rewrites the box is asking something else, and answering it over the old selection would be a
+narrowing nobody chose — and `clear` drops it outright. `describeTraceScope` in `traceText.ts` is
+the one home of the sentence both panes show, because the narrowing was chosen a tab away from
+where the answer lands.
+
+**Rooting a member read on the expression is what makes a DTO in another tab traceable at all.**
+`resolveDefinition` answers null when the declaration is elsewhere and nothing local stands for it
+— an import brings in `Dto`, not `Dto.value` — and `traceOrigins` used to refuse the trace outright
+on that null. The read itself is in the file on screen, so it is the root, and Java has the same
+rule for the same reason.
+
+**Where the member _can_ be named, the declaration is expanded rather than the receiver followed,
+and that is the opposite of Java's choice** — deliberately. A TypeScript field is written by its
+constructor _and_ by any setter, and `writesFor` finds both through references; following the
+receiver instead would answer only the construction that made this object and silently drop the
+setter, which is the one failure this tool refuses. The cost is the may-analysis's usual one — every
+construction of the class is reported — and the README states it. `writesFor` therefore takes a
+property declaration and an object-literal property as well as a variable, looking through the
+property access a field is written through (`this.value = v` puts the reference on the name inside
+the access, not on the assignment's left), and a `readonly` field is **not** skipped the way a
+`const` is: the constructor is exactly where one is written. `declarationFor` gained accessors for
+the same reason — without it a getter's declaration stays the bare name token, which the trace then
+calls a literal.
+
 **Trace node granularity.** `expand` deliberately _collapses_ the identifier→declaration hop, or
 every step in a chain would double. Two exceptions, both in `flow.ts`: `declarationAt`'s `viaObject`
 flag means the property fallback answered about a different expression (`req`, not `req.params.id`),
 so that hop gets its own row; and `terminateAtDeclaration` gives the _last_ row of a branch the
 declaration's span, so a trace starts and ends at a declaration. Changing either changes the shape
 every `tests/flow.test.ts` fixture asserts.
+
+**A copied trace is a different artefact from the pane, and `traceText.ts` is where they part.**
+The pane is read beside the editor; the text is read in a chat, by a model, with no editor and no
+tab strip — so **every step names its own file**, including the steps in the tab on screen, which
+`TraceRow.vue` deliberately leaves bare because the buffer beside it already says which file that
+is. It is a **markdown nested list** rather than plain indentation, and that is for whoever reads it
+next: a model reads a list as the tree it is, and wherever the text is re-rendered as markdown — a
+model quoting it back, a report built from it — indentation alone would be folded into one
+paragraph by `markdown.ts`'s paragraph rule. (Both panes show the reader's _own_ text `pre-wrap`,
+so a pasted trace looks right there either way; it is the second reader that the list is for.) The citation shape is `DEFAULT_ROLE`'s own —
+`name (file line N)` — so a pasted trace reads like the answer the brief is asking for rather than
+as a second notation. Its origin wording is its own table, not `TraceRow.vue`'s two-word
+`ORIGIN_TEXT`, which is written for a column beside the row that explains it. The may-analysis
+caveat is part of the text and must stay: a trace pasted without it reads as a claim about what the
+code _does_, and that is precisely how a model turns a path the code never takes into a finding.
+What is copied is the whole trace, whatever is folded away — collapsing is how a large one is read,
+not a statement about which steps matter — and the feedback is the button's own label, not the
+app's notice line, because that line is up beside the share link that writes it.
+
+**`Analyze this trace` is the same text with the scope attached, and the scope is the whole point.**
+`useChat.askAbout(question, names)` opens a _new_ conversation over just those files — a session
+carries the code it was built with, so a scope cannot be applied to one already running — and
+`tracedFiles` is exactly the set `traceToText` cites, in first-mention order, because the budget is
+spent in order and what a tight one should clip is the far end of the path rather than the value
+the reader asked about. `App.vue` passes an **empty** scope for a model that reads the files
+itself: there is nothing to save by choosing for it, and the index of every tab is what lets it
+follow the trace wherever it leads. Three things follow the scope rather than the buffer once it is
+set — the files the session is built from, `stale` (editing a file the model was never shown must
+not cost the conversation) and the `clipped` line, which now states the narrowing whether or not
+anything was clipped, since the reader chose it a tab away and an answer over two files reads
+exactly like one over twelve. The **model** is told as well, through `CodeContext.partial`: the
+brief asks it to say when an answer depends on code it cannot see, and a listing whose first
+sentence claims to be every open file makes that impossible to judge — a model that believes it
+has the whole editor explains a gap by inventing something rather than by naming the file it
+would need. `newChat` drops it, which is what makes "New chat" mean the whole
+buffer again. The question itself is bare — `ANALYZE_TASK` — because what _analyze_ means belongs
+to the brief, which is the reader's; `tests/traceText.test.ts` refuses taint vocabulary in it for
+the same reason `tests/agents.test.ts` refuses it in the orchestrator's.
 
 **`noLib` is load-bearing twice over.** It keeps the bundle small, and it makes the trace's terminal
 condition principled: nothing outside the open files resolves, so a name with no definition _is_ an
@@ -509,7 +611,12 @@ nothing to split and nothing to name. `tests/chat.test.ts` holds both halves.
 
 The thinking prefill comes back in the answer, so `markdown.ts` parses `<think>` as a block kind: empty means protocol and is
 dropped, non-empty is folded into a `<details>`, and an unterminated one is thinking-in-progress. `useChat` lives in `App.vue`, not in `ChatPane.vue`,
-because the pane unmounts on every tab switch and a conversation must not. The system prompt (role,
+because the pane unmounts on every tab switch and a conversation must not. **That unmount is also
+why both panes scroll to their end `onMounted`** and not only while streaming: a pane coming back
+has no scroll position to restore and would open on the first message. The trace pane's analyze
+buttons are what made it obvious — they file a question that is a whole trace _before_ the pane
+exists, so the watcher that follows a growing conversation never sees it arrive and the reader
+lands on the top of it with the answer forming out of sight. The system prompt (role,
 the source/sink definitions, then **every open file**, line-numbered) is built once per session, so
 the code it carries is a snapshot — edits raise a `stale` hint rather than silently rebuilding the
 session, which would discard the conversation. The model is given every open file for the same reason the trace
@@ -684,14 +791,95 @@ brief and nothing else, and `buildCodeMessage({files, maxCodeChars})` returns th
 files, then `CODE_ACK` — ahead of the first real question. Instructions and data are different kinds
 of thing, and a model told which is which is harder to talk out of its brief by something written in
 a comment; the code message says so in its first sentence. **It is not a `tool` message, and that
-was checked rather than assumed**: a tool message answers a tool call and there is none, Chrome's
-Prompt API has no tool role at all (`initialPrompts` is system/user/assistant), WebLLM's
-`ChatCompletionToolMessageParam` demands a `tool_call_id` while MLC drops an assistant turn's
-`tool_calls` when rendering — so the call could never exist — and `apply_chat_template` runs the
-model's own Jinja, which Gemma's has no tool branch in. **`CODE_ACK` is load-bearing, not polite**:
+was checked rather than assumed**: a tool message answers a tool call, and this one answers
+nothing — it is handed over unasked, so there is no `tool_call_id` for it to carry. That holds
+even where a tool role exists, which on two of the ONNX templates it now does; where it does not
+(Chrome's `initialPrompts` is system/user/assistant, and MLC drops an assistant turn's
+`tool_calls` when rendering) it could not have been one anyway. **`CODE_ACK` is load-bearing, not polite**:
 Gemma's template raises on two user turns in a row, so the seeded history has to stay alternating.
 The agents' orchestrator calls `chat(system)` with no second argument, which is now the whole
 mechanism by which it never sees a file.
+
+**A model that can call a tool is given the files to _read_ instead of the files, and that is one
+decision made in one place.** `usesTools(choice)` — `ModelChoice.supportsTools` _and_ a provider
+that can carry a call — picks between `buildCodeMessage` (the listing, as before) and
+`buildIndexMessage` (names, languages and line counts, nothing else) for the same opening turn,
+and hands `chat` a `ToolBox` in the second case. Both panes ask it at the one place they build
+that turn, so the two cannot drift; the brief is untouched either way, which is deliberate —
+it is the reader's to rewrite, and a rewrite must not be able to leave a model holding an index
+it does not know what to do with, which is also why the instruction to read rides the index. The
+flag is checked **against the provider** as well as read, because a mis-flagged entry that fell
+through would be strictly worse off than a clipped listing and silent about it;
+`tests/chat.test.ts` refuses the flag on a provider that cannot, and this is the belt.
+`maxCodeChars` stops being a clip over everything and becomes the ceiling on **one `read_file`**,
+which is the whole gain, so `clipped` is null on that path — there is nothing withheld to warn
+about.
+
+`src/lib/tools.ts` is pure and is both tools: `list_files` and `read_file(file, start?, end?)`.
+Its rules were each a wrong answer first. **A schema rides every request** — and a tool loop makes
+several per question — so the descriptions are one short line each and `tests/tools.test.ts` caps
+them. A range the model wrote loosely (0, backwards, past the end) is **clamped rather than
+refused**, and `"start": "12"` is read as a number, because a round spent on an error message is a
+round not spent reading. A cut lands **on a line boundary** and says `start=N` for the rest, while
+a range the model _asked_ for is not a cut and is not nudged — telling it to read on would have it
+chase the rest of a file it deliberately sampled. A basename resolves to `lib/db.ts` (that is how
+a model names a file in prose) but **only where it is unambiguous**, since guessing between two
+would put the wrong code in front of a review. Nothing throws: a bad call is answered with what is
+open, which the model can act on, where an exception would end the answer.
+
+**Two providers can carry a call, and they are not the same mechanism.** On the OpenAI-compatible
+side (`openaiCompatible.ts`) it is the API's own: one `fold` for the whole question rather than one
+per request, an assistant turn carrying `tool_calls` and its `tool` answers pushed **together**
+with nothing awaited between them (a history holding an ask with no answer is refused by the next
+request, and an abort landing in that gap would leave the conversation unusable), and a round that
+stopped at the token ceiling is not run — its arguments may have stopped half-written. At
+`MAX_TOOL_ROUNDS` the tools are still **declared** and `tool_choice: 'none'` takes the option away,
+because this API rejects a history of calls with nothing to declare them.
+
+On the ONNX side there is no API at all: there is a chat template, and the model writes its call
+into the **text**. `providers/onnxTools.ts` is therefore a **dialect** per family, each read off the
+publisher's own files rather than guessed — Qwen's `<tool_call>` with JSON inside, which its
+template prints the instructions for, and Gemma 4's `<|tool_call>call:name{…}`, whose tokenizer
+config carries a `response_schema` naming the regexes and an argument syntax that is **not JSON**
+(`key:value`, strings wrapped in its `escape_token` `<|"|>`, which is why they are scanned rather
+than regexed: a string may hold any comma or brace it likes). A model whose template has no `tools`
+variable (GLM-Edge) has **no dialect, is never offered any, and is never flagged** — and
+`tests/onnxTools.test.ts` pins the catalogue and the parser to each other in both directions.
+Gemma's markers are special tokens where Qwen's are merely added ones, so
+`keepsSpecialTokens` decides whether the worker stops skipping them — which also lets the protocol
+tokens through, and `foldChannels` is what drops those. The filter is a **marker machine over the
+stream**, not a search per chunk, since nothing lines a token boundary up with a marker and a
+missed one puts raw call syntax in front of the reader; a call the model never closed is dropped
+whole. The worker parses and reports the calls on `done`, and the **provider runs them**, because
+the files are on its side of the worker boundary.
+
+**WebLLM is the one that cannot, and that is a fact about the library**:
+`chat.completions.create` throws `UnsupportedModelIdError` for any model outside
+`functionCallingModelIds` — five Hermes builds, none in this catalogue — so sending tools to a Qwen
+or Gemma build there fails the question outright rather than degrading. Chrome's Prompt API has no
+tool role. Both are handed the listing, unchanged.
+
+**Every call is written into the answer as its own `<tool>` row** — `markdown.ts`'s third
+model-output block, beside `think` — and the difference between the two is the point. A thought is
+folded away; a tool row is **shown**, because what a model was allowed to read is the first thing
+worth checking about an answer it built by reading, and one that quietly read half a file must not
+look like one that read the file it cites. Both are stripped by `withoutThoughts`, which is
+therefore about the _working-out_ rather than about thinking: the model already holds the file
+contents in its own history, and relaying `read_file routes.ts lines 1-40` to the next agent spends
+its window on a line it cannot check. The rows are emitted as **siblings** of a thought, never
+inside one: `fold.end()` closes any open `<think>` first, and `parseMarkdown` tries `TOOL` **before**
+`THINK` — taken the other way round, a `<think>` would run from the first open marker past a row to
+the next close and swallow it. The ONNX path hides the raw call syntax the model wrote and the
+provider writes the rows itself, since that syntax is the model's own protocol rather than anything
+a reader wants.
+
+A reader-added model carries the flag too (`tools` on both `CustomOpenRouterModel` and
+`LocalServerModel`, a checkbox beside `thinks` in the settings tab), and for the same reason
+`thinking` is theirs to set: OpenRouter's `/models` reports `tools` in `supported_parameters` but a
+local server reports nothing of the kind, and a runtime will happily accept the field for a model
+whose template has nowhere to put it. Both lists' saved rows now **toggle** in place rather than
+showing a badge, through a setter that rewrites the draft immutably — `v-model` on a row would
+write straight through to the stored object and break the drafts-under-one-Save rule.
 
 **Pure vs. impure.** `src/lib/{agents,analyzer,astTree,definitions,files,flow,share}.ts` are pure and
 unit-tested over fixture strings — as are `normalizeBaseUrl` and `toModelChoice`

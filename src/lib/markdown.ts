@@ -39,6 +39,7 @@ export type Block =
   | { kind: 'paragraph'; spans: Inline[] }
   | Table
   | { kind: 'think'; text: string }
+  | { kind: 'tool'; text: string }
   | { kind: 'heading'; level: number; spans: Inline[] }
   | { kind: 'code'; language: string | null; text: string }
   | { kind: 'list'; ordered: boolean; start: number; items: ListItem[] }
@@ -51,6 +52,20 @@ export type Block =
  * has no business on screen at all. Anything real is kept, but folded away.
  */
 const THINK = /<think>([\s\S]*?)(?:<\/think>|$)/
+
+/**
+ * A file the model went and read for itself — one row per call, written into the answer by
+ * whichever provider ran it.
+ *
+ * Unlike a thought this is **shown**, not folded: what a model was allowed to read is the first
+ * thing a reader checks about an answer built from tools, and an answer that quietly read half
+ * the buffer should not look like one that read the file it cites. It is still stripped from the
+ * history and from an agent's relay — it is what the model *did*, not what it said.
+ *
+ * Unterminated is complete: a row is written in one piece, and treating a half-arrived one as
+ * text would print the markup.
+ */
+const TOOL = /<tool>([\s\S]*?)(?:<\/tool>|$)/
 
 const FENCE = /^\s{0,3}(`{3,}|~{3,})\s*([\w+#-]*)\s*$/
 const HEADING = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/
@@ -213,6 +228,20 @@ function isBlockStart(lines: readonly string[], index: number): boolean {
 }
 
 export function parseMarkdown(source: string): Block[] {
+  // Before `think`, and the order is not arbitrary: a tool row is emitted between thoughts, so a
+  // `<think>` taken first would swallow the row that closed it.
+  const tool = TOOL.exec(source)
+  if (tool) {
+    const before = source.slice(0, tool.index)
+    const after = source.slice(tool.index + tool[0].length)
+    const called = tool[1]!.trim()
+    return [
+      ...parseMarkdown(before),
+      ...(called ? [{ kind: 'tool' as const, text: called }] : []),
+      ...parseMarkdown(after),
+    ]
+  }
+
   const think = THINK.exec(source)
   if (think) {
     const before = source.slice(0, think.index)

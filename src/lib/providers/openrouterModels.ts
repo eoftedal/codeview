@@ -26,6 +26,11 @@ export interface CustomOpenRouterModel {
   /** A reasoning model: offers the thinking checkbox and sends `reasoning.enabled`, the same as a
    *  shipped entry flagged this way. */
   thinking: boolean
+  /** The slug takes `tools`: it is given an index of the open files and reads them itself, rather
+   *  than being handed the listing. Like `thinking`, it is read off the slug's
+   *  `supported_parameters` on OpenRouter's own `/models` page — a model without it would be left
+   *  holding an index it cannot open. */
+  tools: boolean
 }
 
 function parse(raw: string | null): CustomOpenRouterModel[] {
@@ -40,7 +45,12 @@ function parse(raw: string | null): CustomOpenRouterModel[] {
       if (!model || seen.has(model)) continue
       seen.add(model)
       const label = typeof item?.label === 'string' ? item.label.trim() : ''
-      entries.push({ model, label: label || model, thinking: item?.thinking === true })
+      entries.push({
+        model,
+        label: label || model,
+        thinking: item?.thinking === true,
+        tools: item?.tools === true,
+      })
     }
     return entries
   } catch {
@@ -69,6 +79,7 @@ export function toModelChoice(entry: CustomOpenRouterModel): ModelChoice {
     maxCodeChars: 60_000,
     model: entry.model,
     thinking: entry.thinking || undefined,
+    supportsTools: entry.tools || undefined,
     note: 'Hosted by OpenRouter — code leaves this machine for this option only. Needs an API key.',
   }
 }

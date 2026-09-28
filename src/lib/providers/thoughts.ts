@@ -102,15 +102,24 @@ export function foldReasoning(): {
 }
 
 const THOUGHT = /<think>[\s\S]*?(?:<\/think>|$)/g
+/** A tool row — see `markdown.ts`. Shown to the reader, but no part of the answer. */
+const TOOL = /<tool>[\s\S]*?(?:<\/tool>|$)/g
 
 /**
- * The answer without the thinking that preceded it, for the history a follow-up question is asked
- * against. Gemma's own chat template drops a past turn's channels the same way, and the room it
- * saves in a small context is better spent on the code.
+ * The answer without the working-out around it, for the history a follow-up question is asked
+ * against and for the report an agent hands on.
  *
- * A block left unterminated — a stopped answer, thinking still in progress — takes the rest with
- * it: there was no answer yet to keep.
+ * Two kinds of working-out, and they are shown differently but kept out of the same places. A
+ * **thought** is folded away on screen; Gemma's own chat template drops a past turn's channels
+ * the same way, and the room it saves in a small context is better spent on the code. A **tool
+ * row** is shown — what the model read is worth seeing — but it is what the model *did*, not what
+ * it said: the model already has the file contents in its own history, and relaying
+ * `read_file routes.ts lines 1-40` to the next agent spends its window on a line that tells it
+ * nothing it can check.
+ *
+ * A thought left unterminated — a stopped answer, thinking still in progress — takes the rest
+ * with it: there was no answer yet to keep.
  */
 export function withoutThoughts(answer: string): string {
-  return answer.replace(THOUGHT, '').trim()
+  return answer.replace(THOUGHT, '').replace(TOOL, '').trim()
 }

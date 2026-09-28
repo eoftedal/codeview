@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, provide, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, provide, ref, watch } from 'vue'
 import TraceRow from './TraceRow.vue'
 import { traceContextKey } from './traceContext'
 import { isExternalOrigin, type FlowTarget, type FlowTrace } from '../lib/flow'
+import { traceToText } from '../lib/traceText'
 
 const props = defineProps<{
   trace: FlowTrace | null
@@ -20,10 +21,48 @@ const emit = defineEmits<{
   run: []
   select: [FlowTarget]
   hover: [FlowTarget | null]
+  /** Hand this trace to the chat: the question and the files it cites. */
+  analyze: []
+  /** The same, to a line of agents instead of one conversation. */
+  analyzeWithAgents: []
 }>()
 
 const expanded = ref<Set<number>>(new Set())
 const selectedId = ref<number | null>(null)
+
+/**
+ * The copy button's own feedback, where the reader's finger already is — rather than the app's
+ * notice line at the top of the window, which is where the share link says so because a share
+ * link is copied from up there. `blocked` is the embedded case: a page in an iframe without
+ * `clipboard-write` is refused, and saying nothing would read as a button that does nothing.
+ */
+const copied = ref<'done' | 'blocked' | null>(null)
+let copiedTimer: ReturnType<typeof setTimeout> | undefined
+
+function flash(state: 'done' | 'blocked'): void {
+  copied.value = state
+  clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => (copied.value = null), 2000)
+}
+
+/**
+ * The trace as text, for pasting into the chat or an agent's task — which is what it is for, and
+ * why every step names its own file and line even though the pane on screen does not.
+ *
+ * The *whole* trace, whatever is folded away: collapsing is how a reader reads a large one, not a
+ * statement about which steps matter.
+ */
+async function copy(): Promise<void> {
+  if (!props.trace) return
+  try {
+    await navigator.clipboard.writeText(traceToText(props.trace))
+    flash('done')
+  } catch {
+    flash('blocked')
+  }
+}
+
+onBeforeUnmount(() => clearTimeout(copiedTimer))
 
 // Traces are small and the whole point is seeing the path, so open everything by default.
 watch(
@@ -31,6 +70,8 @@ watch(
   (trace) => {
     expanded.value = new Set(trace ? trace.nodes.map((node) => node.id) : [])
     selectedId.value = null
+    // A new trace is not the one that was copied.
+    copied.value = null
   },
   { immediate: true },
 )
@@ -154,6 +195,33 @@ provide(traceContextKey, {
       </p>
     </div>
 
+    <!-- Below the trace rather than beside the Trace button, because these two act on what is on
+         screen: you read the path first and then do something with it. -->
+    <div v-if="trace" class="actions">
+      <button
+        class="copy"
+        :class="{ done: copied === 'done', blocked: copied === 'blocked' }"
+        title="Copy the whole trace as text — every step with its file and line — to paste into a chat or an agent’s task"
+        @click="copy"
+      >
+        {{ copied === 'done' ? 'Copied' : copied === 'blocked' ? 'Blocked' : 'Copy' }}
+      </button>
+      <button
+        class="analyze"
+        title="Start a new chat about this trace, over the files it cites"
+        @click="emit('analyze')"
+      >
+        Analyze this trace
+      </button>
+      <button
+        class="analyze agents"
+        title="Run the agents over this trace, over the files it cites"
+        @click="emit('analyzeWithAgents')"
+      >
+        Analyze with agents
+      </button>
+    </div>
+
     <footer v-if="supported">
       Shows every path that <em>could</em> reach the value — no aliasing, no path sensitivity.
     </footer>
@@ -204,6 +272,15 @@ button:hover {
 .run {
   color: var(--text);
   border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  /* The one button whose width is the buffer's to decide — a traced name can be long, and with
+     four buttons in the row it is what has to give. The rest keep their labels whole. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toolbar button:not(.run) {
+  flex: none;
 }
 
 .run span {
@@ -272,6 +349,50 @@ button:hover {
   font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   line-height: 1.7;
+}
+
+.actions {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.analyze {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  /* These two give way when the pane is narrow: their labels are the long ones, and "Copy"
+     truncated to nothing would be a button with no word on it at all. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The second reading of the same trace, by several models instead of one — a quieter border says
+   so without making it a different kind of thing. */
+.analyze.agents {
+  border-color: var(--border);
+}
+
+.analyze.agents:hover {
+  border-color: var(--accent);
+}
+
+.actions .copy {
+  flex: none;
+}
+
+.copy.done {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+/* The clipboard refused — an embedded page without `clipboard-write`. Said in the button rather
+   than swallowed, since the alternative reads as a button that does nothing. */
+.copy.blocked {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
 }
 
 .run:disabled {

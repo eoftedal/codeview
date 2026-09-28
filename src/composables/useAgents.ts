@@ -21,11 +21,14 @@ import {
   buildSystemPrompt,
   describeClip,
   promptFiles,
+  usesTools,
   type ChatSession,
   type CodeContext,
 } from '../lib/chat'
+import { buildIndexMessage, fileTools } from '../lib/tools'
 import type { CodeFile } from '../lib/files'
 import { findModel } from '../lib/providers'
+import { describeTraceScope } from '../lib/traceText'
 import { withoutThoughts } from '../lib/providers/thoughts'
 import { decodeShare, parseParams } from '../lib/share'
 import { isAbort, messageOf, streamAnswer, withTruncatedNote } from '../lib/stream'
@@ -110,6 +113,16 @@ export interface Agents {
   pendingStep: Ref<PendingStep | null>
   running: Ref<boolean>
   run: () => Promise<void>
+  /**
+   * Set the task and run over *some* of the open files — what the trace pane's **Analyze with
+   * agents** does. An empty scope means every open file, which is what a model that reads them
+   * itself gets: there is nothing to save by choosing for it.
+   *
+   * The scope belongs to the task it was given with. A reader who rewrites the task is asking
+   * something else, and `run` drops it rather than quietly answering a new question over an old
+   * selection.
+   */
+  runAbout: (task: string, scope: readonly string[]) => Promise<void>
   stop: () => void
   /** Drop the transcript, keeping the loaded model and the team. */
   clear: () => void
@@ -151,6 +164,9 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
 
   let controller: AbortController | null = null
   let nextId = 0
+  /** The files a run is narrowed to, by name, and the task they were chosen for — see `runAbout`.
+   *  Null is the ordinary run over every open tab. */
+  let scope: { names: string[]; task: string } | null = null
 
   function setTeam(next: AgentTeam): void {
     team.value = normalizeTeam(next)
@@ -183,9 +199,19 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
 
   function clear(): void {
     stop()
+    // A cleared transcript is a fresh start: the whole buffer again, as a new chat is.
+    scope = null
     steps.value = []
     pending.value = ''
     pendingStep.value = null
+  }
+
+  async function runAbout(next: string, names: readonly string[]): Promise<void> {
+    if (running.value) return
+    clear()
+    task.value = next
+    if (names.length > 0) scope = { names: [...names], task: next.trim() }
+    await run()
   }
 
   function stop(): void {
@@ -271,6 +297,10 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
     // The task opens the transcript: a run is read back weeks later, and what was asked is half of
     // what it means.
     const asked = task.value.trim() || DEFAULT_TASK
+    // A scope belongs to the task it was given with: a rewritten task is a different question, and
+    // answering it over the old selection would be a narrowing nobody asked for.
+    if (scope && scope.task !== asked) scope = null
+    const narrowed = scope?.names ?? null
     steps.value = [{ id: nextId++, kind: 'task', who: READER_LABEL, text: asked }]
     pending.value = ''
     pendingStep.value = null
@@ -297,11 +327,23 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
       // a small model is most of what the code was leaving room for. Taking it off the code means
       // the agent sees less of the listing and is told so, rather than running out of window
       // mid-answer with nothing said and nothing to relay.
-      const snapshot = promptFiles(files.value, activeId.value)
+      // Narrowed to the trace's files where a trace started this run, in the order it named them
+      // — the budget is spent in that order, so what a tight one clips is the far end of the path
+      // rather than the value the reader asked about. Where nothing it named is open any more the
+      // scope is dropped, rather than leaving every agent with no code at all.
+      const all = promptFiles(files.value, activeId.value)
+      const picked = narrowed
+        ? narrowed.flatMap((name) => all.filter((file) => file.name === name))
+        : all
+      const snapshot = picked.length > 0 ? picked : all
+      const partial = picked.length > 0 && picked.length < all.length
       const budgetOf = (id: string) => findModel(id)?.maxCodeChars ?? 12_000
       const contextFor = (id: string, handoff: string): CodeContext => ({
         files: snapshot,
         maxCodeChars: Math.max(MIN_AGENT_CODE_CHARS, budgetOf(id) - handoff.length),
+        // Said to the agent as well as to the reader: a listing claiming to be the whole editor
+        // is one a model cannot reason about the edges of.
+        partial,
       })
       // The orchestrator reads its relays on the picked model, so its clip follows that budget.
       const orchestratorLimit = relayLimit(budgetOf(model.model.value))
@@ -332,12 +374,21 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
         // asked of the files, not a conversation to come back to.
         const handoff = handoffMessage(brief, previous, relayLimit(budgetOf(modelId)))
         const context = contextFor(modelId, handoff)
+        // An agent on a model that can call a tool reads the files instead of being handed them —
+        // the same swap the chat pane makes, decided per agent because the model is per agent. It
+        // is also where the code budget stops being a clip: it becomes the ceiling on one read.
+        const tooled = usesTools(findModel(modelId))
         // Marked on the step before it speaks, so the cue is on the row while it streams and stays
         // on the report after: what this agent did not see is a fact about its whole answer.
-        const clipped = describeClip(context)
+        const note = narrowed && partial ? describeTraceScope(narrowed) : null
+        const clipped = [note, tooled ? null : describeClip(context)].filter(Boolean).join('; ')
         const spoken: PendingStep = clipped ? { ...step, clipped } : step
         pendingStep.value = spoken
-        const session = await own.chat(buildSystemPrompt(agent.role), buildCodeMessage(context))
+        const session = await own.chat(
+          buildSystemPrompt(agent.role),
+          tooled ? buildIndexMessage(context.files) : buildCodeMessage(context),
+          tooled ? fileTools(context.files, context.maxCodeChars) : undefined,
+        )
         let output: string
         try {
           output = await speak(session, spoken, handoff, model.thinkingNow(modelId))
@@ -397,6 +448,7 @@ export function useAgents(model: ModelHost, files: Ref<CodeFile[]>, activeId: Re
     pendingStep,
     running,
     run,
+    runAbout,
     stop,
     clear,
     setTeam,

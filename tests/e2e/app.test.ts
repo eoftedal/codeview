@@ -740,6 +740,207 @@ describe('flow trace', () => {
     expect(Number(badge)).toBeGreaterThan(0)
   })
 
+  it('copies the trace as text, every step naming its own file and line', async () => {
+    // What the copy is *for* is pasting into the chat or an agent's task, where there is no editor
+    // beside it — so a step in the tab on screen has to name its file too, though the pane does
+    // not. `writeText` is patched for the same reason `copyLink` patches it: whether the real
+    // clipboard permission is granted varies by Chrome version and CI.
+    const copied = await page.evaluate(async () => {
+      let text: string | null = null
+      navigator.clipboard.writeText = async (written: string) => {
+        text = written
+      }
+      document.querySelector<HTMLElement>('.trace-pane .copy')!.click()
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      return text as string | null
+    })
+    expect(copied).toContain('Backward trace of variable `address`')
+    const steps = (copied ?? '').split('\n').filter((line) => line.trim().startsWith('- '))
+    expect(steps.length).toBeGreaterThan(1)
+    for (const step of steps) expect(step).toMatch(/\([\w./-]+ line \d+\)/)
+    // The caveat travels with it: a may-analysis pasted without one reads as a claim.
+    expect(copied).toContain('may-analysis')
+    // And the button says so where the finger already is.
+    expect(await page.$eval('.trace-pane .copy', (el) => el.textContent?.trim())).toBe('Copied')
+  })
+
+  it('hands the trace to a new chat, over just the files it cites', async () => {
+    // The point of the button over copying the text by hand: a conversation opened over the two
+    // files the path runs through, not over every tab, so the budget is spent on the code the
+    // question is actually about.
+    const bundle = [
+      '--8<-- app.ts',
+      "import { read } from './db'",
+      'const raw = read()',
+      'const out = raw',
+      '--8<-- db.ts',
+      'export function read() {',
+      '  return process.env.SEED',
+      '}',
+      '--8<-- unrelated.ts',
+      "export const nothing = 'to do with this trace'",
+    ].join('\n')
+    const fresh = await browser.newPage()
+    await fresh.setViewport({ width: 1400, height: 1000 })
+    await fresh.evaluateOnNewDocument(() => {
+      ;(window as unknown as { __prompts: unknown[] }).__prompts = []
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async (options: { initialPrompts?: unknown }) => {
+          ;(window as unknown as { __prompts: unknown[] }).__prompts.push(
+            options?.initialPrompts ?? [],
+          )
+          return {
+            promptStreaming: () =>
+              new ReadableStream({
+                start(controller) {
+                  controller.enqueue('Read.')
+                  controller.close()
+                },
+              }),
+            destroy: () => {},
+          }
+        },
+      }
+    })
+    try {
+      await fresh.goto(`${URL}#files=${encodeURIComponent(bundle)}&active=app.ts`, {
+        waitUntil: 'networkidle0',
+      })
+      await fresh.waitForSelector('.row')
+      await clickAt('const out = raw', 12, 0, fresh)
+      const tabs = await fresh.$$('.tabs button')
+      await tabs[1]!.click()
+      await fresh.waitForSelector('.trace-pane')
+      await fresh.click('.trace-pane .run')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      // Short enough that a whole trace cannot fit: the question is pushed before the chat pane
+      // exists, so without a scroll on mount the reader lands on the top of it with the answer
+      // forming out of sight.
+      await fresh.setViewport({ width: 1400, height: 400 })
+      await fresh.click('.trace-pane .analyze')
+      await fresh.waitForSelector('.chat-pane')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      const scrolled = await fresh.$eval('.chat-pane .body', (el) => ({
+        overflows: el.scrollHeight > el.clientHeight,
+        atEnd: Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop) < 2,
+      }))
+      expect(scrolled.overflows).toBe(true)
+      expect(scrolled.atEnd).toBe(true)
+
+      // The question the reader can see is the one that was asked: the task, then the trace.
+      const asked = await fresh.$eval('.chat-pane .message.user', (el) => el.textContent ?? '')
+      expect(asked).toContain('Analyze this trace.')
+      // The caret on `out = raw` traces `raw`, whose path leaves app.ts through the import.
+      expect(asked).toContain(
+        'Backward trace of variable `raw`, from app.ts line 2 — 3 steps, 2 files, 1 origin outside the open files.',
+      )
+
+      // And what the model was opened over: the two files the trace names, not the third tab.
+      const code = await fresh.evaluate(() => {
+        const prompts = (window as unknown as { __prompts: { role: string; content: string }[][] })
+          .__prompts[0]
+        return prompts?.find((turn, index) => index > 0 && turn.role === 'user')?.content ?? ''
+      })
+      expect(code).toContain('`app.ts`')
+      expect(code).toContain('`db.ts`')
+      expect(code).not.toContain('unrelated.ts')
+      // Said on the pane too, since by the time an answer lands the trace that explains the
+      // narrowing is a tab away.
+      expect(await fresh.$eval('.chat-pane .clipped', (el) => el.textContent ?? '')).toContain(
+        'only the 2 files this trace touches (app.ts, db.ts)',
+      )
+    } finally {
+      await fresh.close()
+    }
+  })
+
+  it('takes the wrapper’s own tab to the chat, with no row landing in it', async () => {
+    // The Spring shape: a path variable wrapped in a record, the record passed on. This record
+    // declares no constructor, so nothing in the trace lands a row in its file — and a model
+    // asked whether the value is validated cannot answer without that source. The step records
+    // the tab, and `Analyze this trace` spends it.
+    const bundle = [
+      '--8<-- ProductController.java',
+      'class ProductController {',
+      '    public ProductDto productById(@PathVariable String id) {',
+      '        var productId = new ProductId(id);',
+      '        return repo.getPizza(productId);',
+      '    }',
+      '}',
+      '--8<-- ProductId.java',
+      'public record ProductId(',
+      '    String value',
+      ') {}',
+    ].join('\n')
+    const fresh = await browser.newPage()
+    await fresh.setViewport({ width: 1400, height: 1000 })
+    await fresh.evaluateOnNewDocument(() => {
+      ;(window as unknown as { __prompts: unknown[] }).__prompts = []
+      ;(window as unknown as { LanguageModel: unknown }).LanguageModel = {
+        availability: async () => 'available',
+        create: async (options: { initialPrompts?: unknown }) => {
+          ;(window as unknown as { __prompts: unknown[] }).__prompts.push(
+            options?.initialPrompts ?? [],
+          )
+          return {
+            promptStreaming: () =>
+              new ReadableStream({
+                start(controller) {
+                  controller.enqueue('Read.')
+                  controller.close()
+                },
+              }),
+            destroy: () => {},
+          }
+        },
+      }
+    })
+    try {
+      await fresh.goto(`${URL}#files=${encodeURIComponent(bundle)}&active=ProductController.java`, {
+        waitUntil: 'networkidle0',
+      })
+      // The Java grammar is fetched after the seed buffer renders, so wait for its tree.
+      await fresh.waitForFunction(
+        () => document.querySelector('.row .kind')?.textContent?.trim() === 'program',
+        { timeout: 20_000 },
+      )
+      await clickAt('productId);', 3, 0, fresh)
+      const tabs = await fresh.$$('.tabs button')
+      await tabs[1]!.click()
+      await fresh.waitForSelector('.trace-pane')
+      await fresh.click('.trace-pane .run')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      // The construction is no longer a terminal: the path reaches the @PathVariable.
+      const rows = await fresh.$$eval('.trace-pane .row', (nodes) =>
+        nodes.map((node) => (node.textContent ?? '').replace(/\s+/g, ' ').trim()),
+      )
+      expect(rows.join(' | ')).toContain('new ProductId(id)')
+      expect(rows.some((row) => row.includes('@PathVariable'))).toBe(true)
+      // ...and nothing lands a row in the record's own tab.
+      expect(rows.some((row) => row.includes('ProductId.java'))).toBe(false)
+
+      await fresh.click('.trace-pane .analyze')
+      await fresh.waitForSelector('.chat-pane')
+      await new Promise((resolve) => setTimeout(resolve, 400))
+
+      const code = await fresh.evaluate(() => {
+        const prompts = (window as unknown as { __prompts: { role: string; content: string }[][] })
+          .__prompts[0]
+        return prompts?.find((turn, index) => index > 0 && turn.role === 'user')?.content ?? ''
+      })
+      // Both tabs: the one the trace cites, and the one it only passed through.
+      expect(code).toContain('`ProductController.java`')
+      expect(code).toContain('`ProductId.java`')
+      expect(code).toContain('public record ProductId(')
+    } finally {
+      await fresh.close()
+    }
+  })
+
   it('selects a step when its row is clicked', async () => {
     const rows = await page.$$('.trace-pane .row')
     await rows[1]!.click()
@@ -1033,6 +1234,10 @@ describe('the chat pane picks a model honestly', () => {
       // The second text input is the optional label.
       const labelInput = await fresh.$$('.models-add .models-input')
       await labelInput[1]!.type('Mistral Large')
+      // Two checkboxes on the add row now — thinks, then tools. A slug that lists `tools` among
+      // its parameters reads the files itself instead of being handed the listing.
+      const flags = await fresh.$$('.models-add .models-think input')
+      await flags[1]!.click()
       await fresh.click('.models-add button')
       await saveSettings(fresh)
       await new Promise((resolve) => setTimeout(resolve, 150))
@@ -1045,7 +1250,12 @@ describe('the chat pane picks a model honestly', () => {
       expect(options).toContain('Mistral Large · no download')
       expect(await fresh.evaluate(() => localStorage.getItem('codeview:openrouter-models'))).toBe(
         JSON.stringify([
-          { model: 'mistralai/mistral-large', label: 'Mistral Large', thinking: false },
+          {
+            model: 'mistralai/mistral-large',
+            label: 'Mistral Large',
+            thinking: false,
+            tools: true,
+          },
         ]),
       )
 
@@ -1310,7 +1520,9 @@ describe('the chat pane picks a model honestly', () => {
         ),
       ).toContain('DeepSeek R1 · no download')
       expect(await fresh.evaluate(() => localStorage.getItem('codeview:local-server-models'))).toBe(
-        JSON.stringify([{ model: 'deepseek-r1:8b', label: 'DeepSeek R1', thinking: true }]),
+        JSON.stringify([
+          { model: 'deepseek-r1:8b', label: 'DeepSeek R1', thinking: true, tools: false },
+        ]),
       )
 
       // Flagged as thinking, which is the one thing `/models` could never have told us — so the
@@ -2164,6 +2376,75 @@ describe('the agents pane runs a line of agents', () => {
     fresh.$$eval(selector, (nodes) =>
       nodes.map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? ''),
     )
+
+  it('runs the team over a trace, over the files it cites', async () => {
+    // The trace pane's second button. Same question as the chat's, same files — what differs is
+    // that a line of agents reads them instead of one conversation.
+    const bundle = [
+      '--8<-- app.ts',
+      "import { read } from './db'",
+      'const raw = read()',
+      'const out = raw',
+      '--8<-- db.ts',
+      'export function read() {',
+      '  return process.env.SEED',
+      '}',
+      '--8<-- unrelated.ts',
+      "export const nothing = 'to do with this trace'",
+    ].join('\n')
+    const fresh = await agentsPage(`#files=${encodeURIComponent(bundle)}&active=app.ts`)
+    try {
+      const tabs = await fresh.$$('.tabs button')
+      await tabs[1]!.click()
+      await fresh.waitForSelector('.trace-pane')
+      await clickAt('const out = raw', 12, 0, fresh)
+      await fresh.click('.trace-pane .run')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      await fresh.click('.trace-pane .analyze.agents')
+      await fresh.waitForSelector('.agents-pane')
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+
+      // The run opens with the trace as the task, so what was asked is in the transcript.
+      const task = await stepText(fresh, '.step.task')
+      expect(task[0]).toContain('Analyze this trace.')
+      expect(task[0]).toContain('Backward trace of variable `raw`')
+
+      // Every agent was given the traced files and not the third tab — one snapshot, so the
+      // narrowing serves the whole run.
+      const listings = await fresh.evaluate(() =>
+        (window as unknown as { __sessions: { role: string; content: string }[][] }).__sessions
+          .flat()
+          .filter((message) => message.role === 'user' && message.content.includes('```'))
+          .map((message) => message.content),
+      )
+      expect(listings.length).toBeGreaterThan(0)
+      for (const listing of listings) {
+        expect(listing).toContain('`app.ts`')
+        expect(listing).toContain('`db.ts`')
+        expect(listing).not.toContain('unrelated.ts')
+        // And told it is a selection: the brief asks it to say when an answer needs code it
+        // cannot see, which it cannot judge if the listing claims to be the whole editor.
+        expect(listing).toContain('not all of it')
+      }
+
+      // The reader is told the same thing on every agent's row.
+      expect((await stepText(fresh, '.clipped')).join(' ')).toContain(
+        'only the 2 files this trace touches (app.ts, db.ts)',
+      )
+
+      // And the transcript is at its end rather than at the top of the task, which is a whole
+      // trace and was filed before this pane existed.
+      const scrolled = await fresh.$eval('.agents-pane .body', (el) => ({
+        overflows: el.scrollHeight > el.clientHeight,
+        atEnd: Math.abs(el.scrollHeight - el.clientHeight - el.scrollTop) < 2,
+      }))
+      expect(scrolled.overflows).toBe(true)
+      expect(scrolled.atEnd).toBe(true)
+    } finally {
+      await fresh.close()
+    }
+  })
 
   /** Read the pipeline a span at a time: Vue drops the whitespace between sibling elements, so
    *  `textContent` would run a name straight into the note beside it. */

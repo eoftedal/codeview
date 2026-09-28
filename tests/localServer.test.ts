@@ -55,7 +55,7 @@ describe('normalizeBaseUrl', () => {
 })
 
 describe('toModelChoice', () => {
-  const entry = { model: 'qwen2.5-coder:7b', label: 'Qwen2.5 Coder', thinking: false }
+  const entry = { model: 'qwen2.5-coder:7b', label: 'Qwen2.5 Coder', thinking: false, tools: false }
 
   it('namespaces the id so it cannot collide with a catalogue or OpenRouter one', () => {
     expect(toModelChoice(entry).id).toBe('local:qwen2.5-coder:7b')
@@ -76,6 +76,13 @@ describe('toModelChoice', () => {
   it('leaves thinking absent rather than false, the shape a shipped entry has', () => {
     expect(toModelChoice(entry).thinking).toBeUndefined()
     expect(toModelChoice({ ...entry, thinking: true }).thinking).toBe(true)
+  })
+
+  it('carries the tools flag the same way, since a server cannot report one either', () => {
+    // `/models` says nothing about tools, and a runtime will accept the field for a model whose
+    // template has nowhere to put it — so this is the reader's to set, like `thinks`.
+    expect(toModelChoice(entry).supportsTools).toBeUndefined()
+    expect(toModelChoice({ ...entry, tools: true }).supportsTools).toBe(true)
   })
 
   it('takes the default code budget, or a smaller one named by hand', () => {
