@@ -101,6 +101,14 @@ async function walk(roots: readonly FileSystemEntry[]): Promise<NamedFile[]> {
   return found
 }
 
+export interface Dropped {
+  files: NamedFile[]
+  /** Whether a folder was among what was dropped, which is what makes this a folder open — and a
+   *  folder open replaces the strip rather than adding to it. Reported from the entries rather than
+   *  guessed from the names afterwards: a folder holding one file at its root is still a folder. */
+  folder: boolean
+}
+
 /**
  * Everything dropped, folders walked. The synchronous prologue is load-bearing: `webkitGetAsEntry`
  * is called on every item before this function awaits anything, because the `DataTransfer` does not
@@ -108,15 +116,17 @@ async function walk(roots: readonly FileSystemEntry[]): Promise<NamedFile[]> {
  * `dataTransfer.files`, which is what a plain multi-file drop has always used.
  *
  * **Null means the drop carried no files** — a selection dragged about inside the editor bubbles a
- * `drop` here too — and is quite different from an empty array, which means files were dropped and
+ * `drop` here too — and is quite different from an empty list, which means files were dropped and
  * the walk found nothing in them worth opening. That has to be reported, so the two are kept apart.
  */
-export async function filesFromDrop(transfer: DataTransfer | null): Promise<NamedFile[] | null> {
+export async function filesFromDrop(transfer: DataTransfer | null): Promise<Dropped | null> {
   if (!transfer) return null
   const entries = [...transfer.items]
     .map((item) => (item.kind === 'file' ? (item.webkitGetAsEntry?.() ?? null) : null))
     .filter((entry): entry is FileSystemEntry => !!entry)
   const loose = filesFromInput(transfer.files)
-  if (entries.length === 0) return loose.length > 0 ? loose : null
-  return await walk(entries)
+  if (entries.length === 0) {
+    return loose.length > 0 ? { files: loose, folder: false } : null
+  }
+  return { files: await walk(entries), folder: entries.some((entry) => entry.isDirectory) }
 }

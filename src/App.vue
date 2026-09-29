@@ -339,11 +339,13 @@ function onQuickPick(id: string): void {
 const fileInput = ref<HTMLInputElement>()
 const folderInput = ref<HTMLInputElement>()
 
-/** Both inputs land here — a folder's files arrive already walked, each carrying its path. */
+/** Both inputs land here — a folder's files arrive already walked, each carrying its path. Which
+ *  input fired is read off the element rather than passed in: `webkitdirectory` is exactly the
+ *  question being asked, and it is the folder pick that replaces the strip instead of adding to it. */
 function onFilePicked(event: Event): void {
   const input = event.target as HTMLInputElement
   const picked = filesFromInput(input.files)
-  if (picked.length) void openFiles(picked)
+  if (picked.length) void openFiles(picked, { replace: input.webkitdirectory })
   input.value = ''
 }
 </script>
@@ -366,7 +368,9 @@ function onFilePicked(event: Event): void {
           </button>
         </div>
         <button @click="fileInput?.click()">Open files</button>
-        <button @click="folderInput?.click()">Open folder</button>
+        <!-- Titled because the consequence is not visible until it has happened: a folder is a
+             project of its own, so it takes the strip rather than joining it. -->
+        <button title="Replaces the open tabs" @click="folderInput?.click()">Open folder</button>
         <button @click="shareLink()">Copy link</button>
         <button @click="reset()">Reset</button>
         <input

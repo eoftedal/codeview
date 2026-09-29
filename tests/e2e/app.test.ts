@@ -3180,9 +3180,14 @@ describe('dropping a folder', () => {
     children?: Entry[]
   }
 
-  /** Drop `tree` on the editor pane and report what the strip and the notice say afterwards. */
+  /**
+   * Drop `roots` on the editor pane and report what the strip and the notice say afterwards. A root
+   * with no `children` is a loose dropped file rather than a folder, which is how the same helper
+   * covers the drop that must *not* replace anything.
+   */
   async function dropTree(
-    tree: Entry | null,
+    roots: Entry[] | null,
+    extraTabs = 0,
   ): Promise<{ tabs: (string | undefined)[]; notice: string | null }> {
     const fresh = await browser.newPage()
     try {
@@ -3192,7 +3197,12 @@ describe('dropping a folder', () => {
       await fresh.waitForSelector('.view-line')
       await new Promise((resolve) => setTimeout(resolve, 500))
 
-      return await fresh.evaluate(async (root: Entry | null) => {
+      // Blank tabs beside the sample, for the cases about what a folder open does to what is
+      // already open.
+      for (let n = 0; n < extraTabs; n++) await fresh.click('.file-tabs .add')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      return await fresh.evaluate(async (dropped: Entry[] | null) => {
         const entryFor = (node: Entry): unknown =>
           node.children
             ? {
@@ -3220,8 +3230,8 @@ describe('dropping a folder', () => {
           value: {
             // A null tree is a drop carrying no files at all — a selection dragged about inside the
             // editor, which bubbles a `drop` up here too.
-            items: root
-              ? [{ kind: 'file', webkitGetAsEntry: () => entryFor(root) }]
+            items: dropped
+              ? dropped.map((root) => ({ kind: 'file', webkitGetAsEntry: () => entryFor(root) }))
               : [{ kind: 'string', type: 'text/plain' }],
             files: [],
           },
@@ -3235,43 +3245,69 @@ describe('dropping a folder', () => {
           ),
           notice: document.querySelector('.notice')?.textContent?.trim() ?? null,
         }
-      }, tree)
+      }, roots)
     } finally {
       await fresh.close()
     }
   }
 
   it('walks the subfolders, skips what it cannot read, and names the tabs by path', async () => {
-    const result = await dropTree({
-      name: 'proj',
-      children: [
-        { name: 'app.ts', text: "import { load } from './lib/db'\nexport const a = load()\n" },
-        { name: 'README.md', text: '# not source\n' },
-        { name: 'node_modules', children: [{ name: 'index.js', text: 'module.exports = 1' }] },
-        { name: '.git', children: [{ name: 'hook.js', text: 'nope' }] },
-        {
-          name: 'lib',
-          children: [
-            { name: 'db.ts', text: 'export function load() {\n  return 1\n}\n' },
-            { name: 'notes.txt', text: 'nope' },
-          ],
-        },
-      ],
-    })
+    const result = await dropTree([
+      {
+        name: 'proj',
+        children: [
+          { name: 'app.ts', text: "import { load } from './lib/db'\nexport const a = load()\n" },
+          { name: 'README.md', text: '# not source\n' },
+          { name: 'node_modules', children: [{ name: 'index.js', text: 'module.exports = 1' }] },
+          { name: '.git', children: [{ name: 'hook.js', text: 'nope' }] },
+          {
+            name: 'lib',
+            children: [
+              { name: 'db.ts', text: 'export function load() {\n  return 1\n}\n' },
+              { name: 'notes.txt', text: 'nope' },
+            ],
+          },
+        ],
+      },
+    ])
 
     // `proj` itself is gone from every name — every file shared it — and the nested one keeps the
     // path that makes `./lib/db` resolve to it. The markdown, the text file, `node_modules` and
-    // `.git` are all simply absent, and said nothing: that is what skipping means here.
-    expect(result.tabs).toEqual(['example.ts', 'app.ts', 'lib/db.ts'])
+    // `.git` are all simply absent, and said nothing: that is what skipping means here. The sample
+    // tab is gone too: a folder is a project of its own and takes the strip rather than joining it.
+    expect(result.tabs).toEqual(['app.ts', 'lib/db.ts'])
+    expect(result.notice).toBe('Closed the tab that was open — a folder open starts fresh.')
+  })
+
+  it('closes everything that was open, whatever it was, and says how much', async () => {
+    const result = await dropTree(
+      [{ name: 'proj', children: [{ name: 'app.ts', text: 'export const a = 1\n' }] }],
+      2,
+    )
+    expect(result.tabs).toEqual(['app.ts'])
+    expect(result.notice).toBe('Closed the 3 tabs that were open — a folder open starts fresh.')
+  })
+
+  it('leaves the strip alone for a plain multi-file drop, which is not a folder open', async () => {
+    const result = await dropTree(
+      [
+        { name: 'a.ts', text: 'export const a = 1\n' },
+        { name: 'b.ts', text: 'export const b = 2\n' },
+      ],
+      1,
+    )
+    expect(result.tabs).toEqual(['example.ts', 'untitled-1.ts', 'a.ts', 'b.ts'])
     expect(result.notice).toBeNull()
   })
 
-  it('says so when a folder holds nothing it can read, rather than doing nothing in silence', async () => {
-    const result = await dropTree({
-      name: 'docs',
-      children: [{ name: 'guide.md', text: '# hi\n' }],
-    })
-    expect(result.tabs).toEqual(['example.ts'])
+  it('says so when a folder holds nothing it can read, and keeps the tabs it cannot replace', async () => {
+    const result = await dropTree(
+      [{ name: 'docs', children: [{ name: 'guide.md', text: '# hi\n' }] }],
+      1,
+    )
+    // Emptying the editor is the one outcome here that cannot be undone, so it is the one thing
+    // `replace` is not allowed to cause: with nothing opened, both tabs are still standing.
+    expect(result.tabs).toEqual(['example.ts', 'untitled-1.ts'])
     expect(result.notice).toBe('Nothing opened — no files this viewer can parse in there.')
   })
 

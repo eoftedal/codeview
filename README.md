@@ -43,6 +43,12 @@ them resolve; the picked folder's own name is dropped from the front, since ever
 shares it. At most 50 tabs stay open — a folder with more keeps the files nearest its root
 and says how many it left out, which is the point at which to open a subfolder instead.
 
+**A folder replaces what is open**, rather than adding to it: a folder is a project, so the
+tabs from the last one close and the notice says how many did. A pick or a drop of individual
+files still adds to the strip as it always has. The one exception is a folder with nothing
+readable in it — there is nothing to replace the tabs with, so they stay and the notice says
+so instead.
+
 **Cmd+P** (Ctrl+P) is quick open: type part of a name and press ↵. The match is a
 subsequence, so `slb` finds `src/lib/base.ts`, and the ranking prefers letters that run
 together, letters that start a word, and letters in the file's own name over the directories

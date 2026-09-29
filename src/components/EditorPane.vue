@@ -5,6 +5,7 @@ import type { Language } from '../lib/analyzer'
 import type { DefinitionResult, Span } from '../lib/definitions'
 import type { FlowSpan } from '../lib/flow'
 import type { NamedFile } from '../lib/files'
+import type { OpenOptions } from '../composables/useBuffer'
 import { filesFromDrop } from '../lib/upload'
 
 const props = defineProps<{
@@ -33,7 +34,8 @@ const emit = defineEmits<{
   cursor: [number]
   /** Alt+T or the context menu: trace the value at this offset back to its sources. */
   trace: [number]
-  openFiles: [NamedFile[]]
+  /** What was dropped, and whether it should replace the strip — which a dropped folder does. */
+  openFiles: [files: NamedFile[], options: OpenOptions]
 }>()
 
 setupMonaco()
@@ -341,7 +343,7 @@ async function onDrop(event: DragEvent): Promise<void> {
   dropActive.value = false
   const dropped = await filesFromDrop(event.dataTransfer)
   // An empty list is still emitted: a folder holding nothing this viewer reads needs saying so.
-  if (dropped) emit('openFiles', dropped)
+  if (dropped) emit('openFiles', dropped.files, { replace: dropped.folder })
 }
 
 /** Hand the keyboard to the buffer. The quick-open palette calls it after a pick, so choosing a
@@ -364,7 +366,7 @@ defineExpose({ revealDefinition, focus })
     <slot name="tabs" />
     <div ref="host" class="editor" />
     <div v-if="dropActive" class="drop-hint">
-      Drop .ts, .tsx, .js, .jsx, .py or .java files — or a folder of them
+      Drop .ts, .tsx, .js, .jsx, .py or .java files — or a folder, which replaces the open tabs
     </div>
   </div>
 </template>

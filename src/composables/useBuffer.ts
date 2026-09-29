@@ -78,6 +78,12 @@ function readStored(): Stored | null {
   }
 }
 
+/** How an open treats the tabs already showing. */
+export interface OpenOptions {
+  /** Close them all and let this open be the whole strip. What a folder does, and only a folder. */
+  replace?: boolean
+}
+
 interface OpenOutcome {
   /** How many files the pick or the drop actually handed over. Zero is a folder whose walk found
    *  nothing worth opening in it, and has to be said: a drop that does nothing and says nothing
@@ -88,6 +94,8 @@ interface OpenOutcome {
   unreadable: number
   oversize: number
   overflow: number
+  /** How many tabs the open closed, which only a folder ever does. */
+  closed: number
 }
 
 /**
@@ -103,9 +111,19 @@ function openNotice({
   unreadable,
   oversize,
   overflow,
+  closed,
 }: OpenOutcome): string | null {
   if (arrived === 0) return 'Nothing opened — no files this viewer can parse in there.'
   const lines: string[] = []
+  // Said rather than left to be noticed: the tabs that were there are gone, and one of them may
+  // have been an unnamed buffer the reader had been typing in.
+  if (closed > 0) {
+    lines.push(
+      closed === 1
+        ? 'Closed the tab that was open — a folder open starts fresh.'
+        : `Closed the ${closed} tabs that were open — a folder open starts fresh.`,
+    )
+  }
   if (rejected.length > 0) {
     if (rejected.length <= 3) lines.push(`Not opened — ${rejected.join('; ')}.`)
     else {
@@ -337,8 +355,18 @@ export function useBuffer() {
    * an import between them resolve, and it arrives in bulk — so `MAX_OPEN_FILES` applies, and what
    * it left out is said rather than quietly dropped. The last file opened is still the one left
    * active, as it is for a pick of two.
+   *
+   * **A folder open is a new strip, not an addition to one** (`replace`), and that is the caller's
+   * fact to state rather than this one's to infer: a folder is a project, so what was open belongs
+   * to a different one, and fifty places shared between the two would clip the folder for the sake
+   * of tabs the reader is done with. It is honoured only where something actually opens — a folder
+   * holding nothing readable must not empty the editor, which is the one unrecoverable outcome here
+   * and the reason there is no such thing as no file open.
    */
-  async function openFiles(incoming: Iterable<NamedFile>): Promise<void> {
+  async function openFiles(
+    incoming: Iterable<NamedFile>,
+    options: OpenOptions = {},
+  ): Promise<void> {
     const picked = [...incoming]
     /** One message per refused file, which is the right report for a pick of three and unreadable
      *  for a folder of four hundred — hence the counts beside it. */
@@ -364,19 +392,23 @@ export function useBuffer() {
       openable.push({ name, file, language })
     }
 
+    // What the open is adding to. Replacing, that is nothing at all: every place is free and no name
+    // can be a refresh of one, which is what keeps a folder from being clipped by tabs that are
+    // about to close anyway.
+    const kept: CodeFile[] = options.replace ? [] : files.value
     // A name already on the strip is refreshed in place and costs no room; the rest compete for what
     // is left of the cap, shallowest first. Deciding that here rather than in the loop is what lets
     // the tabs still appear in the order they arrived, which is the order a reader picked them in.
-    const known = new Set(files.value.map((open) => open.name))
+    const known = new Set(kept.map((open) => open.name))
     const fresh = openable.filter((entry) => !known.has(entry.name))
-    const taken = fitToStrip(fresh, MAX_OPEN_FILES - files.value.length)
+    const taken = fitToStrip(fresh, MAX_OPEN_FILES - kept.length)
     const overflow = fresh.length - taken.size
 
     let opened: string | null = null
     const added: CodeFile[] = []
     for (const entry of openable) {
       const existing =
-        files.value.find((open) => open.name === entry.name) ??
+        kept.find((open) => open.name === entry.name) ??
         added.find((open) => open.name === entry.name)
       if (!existing && !taken.has(entry)) continue
       const text = await entry.file.text()
@@ -397,9 +429,19 @@ export function useBuffer() {
     }
 
     // One assignment rather than one per file: each would be a reparse and a write to localStorage.
-    if (added.length) files.value = [...files.value, ...added]
+    // The guard is what makes `replace` safe: with nothing opened there is nothing to replace the
+    // strip with, so it stays and the notice says why.
+    const closed = added.length > 0 && options.replace ? files.value.length : 0
+    if (added.length) files.value = options.replace ? added : [...files.value, ...added]
     if (opened) activeId.value = opened
-    notice.value = openNotice({ arrived: picked.length, rejected, unreadable, oversize, overflow })
+    notice.value = openNotice({
+      arrived: picked.length,
+      rejected,
+      unreadable,
+      oversize,
+      overflow,
+      closed,
+    })
   }
 
   /**

@@ -426,6 +426,21 @@ which the tab cap was going to discard anyway. A handle is asked for only for a 
 read, which is what makes skipping a repository's images and lockfiles cost nothing — **except at
 depth 0**, where a loose dropped file is kept whatever its extension, because a dropped `notes.md`
 deserves the word `openFiles` already has for it and silence reads as a broken drop target.
+**Which of the two it was is reported rather than inferred**: `filesFromDrop` returns `folder`
+alongside the files, read off the dropped entries, and the picker reads `input.webkitdirectory` off
+the element that fired — a folder holding one file at its root would be indistinguishable from a
+loose drop by the time only names are left, and the next paragraph turns on telling them apart.
+
+**A folder open replaces the strip; a file open adds to it.** A folder is a project, so what was
+open belongs to a different one — and the fifty places are the folder's to spend, not something to
+share with tabs the reader is done with. `openFiles` takes it as `OpenOptions.replace` from the
+caller rather than sniffing the names for a `/`, for the reason above. Two things make it safe
+rather than merely tidy: the cap and the refresh-in-place lookup both read `kept`, which is empty
+when replacing, so a folder is never clipped by tabs that are about to close; and the replacement is
+**conditional on something having opened**, because emptying the editor is the one unrecoverable
+outcome here and a folder holding nothing readable must not cause it — that case keeps the tabs and
+says `Nothing opened` instead. The close is stated in the notice (`closed`), since a tab the reader
+had been typing in can go this way and the strip alone does not say how much went with it.
 
 **A folder's files arrive under their paths, and that is the whole reason it works.** A project holds
 two `index.ts` as a matter of course, and `openFiles` refreshes a tab whose name matches — so bare
