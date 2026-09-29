@@ -29,6 +29,14 @@ describe('languageForFile', () => {
     expect(languageForFile('routes.py')).toBe('py')
     expect(languageForFile('stubs/db.PYI')).toBe('py')
     expect(languageForFile('com/example/Db.java')).toBe('java')
+    expect(languageForFile('src/main.c')).toBe('c')
+    // `.h` goes to C, as Monaco's own contribution does — the C++ grammar parses both anyway.
+    expect(languageForFile('include/util.H')).toBe('c')
+    expect(languageForFile('src/widget.cpp')).toBe('cpp')
+    expect(languageForFile('src/widget.hpp')).toBe('cpp')
+    expect(languageForFile('src/widget.CXX')).toBe('cpp')
+    expect(languageForFile('Shop/Controller.cs')).toBe('cs')
+    expect(languageForFile('build.csx')).toBe('cs')
   })
 
   it('knows nothing about extensions it does not own', () => {
@@ -45,6 +53,8 @@ describe('withLanguage', () => {
     expect(withLanguage('worker.mjs', 'ts')).toBe('worker.ts')
     expect(withLanguage('src/App.ts', 'py')).toBe('src/App.py')
     expect(withLanguage('routes.py', 'ts')).toBe('routes.ts')
+    expect(withLanguage('src/main.c', 'cpp')).toBe('src/main.cpp')
+    expect(withLanguage('src/widget.cpp', 'cs')).toBe('src/widget.cs')
   })
 
   it('leaves a name whose extension already means that language', () => {
@@ -150,9 +160,24 @@ describe('arrangeForOpen', () => {
     expect(arrangeForOpen(named('proj/a.ts', 'proj/src/b.ts'))).toEqual(named('a.ts', 'src/b.ts'))
   })
 
-  it('leaves the names alone when there is no one root — two folders, or a folder and a file', () => {
-    expect(arrangeForOpen(named('b.ts', 'proj/src/a.ts'))).toEqual(named('b.ts', 'proj/src/a.ts'))
+  it('drops each path’s own folder, so two folders at once both lose theirs', () => {
+    expect(arrangeForOpen(named('a/src/one.ts', 'b/lib/two.ts'))).toEqual(
+      named('src/one.ts', 'lib/two.ts'),
+    )
+    // A loose file beside a folder has no folder of its own to lose, and does not stop the folder
+    // losing hers.
+    expect(arrangeForOpen(named('b.ts', 'proj/src/a.ts'))).toEqual(named('b.ts', 'src/a.ts'))
     expect(arrangeForOpen(named('one.ts', 'two.ts'))).toEqual(named('one.ts', 'two.ts'))
+  })
+
+  it('keeps every root when dropping one would leave two files answering to one name', () => {
+    // `openFiles` refreshes a tab whose name matches, so the roots are the only thing keeping these
+    // two apart — a longer name beats one file silently overwriting the other.
+    expect(arrangeForOpen(named('a/src/db.ts', 'b/src/db.ts'))).toEqual(
+      named('a/src/db.ts', 'b/src/db.ts'),
+    )
+    // The collision a loose file causes counts the same way.
+    expect(arrangeForOpen(named('db.ts', 'proj/db.ts'))).toEqual(named('db.ts', 'proj/db.ts'))
   })
 
   it('leaves the order alone — it is the order the tabs will appear in', () => {

@@ -20,6 +20,10 @@ const MONACO_LANGUAGE: Record<Language, string> = {
   // plain editor worker — so highlighting Python costs nothing and needs no worker of its own.
   py: 'python',
   java: 'java',
+  // Monaco's own `cpp` contribution registers both ids against one Monarch grammar.
+  c: 'c',
+  cpp: 'cpp',
+  cs: 'csharp',
 }
 
 export function monacoLanguageId(language: Language): string {

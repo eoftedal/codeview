@@ -41,16 +41,18 @@ one AST, one set of decorations. A span is an offset into a particular file and 
 anywhere else — which is why `FlowNode` carries `file`, and why `App.vue` filters trace spans to
 the active tab before handing them to Monaco.
 
-**One language per backend, and the seam is `useAnalysis`.** `src/lib/backend.ts` is the contract
-the panes see — `update` / `tree` / `resolve` / optional `trace` / optional `ready` — and it imports
-nothing from `typescript`. `tsBackend.ts` wraps today's analyzer unchanged; `python/backend.ts` is
-the other implementation. `useAnalysis` partitions the open tabs by language, calls `update` on
-**every** backend holding files (so a tab off screen is still in its language's program, which is
+**One backend per language family, and the seam is `useAnalysis`.** `src/lib/backend.ts` is the
+contract the panes see — `update` / `tree` / `resolve` / optional `trace` / optional `ready` — and it
+imports nothing from `typescript`. `tsBackend.ts` wraps today's analyzer unchanged; `python/`,
+`java/`, `c/` and `csharp/` are the others. There are five families for nine languages, and both
+groupings are load-bearing rather than tidy: the TypeScript family shares one `ts.Program`, and C
+and C++ share one grammar and one program so that a `.h` open beside a `.c` is something the
+`#include` can actually resolve to. `useAnalysis` partitions the open tabs by family, calls `update`
+on **every** backend holding files (so a tab off screen is still in its language's program, which is
 what a cross-file definition walks along), and dispatches `tree`/`resolve`/`trace` to whichever owns
-the active one. **Cross-language resolution does not exist and will not**: the two backends never
-share a file set, so a `.ts` file's import cannot see `db.py` and Python's `import db` cannot see
-`db.ts`. There is no build system here to say what would bridge them, and inventing one would mean
-guessing. `trace` is **optional rather than null-returning** — `null` already means "nothing
+the active one. **Cross-language resolution does not exist and will not**: the backends never share
+a file set, so a `.ts` file's import cannot see `db.py` and Python's `import db` cannot see `db.ts`.
+There is no build system here to say what would bridge them, and inventing one would mean guessing. `trace` is **optional rather than null-returning** — `null` already means "nothing
 resolved at this offset", and a pane has to tell that apart from "this language has no trace" to
 explain itself instead of looking broken.
 
@@ -170,9 +172,9 @@ over-approximation.** `C().use(x)` and `self.conn.use(x)` leave `o.use` unresolv
 them would _under_-approximate — a trace that silently misses a path is the one failure this tool
 refuses. So where the name is declared exactly once across the open tabs it is accepted on the name;
 where it is declared more than once, matching would be a guess between them, so only a resolvable
-receiver counts. `TracePane`'s "no backward trace" branch is now unreachable, since every shipped
-language has one — **leave it**: it is what a language added without a trace shows instead of an
-empty pane, and `AnalysisBackend.trace` stays optional for the same reason.
+receiver counts. `TracePane`'s "no backward trace" branch is **reached by C and C++**, which is
+what `AnalysisBackend.trace`'s optionality was built for — see the C paragraph below for why that
+language declines one.
 
 **Java is the third tree-sitter language, and its binder is the opposite of Python's in three
 places.** A **block is a scope**; a **class body is visible from its methods**, so `lookup` walks
@@ -204,6 +206,78 @@ read silently lost the dimmed class header. **Reassignment is a scan, not a bind
 `x = …` is an `assignment_expression` that declares nothing, so `writesFor` walks the enclosing
 method or type and resolves each candidate back to the same declaration, where python/flow.ts gets
 its writes free from the binder.
+
+**C and C++ are one language to this codebase, and that falls out of the artifact.**
+`@vscode/tree-sitter-wasm` ships no `tree-sitter-c.wasm`; it ships `tree-sitter-cpp.wasm`, which is
+built as a **superset** of the C grammar — a plain `.c` file parses through it with no ERROR nodes,
+checked rather than assumed. So one grammar, one backend and one `Family` (`'c'`) serve both, which
+is also what a `.h` open beside a `.c` needs: an `#include` only resolves if both tabs are in the
+same program. `.h` is read as C, as Monaco's own contribution does; a C++ header spelled `.h` is the
+one case that guesses wrong, and it costs a badge rather than a tree, since the grammar parses both.
+
+**`c/scopes.ts` is Java's binder with four inversions**, each of which a reader arriving from the
+other three languages gets wrong. A **declarator nests around its name** — `char *argv[]` is an
+array of a pointer to an identifier — so `declaratorName` walks _down_ a chain where the Java binder
+asks for a `name` field. A **namespace opens no scope**, because every name in a single-namespace
+C++ file would otherwise be invisible from the translation unit, which is where a cross-file lookup
+starts. **Both arms of a `#if` are bound**, since tree-sitter parses the preprocessor structurally
+and evaluates nothing — the same may-analysis over-approximation the trace makes, and the honest
+one. And **a macro is a binding**: `#define MAX 16` is the closest thing C has to a constant, bound
+as a `variable` (or a `function`, for a function-like macro) because `DefinitionReason` is a shared
+vocabulary that reaches the panes and is not extended for one language. What is emphatically _not_
+modelled is macro **expansion** — a name a macro produces exists nowhere in the tree, so it resolves
+to nothing, stated rather than guessed at.
+
+**C's cross-file rule is the linker's, and that is a licence Java's is not.** An `#include "util.h"`
+is textual, so everything the header declares is genuinely in scope and the tab is searched exactly;
+`<stdio.h>` deliberately never resolves, which is what makes `printf` read as external. Beyond that,
+C has no namespaces — a non-`static` file-scope name is one name in one global space — so "any open
+tab's file scope" approximates what the linker actually does rather than guessing. `static` is what
+it over-approximates, and the README says so. **A preprocessor directive's node extent includes the
+newline that ends it**, so `declSpan` trims every span that becomes an answer; without it a
+`#include` highlight runs onto the start of the next line.
+
+**C and C++ ship with `trace` absent, and that is a judgement rather than unfinished work.** The
+backward walk follows a value through assignments, returns and arguments. In C the interesting flows
+go through **pointers** — `char *p = buf; gets(p);` is the path a reviewer opened the file for — and
+a walk with no aliasing is a stated limit in TypeScript, a corner in Java, and a hole where the
+feature should be in C. The **preprocessor** compounds it: a value passing through a macro dead-ends
+at a name with no declaration. Shipping a trace that quietly missed those is the one failure this
+tool refuses, so the pane says the language has none. That is the branch `AnalysisBackend.trace`'s
+optionality exists for, and the reason `null` was never allowed to mean it.
+
+**C# is the closest language here to Java, and only its differences are worth reading.** A block is
+a scope, a class body is visible from its methods, declaration precedes use, overloads narrow by
+arity, and — the fact that makes member resolution possible at all — **a receiver's type is written
+down**. Five things differ, and each was a wrong answer first. **A `using` binds nothing**: C#
+imports a _namespace_, not a type, so unlike Java's `import com.example.Db` nothing in a file says
+which tab a type came from, and cross-file resolution rests entirely on the open-tabs rule; only a
+`using X = …` alias binds a name. **A declarator holds its initializer as a bare child** — there is
+no `value` field, and a `field_declaration` wraps a `variable_declaration` that wraps the declarator,
+two levels more than Java — so `declaratorValue`/`declaratorsOf` are the only places that know.
+**A primary constructor's parameters are in scope for the whole body**, as properties on a positional
+`record` and as parameters on a `class`; `primaryParameters` **must** be guarded by node type,
+because a `method_declaration` also holds a `parameter_list` child and without the guard every
+method parameter is read as a primary constructor's and sent looking for constructions of its own
+name. **A property is storage, not a method** — an auto-property has no body, so the property _is_
+the member, which makes the wrapper case simpler here than the hand-written Java getter it
+corresponds to. And **an attribute list sits inside the declaration node**, above its first line, so
+`signatureSpan` starts past it or every annotated method highlights from its `[HttpGet(…)]`.
+
+**The C# trace is the Java walk with four shapes Java does not have.** **A property read is not a
+call**: `id.Value` is a bare member access where Java writes `id.value()`, so the receiver-following
+rule applies to the access itself rather than only to a zero-argument invocation — `expandMemberRead`
+follows the receiver for any real receiver and expands the member only for `this`/`base`, where
+there is no receiver to follow. **An argument is wrapped** in an `argument` node that may carry a
+`name:`, so nothing reads `arguments.namedChildren` directly. **An interpolated string is not a
+literal** — `$"…{id.Value}…"` is where a query is built, and an `interpolation` carries no field for
+its expression, so the expression is the child that is not an `interpolation_brace`. And **a
+constructor may be primary or an object initializer**: `constructorIndexFor` answers by position for
+a record or a primary constructor, from `this.X = p` in a block or behind an `=>` for an ordinary
+one, and `initializerValueFor` reads `new W { Value = v }`, which fills a member with no constructor
+involved at all. `constructorSite` returns **null** where nothing declared fits the arity but the
+primary constructor does — a primary constructor has no body to show, and naming the first declared
+one instead reports a constructor the call never runs.
 
 **Two independent TypeScript setups exist, and conflating them causes confusion.**
 
@@ -446,10 +520,14 @@ had been typing in can go this way and the strip alone does not say how much wen
 two `index.ts` as a matter of course, and `openFiles` refreshes a tab whose name matches — so bare
 basenames would have the second file silently overwrite the first. A path is also already what a tab
 name _is_ (`lib/db.ts` resolves), so `./db` between two files of the same folder resolves exactly as
-it does between two hand-made tabs. `arrangeForOpen` drops the picked folder's own segment — every
-path shares it, so it says nothing, and relative imports are untouched because every path shifts
-equally — and drops nothing when they do **not** all share one, which is what a drop of two folders,
-or of a folder beside a loose file, looks like. What it deliberately does _not_ do is reorder:
+it does between two hand-made tabs. `arrangeForOpen` drops the folder each path starts in — it is the
+folder the reader picked, so it says nothing, and relative imports are untouched because every path in
+a folder shifts by the same one segment. It is done **per entry** rather than only for a root they all
+share, since the rule is about the reader's own folder name and holds just as much for a drop of two
+folders, or of a folder beside a loose file; a name with no folder in it is left alone, having nothing
+to lose. The one thing that stops it is a **collision** — `a/src/db.ts` and `b/src/db.ts` both
+becoming `src/db.ts` would have `openFiles` refresh the first tab with the second file, silently — so
+where two stripped names would match, every name keeps its own root instead. What it deliberately does _not_ do is reorder:
 `tests/e2e/app.test.ts` pins both the strip's order and that the **last** file picked is the one you
 land on, and a folder is no reason to change either. So depth is spent where it is actually needed —
 `fitToStrip` returns a **set**, not a list, precisely so the cap can be decided on depth while the
@@ -774,14 +852,17 @@ naming the model, filed against the agent, rather than running it on something e
 **The hunters are a shelf, not a mode.** `src/lib/hunters.ts` is one `Record<string, string>` —
 the name the picker shows, the complete system prompt — built from a shared opening and one of two
 closings around the per-class half in `FOCUS`, so a change to how a finding is reported is one edit
-rather than sixteen. Both panes offer them (`ChatPane`'s prompt editor, and every agent card in
+rather than seventeen. The seventeenth is **Memory safety**, added with C and C++ — a flow class
+whose carrier is the _length_ rather than the data, which is why it says to follow a size back as
+carefully as a value, and the one class that also asks for lifetime bugs (use-after-free,
+double-free) on the same path. Both panes offer them (`ChatPane`'s prompt editor, and every agent card in
 `AgentsPane`, where the two shipped briefs sit in the same select), and picking one **only writes
 the textarea**: there is no hunter id kept, no new key in a link and nothing downstream that knows
 a brief came from here — an edited hunter is simply a brief of the reader's own, which is why the
 select shows a name only while the text still equals that brief exactly and says _your own wording_
 otherwise. They are deliberately shorter than `DEFAULT_ROLE` and capped at `HUNTER_CHAR_CAP`, and
 **short means the tokens a hunt sends, not the file**: the opening and closing ride every hunt, so
-they are where a saved character counts sixteen times over, and they were over half of each hunter
+they are where a saved character counts seventeen times over, and they were over half of each hunter
 before they were cut. The opening is one line and teaches no taint vocabulary — a flow hunter's own
 "what removes the taint" is the only version a single-issue hunt needs, and the five checklist
 classes (BOLA, function-level authorization, CSRF, authentication, secrets) have no use for one.

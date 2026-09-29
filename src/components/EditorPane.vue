@@ -67,6 +67,9 @@ const EXTENSION: Record<Language, string> = {
   jsx: 'jsx',
   py: 'py',
   java: 'java',
+  c: 'c',
+  cpp: 'cpp',
+  cs: 'cs',
 }
 
 /**
@@ -366,7 +369,8 @@ defineExpose({ revealDefinition, focus })
     <slot name="tabs" />
     <div ref="host" class="editor" />
     <div v-if="dropActive" class="drop-hint">
-      Drop .ts, .tsx, .js, .jsx, .py or .java files — or a folder, which replaces the open tabs
+      Drop TypeScript, JavaScript, Python, Java, C, C++ or C# files — or a folder, which replaces
+      the open tabs
     </div>
   </div>
 </template>

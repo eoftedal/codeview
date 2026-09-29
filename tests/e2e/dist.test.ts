@@ -15,6 +15,16 @@ let page: Page
 const pageErrors: string[] = []
 const wasmResponses: string[] = []
 
+/**
+ * Responses that mean the asset was not served. Deliberately not "anything but 200": the runtime
+ * glue and the core wasm are cached across the grammar cases below, so the second and third get a
+ * legitimate 304. What this exists to catch is a silent 404 — an asset `base: './'` resolved
+ * wrongly shows up only as a pane that never fills.
+ */
+function failedWasm(): string[] {
+  return wasmResponses.filter((entry) => Number(entry.slice(0, 3)) >= 400)
+}
+
 beforeAll(async () => {
   await build({ logLevel: 'error' })
   server = await preview({ preview: { port: PORT, strictPort: true }, logLevel: 'error' })
@@ -61,6 +71,10 @@ describe('production bundle', () => {
     expect(assets.some((name) => /^tree-sitter-[^.]+\.wasm$/.test(name))).toBe(true)
     expect(assets.some((name) => /^tree-sitter-python-[^.]+\.wasm$/.test(name))).toBe(true)
     expect(assets.some((name) => /^tree-sitter-java-[^.]+\.wasm$/.test(name))).toBe(true)
+    // One grammar for C and C++ — tree-sitter-cpp is built as a superset of C's, and the package
+    // ships no `tree-sitter-c.wasm` at all.
+    expect(assets.some((name) => /^tree-sitter-cpp-[^.]+\.wasm$/.test(name))).toBe(true)
+    expect(assets.some((name) => /^tree-sitter-c-sharp-[^.]+\.wasm$/.test(name))).toBe(true)
   })
 
   it('loads with no console or page errors', () => {
@@ -129,6 +143,40 @@ describe('production bundle', () => {
     expect(kinds).toContain('function_definition')
 
     expect(wasmResponses.length).toBeGreaterThan(0)
-    expect(wasmResponses.filter((entry) => !entry.startsWith('200'))).toEqual([])
+    expect(failedWasm()).toEqual([])
+  })
+
+  /** The same runtime path for the two grammars added last, and the largest assets in the app. */
+  it('fetches and runs the C grammar', async () => {
+    const source = 'int add(int a, int b) {\n  return a + b;\n}\n'
+    await page.goto(`http://localhost:${PORT}/#src=${encodeURIComponent(source)}&lang=c`)
+    await page.reload({ waitUntil: 'networkidle0' })
+    await page.waitForFunction(
+      () => document.querySelector('.row .kind')?.textContent?.trim() === 'translation_unit',
+      { timeout: 20_000 },
+    )
+
+    const kinds = await page.$$eval('.row .kind', (nodes) =>
+      nodes.map((node) => node.textContent?.trim() ?? ''),
+    )
+    expect(kinds).toContain('function_definition')
+    expect(failedWasm()).toEqual([])
+  })
+
+  it('fetches and runs the C# grammar', async () => {
+    const source = 'class A {\n  string Greet(string name) { return name; }\n}\n'
+    await page.goto(`http://localhost:${PORT}/#src=${encodeURIComponent(source)}&lang=cs`)
+    await page.reload({ waitUntil: 'networkidle0' })
+    await page.waitForFunction(
+      () => document.querySelector('.row .kind')?.textContent?.trim() === 'compilation_unit',
+      { timeout: 20_000 },
+    )
+
+    const kinds = await page.$$eval('.row .kind', (nodes) =>
+      nodes.map((node) => node.textContent?.trim() ?? ''),
+    )
+    // A row the pane has not expanded is not in the DOM, so assert on a depth-1 kind.
+    expect(kinds).toContain('class_declaration')
+    expect(failedWasm()).toEqual([])
   })
 })

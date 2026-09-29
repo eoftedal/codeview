@@ -290,6 +290,9 @@ const languages = [
   { id: 'jsx', label: 'JSX' },
   { id: 'py', label: 'PY' },
   { id: 'java', label: 'JAVA' },
+  { id: 'c', label: 'C' },
+  { id: 'cpp', label: 'C++' },
+  { id: 'cs', label: 'C#' },
 ] as const
 
 /** The link carries the chat's brief and the agents' team when the reader wrote either — the
@@ -378,7 +381,7 @@ function onFilePicked(event: Event): void {
           class="hidden-input"
           type="file"
           multiple
-          accept=".ts,.tsx,.js,.jsx,.mjs,.cjs,.mts,.cts,.py,.pyi,.java"
+          accept=".ts,.tsx,.js,.jsx,.mjs,.cjs,.mts,.cts,.py,.pyi,.java,.c,.h,.cpp,.cc,.cxx,.hpp,.hh,.hxx,.cs,.csx"
           @change="onFilePicked"
         />
         <!-- No `accept`: browsers ignore it on a directory pick and hand over the whole tree, so

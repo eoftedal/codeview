@@ -174,14 +174,15 @@ provide(traceContextKey, {
 
     <div class="body" @mouseleave="emit('hover', null)">
       <TraceRow v-if="trace" :id="trace.root" :depth="0" />
-      <!-- Every language shipped today has a trace, so this branch is unreachable — and it stays,
-           because it is what a language added without one shows instead of an empty pane. -->
+      <!-- C and C++ are what this branch is for: `AnalysisBackend.trace` is optional precisely so a
+           language can decline to have one, and a pane can say so instead of looking broken. -->
       <p v-else-if="!supported" class="empty">
         This language has <strong>no backward trace</strong>.
         <br />
-        Following a value needs every place a name is written and every place a function is called,
-        and neither is available here. Guessing at it would quietly miss paths — worse than not
-        offering it at all.
+        Following a value backwards means following every way the language moves one. Where the main
+        route is something this tool cannot see through — a pointer, a macro — a walk would end
+        early and look complete, quietly missing the paths most worth finding. That is worse than
+        not offering it at all, so it is not offered.
         <br />
         The syntax tree and the definition highlight work as normal.
       </p>

@@ -3,9 +3,9 @@
  *
  * This file imports nothing from `typescript`, and that is the point: everything crossing it is
  * plain data — spans are offsets, kinds are strings, a file is a name and a text. The TypeScript
- * path (lib/analyzer.ts and friends) is one implementation, reached through lib/tsBackend.ts; the
- * Python one (lib/python/) is another. Neither knows the other exists, and nothing above this line
- * knows which answered.
+ * path (lib/analyzer.ts and friends) is one implementation, reached through lib/tsBackend.ts;
+ * lib/python/, lib/java/, lib/c/ and lib/csharp/ are the others. None knows the others exist, and
+ * nothing above this line knows which answered.
  *
  * Cross-language resolution deliberately does not exist. `useAnalysis` partitions the open tabs by
  * language and hands each backend only its own, so a `.ts` file's import never sees `db.py` and

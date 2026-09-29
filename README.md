@@ -2,9 +2,9 @@
 
 **Live demo:** https://eoftedal.github.io/codeview/
 
-Explore a TypeScript, JavaScript, Python or Java file as a syntax tree. Monaco on the left, the AST on
-the right, kept in sync both ways: move the cursor and the tree follows, click a node and
-the editor follows.
+Explore a TypeScript, JavaScript, Python, Java, C, C++ or C# file as a syntax tree. Monaco on the
+left, the AST on the right, kept in sync both ways: move the cursor and the tree follows, click a
+node and the editor follows.
 
 On top of that, whatever sits under the cursor gets its **definition** highlighted — the
 declaration a name actually resolves to, not the first thing with a matching name. Ask for a
@@ -39,8 +39,10 @@ word, and so is everything under a directory that holds no source worth reading 
 `venv`, and anything dotted, `.git` first among them. A folder you pick yourself is always
 walked, so dropping `dist` on purpose does open `dist`. Files arrive under their **paths**
 (`src/lib/db.ts`), which is what keeps two `index.ts` apart and what lets an import between
-them resolve; the picked folder's own name is dropped from the front, since every file
-shares it. At most 50 tabs stay open — a folder with more keeps the files nearest its root
+them resolve; the folder you picked is dropped from the front of each of them, since naming
+it again says nothing. Drop two folders at once and each loses its own — unless that would
+leave two files answering to one name, in which case every name keeps its folder, because a
+long name beats one file quietly replacing another. At most 50 tabs stay open — a folder with more keeps the files nearest its root
 and says how many it left out, which is the point at which to open a subfolder instead.
 
 **A folder replaces what is open**, rather than adding to it: a folder is a project, so the
@@ -100,7 +102,7 @@ key. Key names are case-insensitive, since these get typed by hand.
 | Parameter      | Effect                                                                                                             |
 | -------------- | ------------------------------------------------------------------------------------------------------------------ |
 | `src`          | the buffer — `z.`/`r.` payload, or literal source                                                                  |
-| `lang`         | `ts`, `tsx`, `js`, `jsx`, `py` or `java`                                                                           |
+| `lang`         | `ts`, `tsx`, `js`, `jsx`, `py`, `java`, `c`, `cpp` or `cs`                                                         |
 | `filename`     | names the tab; its extension picks the language when `lang` is absent. **Copy link** carries it along              |
 | `hideHeader`   | hides the title bar, language switcher and buttons, for embedding                                                  |
 | `systemprompt` | the chat's brief — `z.`/`r.` payload, or literal text. **Copy link** carries it only when you have rewritten it    |
@@ -108,8 +110,10 @@ key. Key names are case-insensitive, since these get typed by hand.
 
 Any of these describes what the link is about, so it opens with those files rather than the
 tabs the reader happened to leave open. Without them, the last session comes back whole;
-the seed buffer arrives as `example.ts` — or `example.py`, with its own sample, when the link asks
-for Python — because every tab needs a name. `systemprompt` and
+the seed buffer arrives as `example.ts` — or `example.py`, `example.java`, `example.c`,
+`example.cs` and so on, each with a sample of its own, when the link asks for that language —
+because every tab needs a name. The C sample is a **memory-safety** example rather than a taint one,
+since C has no trace to demonstrate. `systemprompt` and
 `agents` are the exceptions on both counts: neither says anything about which files are open, so
 they leave the reader's tabs alone, and both belong to the link rather than to the reader — they
 are not written to `localStorage`, so opening someone else's link cannot overwrite a brief or a
@@ -303,6 +307,87 @@ What Java support does **not** do: resolve a member on a receiver whose type is 
 separate overloads that share an arity; follow a supertype, an import or a static member outside the
 open tabs; or know anything about generics, annotations that generate code, or reflection.
 
+### C and C++
+
+C and C++ share one parser and one program, and that is not a shortcut. The grammar package ships no
+C grammar at all — it ships the C++ one, which is built as a **superset** of C's, so a plain `.c`
+file parses through it cleanly. Sharing the program is what a header needs: an `#include` only
+resolves if both tabs are in it. `.h` is read as C, which is what Monaco's own editor does; a C++
+header spelled `.h` gets the wrong badge and the right tree.
+
+Four rules read differently from the other languages, and each one is deliberate:
+
+- **A declarator nests around its name.** `char *argv[]` is an array of a pointer to a name, so the
+  name is at the bottom of that chain rather than on the declaration. It resolves either way; the
+  highlight lands on the whole declaration.
+- **A macro is a binding.** `#define MAX 16` is the closest thing C has to a constant, so clicking
+  `MAX` resolves to the `#define`. What is **not** modelled is expansion — a name a macro _produces_
+  exists nowhere in the tree and resolves to nothing.
+- **Both arms of an `#ifdef` are live.** Nothing here evaluates the condition, so a name defined in
+  either branch is bound. Refusing to resolve one would be a silent miss, which this tool rates
+  worse than an over-approximation.
+- **A namespace opens no scope.** A C++ file that wraps everything in one namespace would otherwise
+  have nothing visible from the translation unit, which is where a cross-file lookup starts.
+
+**Cross-file resolution has two routes, and both are C's own.** A quoted `#include "util.h"` is
+textual, so everything the header declares is genuinely in scope and the tab is searched exactly; an
+angle-bracket include never resolves, which is why `printf` correctly reads as external. Beyond
+that, C has no namespaces — a non-`static` file-scope name is one name in one global space — so a
+name is also looked for at the file scope of any open tab, which is the linker's rule rather than a
+guess. `static` is what that over-approximates: two tabs with a file-local function of the same name
+will answer with the first found.
+
+**There is no backward trace for C or C++, and the Trace tab says so.** This is a judgement, not
+unfinished work. The walk follows a value through assignments, returns and arguments; in C the
+flows that matter run through **pointers**, and `char *p = buf; gets(p);` is exactly the path a
+reviewer opened the file for. A walk with no aliasing is a stated limit in TypeScript, a corner in
+Java, and a hole where the feature should be in C. The preprocessor compounds it: a value passing
+through a macro dead-ends at a name with no declaration. A trace that quietly missed those would be
+worse than none, so none is offered. The syntax tree and the definition highlight work as normal.
+
+What C support does **not** do: expand macros, evaluate `#if`, resolve a member on a receiver whose
+type is not written down, separate overloads that share an arity, follow anything into a system
+header, or know about templates beyond binding their type parameters.
+
+### C#
+
+C# is the closest of the five to Java — a block is a scope, a class body is visible from its
+methods, declaration precedes use, overloads are separated by arity, and a receiver's type is
+written down, which is what lets `_repo.Load(id)` resolve into another tab. So what follows is only
+where it differs.
+
+- **A `using` names no type.** C# imports a whole namespace, where Java's `import com.example.Db`
+  names one class. Nothing in the file says which tab a type came from, so a type is looked for as a
+  top-level declaration in any open tab — C#'s namespace rule approximated, and the reason the
+  feature works on two pasted files at all. Only a `using X = Some.Name;` alias binds a name.
+- **A property is storage, not a method.** An auto-property has no body, so `w.Value` resolves to
+  the property itself. An expression-bodied property (`=> _v`) and a `{ get => _v; }` accessor both
+  read as the value they hand back.
+- **A primary constructor's parameters are in scope for the whole body.** On a positional `record`
+  they are also its public properties; on a `class` they are parameters the body may capture.
+- **An attribute is part of the declaration node**, so a signature highlight starts past it — an
+  annotated action highlights `public string Get(string id)`, not `[HttpGet("{id}")]`.
+
+**The backward trace works**, and follows a wrapper object the way the Java one does: reading
+`id.Value` asks about one member of _this_ object, so the walk follows the receiver and consumes the
+member at the construction that actually made it. Expanding the member instead would reach every
+`new ProductId(…)` in the open tabs, including ones the value never came through — a path that
+cannot happen, which is worse than a noisy one. C# fills a member in four ways and all four are
+followed: a positional record by position, a primary constructor by position, an ordinary
+constructor through `this.X = p` (in a block or behind an `=>`), and an object initializer,
+`new W { Value = v }`. Where the type declares a constructor the value passes through, it gets a row
+of its own — that is where a value is validated or rejected, and a trace that stepped over it would
+read as though the value arrived untouched.
+
+**An interpolated string is not a literal.** `$"… {id.Value} …"` is where a query gets built, so
+every `{…}` becomes an operand — the same rule Python's f-strings get, for the same reason.
+
+What C# support does **not** do: follow a value _out_ through an `out` or `ref` parameter, so
+`int.TryParse(s, out var n)` leaves `n` reading as an entry point; see both halves of a **partial
+class** at once; resolve an extension method whose name is declared more than once; separate
+overloads that share an arity; or follow a LINQ or callback hop, which is the same unreachable the
+other languages declare.
+
 ## Tracing a value back to its sources
 
 The definition question stops after one step. **Trace** — the button in the right pane, `Alt+T` in
@@ -441,8 +526,8 @@ leaves no row in the file that declares it, and a model asked to judge the path 
 what does `value()` return? — cannot answer without that source. So the file the type is declared in
 is part of the chat's scope whether or not a row lands there.
 
-TypeScript, Python and Java all do this. It is the same rule in each, and the traces read the
-same.
+TypeScript, Python, Java and C# all do this. It is the same rule in each, and the traces read the
+same. C and C++ have no trace at all — see [C and C++](#c-and-c) for why.
 
 ### Taking a trace to a model
 

@@ -5,6 +5,8 @@ import type { AnalysisBackend, BackendFile } from '../lib/backend'
 import type { DefinitionResult } from '../lib/definitions'
 import type { CodeFile } from '../lib/files'
 import type { FlowTrace } from '../lib/flow'
+import { createCBackend } from '../lib/c/backend'
+import { createCSharpBackend } from '../lib/csharp/backend'
 import { createJavaBackend } from '../lib/java/backend'
 import { createPythonBackend } from '../lib/python/backend'
 import { createTsBackend } from '../lib/tsBackend'
@@ -37,12 +39,18 @@ export interface Analysis {
   trace: (offset: number) => FlowTrace | null
 }
 
-/** Which backend answers for a language. The TypeScript family shares one `ts.Program`. */
-type Family = 'ts' | 'py' | 'java'
+/**
+ * Which backend answers for a language. Two families hold more than one: the TypeScript family
+ * shares one `ts.Program`, and C and C++ share one grammar — tree-sitter-cpp is a superset of C's,
+ * so one parser serves both and a `.h` included by a `.cpp` stays in the same program.
+ */
+type Family = 'ts' | 'py' | 'java' | 'c' | 'cs'
 
 function familyOf(language: Language): Family {
   if (language === 'py') return 'py'
   if (language === 'java') return 'java'
+  if (language === 'c' || language === 'cpp') return 'c'
+  if (language === 'cs') return 'cs'
   return 'ts'
 }
 
@@ -82,7 +90,11 @@ export function useAnalysis(
         ? createPythonBackend()
         : family === 'java'
           ? createJavaBackend()
-          : createTsBackend((name) => languages.get(name) ?? 'ts')
+          : family === 'c'
+            ? createCBackend()
+            : family === 'cs'
+              ? createCSharpBackend()
+              : createTsBackend((name) => languages.get(name) ?? 'ts')
     backends.set(family, created)
     return created
   }

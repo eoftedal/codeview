@@ -53,7 +53,7 @@ describe('the hunting briefs', () => {
   })
 
   it('names its own class in a one-line opening', () => {
-    // The opening rides every hunt, so it is where a saved character counts sixteen times over.
+    // The opening rides every hunt, so it is where a saved character counts seventeen times over.
     // One line is room for a role and a class, and no room for a lesson in what untrusted data is.
     for (const [name, text] of entries) {
       const first = text.slice(0, text.indexOf('\n\n'))

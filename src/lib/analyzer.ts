@@ -1,16 +1,19 @@
 import ts from 'typescript'
 
-export type Language = 'ts' | 'tsx' | 'js' | 'jsx' | 'py' | 'java'
+export type Language = 'ts' | 'tsx' | 'js' | 'jsx' | 'py' | 'java' | 'c' | 'cpp' | 'cs'
 
 const SCRIPT_KIND: Record<Language, ts.ScriptKind> = {
   ts: ts.ScriptKind.TS,
   tsx: ts.ScriptKind.TSX,
   js: ts.ScriptKind.JS,
   jsx: ts.ScriptKind.JSX,
-  // Never reached: useAnalysis hands Python files to their own backend, and this program is only
-  // ever given the TypeScript family. The key exists because the union demands it.
+  // Never reached: useAnalysis hands every other language to its own backend, and this program is
+  // only ever given the TypeScript family. The keys exist because the union demands them.
   py: ts.ScriptKind.Unknown,
   java: ts.ScriptKind.Unknown,
+  c: ts.ScriptKind.Unknown,
+  cpp: ts.ScriptKind.Unknown,
+  cs: ts.ScriptKind.Unknown,
 }
 
 /** One open file, as the analyzer sees it. */

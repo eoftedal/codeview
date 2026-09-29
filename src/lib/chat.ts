@@ -652,6 +652,9 @@ const FENCE: Record<Language, string> = {
   jsx: 'jsx',
   py: 'python',
   java: 'java',
+  c: 'c',
+  cpp: 'cpp',
+  cs: 'csharp',
 }
 
 /**

@@ -17,6 +17,18 @@ const EXTENSIONS: Record<string, Language> = {
   py: 'py',
   pyi: 'py',
   java: 'java',
+  // `.h` goes to C, as Monaco's own contribution does. A C++ header spelled `.h` is the one
+  // case that guesses wrong, and the C++ grammar parses both — so the cost is a badge, not a tree.
+  c: 'c',
+  h: 'c',
+  cpp: 'cpp',
+  cc: 'cpp',
+  cxx: 'cpp',
+  hpp: 'cpp',
+  hh: 'cpp',
+  hxx: 'cpp',
+  cs: 'cs',
+  csx: 'cs',
 }
 
 /** What a language calls itself when we are the ones writing the name. */
@@ -27,6 +39,9 @@ const CANONICAL: Record<Language, string> = {
   jsx: 'jsx',
   py: 'py',
   java: 'java',
+  c: 'c',
+  cpp: 'cpp',
+  cs: 'cs',
 }
 
 export interface CodeFile {
@@ -37,7 +52,17 @@ export interface CodeFile {
   language: Language
 }
 
-export const LANGUAGES: readonly Language[] = ['ts', 'tsx', 'js', 'jsx', 'py', 'java']
+export const LANGUAGES: readonly Language[] = [
+  'ts',
+  'tsx',
+  'js',
+  'jsx',
+  'py',
+  'java',
+  'c',
+  'cpp',
+  'cs',
+]
 
 /**
  * A file the reader picked or dropped, under the name it will take on the strip. For a folder that
@@ -102,27 +127,42 @@ function byPath(a: string, b: string): number {
 }
 
 /**
- * Drop the picked folder's own name from every path: it is the same segment on all of them, so it
- * says nothing, and it makes every tab longer for nothing. Relative imports are untouched — every
- * path shifts by the same segment. Nothing is dropped when they do not all share one, which is
- * what a drop of two folders, or of a folder and a loose file, looks like.
+ * Drop the folder each path starts in. That segment is the folder the reader picked, so it says
+ * nothing they do not already know, and it makes every tab longer for nothing — while the segments
+ * below it are what a tab name is _for_ (`lib/db.ts` resolves). Relative imports survive because
+ * every path in a folder shifts by exactly one segment, so what they say about each other is
+ * unchanged.
+ *
+ * It is done **per entry** rather than only for a root they all share, because "the root folder name
+ * should not be in the name" holds just as much for a drop of two folders, or of a folder beside a
+ * loose file, as it does for the ordinary one-folder open. A name with no folder in it — the loose
+ * file itself — is already what it should be and is left alone.
+ *
+ * **Unless two of them would then answer to one name**, which is the one thing worse than a long
+ * one: `openFiles` refreshes a tab whose name matches, so `a/src/db.ts` and `b/src/db.ts` both
+ * becoming `src/db.ts` would have the second silently overwrite the first. Where that happens the
+ * roots are the only thing telling them apart, so nothing is stripped at all and every name keeps
+ * its own.
  */
-function stripRoot<T extends { name: string }>(picked: readonly T[]): T[] {
-  const root = picked[0]?.name.split('/')[0]
-  if (!root || !picked.every((entry) => entry.name.startsWith(`${root}/`))) return [...picked]
-  return picked.map((entry) => ({ ...entry, name: entry.name.slice(root.length + 1) }))
+function stripRoots<T extends { name: string }>(picked: readonly T[]): T[] {
+  const stripped = picked.map((entry) => {
+    const cut = entry.name.indexOf('/')
+    return cut < 0 ? entry : { ...entry, name: entry.name.slice(cut + 1) }
+  })
+  const names = new Set(stripped.map((entry) => entry.name))
+  return names.size === stripped.length ? stripped : [...picked]
 }
 
 /**
  * What a pick or a drop actually offers up, **in the order it offered it**: nothing from a directory
- * we do not walk, and the picked folder's own segment gone. The order is left alone on purpose — it
+ * we do not walk, and each path's own leading folder gone. The order is left alone on purpose — it
  * is the order the tabs will appear in, and files picked by hand arrive in the order the reader sees
  * them in. Which files are *readable* is not decided here either: the caller reports the ones it
  * refuses, and needs each one's own reason.
  */
 export function arrangeForOpen<T extends { name: string }>(picked: readonly T[]): T[] {
   const kept = picked.filter((entry) => !isIgnoredPath(entry.name))
-  return stripRoot(kept)
+  return stripRoots(kept)
 }
 
 /**

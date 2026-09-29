@@ -25,6 +25,9 @@ const BADGE: Record<CodeFile['language'], string> = {
   jsx: 'JSX',
   py: 'PY',
   java: 'JAVA',
+  c: 'C',
+  cpp: 'C++',
+  cs: 'C#',
 }
 
 const query = ref('')
@@ -200,6 +203,16 @@ onMounted(() => void nextTick(() => input.value?.focus()))
 
 .lang-java {
   color: var(--flow);
+}
+
+/* C and C++ share a grammar and a backend, so they share a colour. */
+.lang-c,
+.lang-cpp {
+  color: var(--cyan);
+}
+
+.lang-cs {
+  color: var(--teal);
 }
 
 .lang-js,

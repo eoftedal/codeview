@@ -15,7 +15,7 @@
  * new key in a link, and a hunter edited afterwards is simply a prompt of the reader's own.
  *
  * `FOCUS` holds the half that differs. The opening and closing are shared, and since they ride
- * every hunt they are where a saved character counts sixteen times over: the opening is one line
+ * every hunt they are where a saved character counts seventeen times over: the opening is one line
  * and carries no lesson in what untrusted data is — a flow hunter's own "what removes the taint"
  * is the only version a single-issue hunt needs, and a checklist hunt has no use for one at all.
  * The closing comes in two shapes, chosen per class. A `flow` hunt reports a path and is *shown*
@@ -73,7 +73,7 @@ const FOCUS: Record<string, { shape: Shape; text: string }> = {
     shape: 'flow',
     text: `A finding is untrusted data reaching a database call as *query text* rather than as a bound value.
 
-Look at every query built by concatenation, a template literal, \`+\`, \`%\`, \`format\` or \`fmt.Sprintf\` and then passed to \`query\`, \`execute\`, \`exec\`, \`raw\`, \`$queryRawUnsafe\`, \`knex.raw\`, \`sequelize.query\`, \`cursor.execute\`, \`RawSQL\`/\`.extra\`/\`.raw()\`, SQLAlchemy \`text()\` inside a \`filter\`/\`execute\`, \`createQueryBuilder().where(...)\`, a JDBC \`Statement\`, or a stored-procedure call assembled by hand. In NoSQL, look for a request object handed to a query unchecked — \`find(req.body)\`, where \`{"$ne": null}\` or \`$gt\` arrives as an operator — and for \`$where\`, \`mapReduce\`, \`$expr\` and dot-notation keys from input.
+Look at every query built by concatenation, a template literal, \`+\`, \`%\`, \`format\` or \`fmt.Sprintf\` and then passed to \`query\`, \`execute\`, \`exec\`, \`raw\`, \`$queryRawUnsafe\`, \`knex.raw\`, \`sequelize.query\`, \`cursor.execute\`, \`RawSQL\`/\`.extra\`/\`.raw()\`, SQLAlchemy \`text()\` inside a \`filter\`/\`execute\`, \`createQueryBuilder().where(...)\`, a JDBC \`Statement\`, EF Core's \`FromSqlRaw\`/\`ExecuteSqlRaw\` or a Dapper call given an interpolated string, a \`SqlCommand\` built by concatenation, or a stored-procedure call assembled by hand. In NoSQL, look for a request object handed to a query unchecked — \`find(req.body)\`, where \`{"$ne": null}\` or \`$gt\` arrives as an operator — and for \`$where\`, \`mapReduce\`, \`$expr\` and dot-notation keys from input.
 
 What removes the taint: placeholders with bound parameters (\`?\`, \`$1\`, \`:name\`), an ORM call that passes values as values, or an allowlist. What does not: hand-written quoting or escaping, a \`LIKE\` escape, stripping quotes or semicolons, a blocklist of keywords.
 
@@ -244,6 +244,19 @@ Sessions: a cookie without \`HttpOnly\`, \`Secure\` or \`SameSite\`; a session i
 Flows: password-reset or invitation tokens that are guessable (\`Math.random\`, a timestamp, a counter), reusable, or without expiry; login, OTP and reset endpoints with no rate limit or lockout; account enumeration through different errors or timings; a second factor checked on one path but not another; a token compared with \`==\` rather than in constant time; identity taken from a header such as \`X-User-Id\` or \`X-Forwarded-For\` that a proxy may not strip.
 
 For each, say what it lets an attacker do, not only which rule it breaks.`,
+  },
+
+  'Memory safety': {
+    shape: 'flow',
+    text: `A finding is a read or write that can leave the object it was meant for, or touch memory whose lifetime has ended.
+
+Sinks: \`memcpy\`, \`memmove\`, \`strcpy\`, \`strcat\`, \`sprintf\`, \`gets\`, \`scanf("%s")\`, \`alloca\`, and every indexed write into a fixed array. Follow the **length or index** back as carefully as the data: a size taken from a header, a \`Content-Length\`, a file field or \`strlen\` of input is the usual carrier, and the bug is nearly always that it was checked against the wrong buffer, or not at all.
+
+What removes the taint: a bound checked against \`sizeof\` the *destination*, a length clamped before the copy, or a container that carries its own size. What does not: a check against the source's length, a check after the write, a signed comparison that a negative or wrapped value passes, or \`strncpy\` with the source's length.
+
+Also report, with the same path: **use after free** and **double free** — a pointer read or freed after a \`free\`/\`delete\` on any path, especially an error path; a pointer returned from a function that owns stack memory; a \`realloc\` whose old pointer is still held. And **off-by-one**: \`<=\` on a length, no room reserved for the terminating NUL, or \`strncpy\` leaving a string unterminated.
+
+Traps: an integer overflow in the size computation (\`count * size\`, or a \`size_t\` that a negative int became) makes an allocation smaller than the write that follows, so check the arithmetic and not only the comparison. A path that cannot be reached with a long input is not a finding: say so rather than reporting it.`,
   },
 
   'Secrets & weak cryptography': {
